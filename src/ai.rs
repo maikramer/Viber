@@ -1,5 +1,4 @@
-//! Enemy AI — deterministic wander + player chase over the carved terrain,
-//! plus the respawn queue for dynamic spawner groups.
+//! Enemy AI — deterministic wander + player chase over the carved terrain.
 //!
 //! Creatures carry [`EnemyCreature`] (authored stats + current state); the
 //! patrol bookkeeping lives in [`WanderState`], auto-inserted by [`enemy_ai`]
@@ -8,22 +7,17 @@
 //! and facing reuses the player's
 //! +Z-forward convention via [`crate::player::facing_rotation`].
 //!
-//! Deaths enter as [`crate::corpse::Corpse`] (the single source is
-//! `skills::kill_creature`); [`queue_creature_respawns`] watches FSM corpses
-//! and pushes [`RespawnEntry`] items that [`respawn_spawners`] brings back
-//! after [`RESPAWN_DELAY_SECS`] at the creature's home. Scripted creatures
-//! are deliberately NOT respawned here — they belong to their spawners and
-//! Luau scripts.
+//! Respawn é regra do JOGO: quem quiser trazer uma criatura de volta spawna-a
+//! com `viber.spawn_prototype` ou pelo spawner. A engine não mantém fila de
+//! respawn nem política de distância ao player.
 //!
 //! Wiring: `app.add_plugins(crate::ai::AiPlugin);` (see [`AiPlugin`]).
 
 #[cfg(test)]
 use std::sync::Arc;
 
-use bevy::gltf::Gltf;
 use bevy::math::Vec3;
 use bevy::prelude::*;
-use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use crate::profiler::{Group, timed};
 use crate::terrain::runtime::TerrainRuntime;
@@ -38,14 +32,6 @@ pub const WANDER_RETARGET_SECS: f32 = 4.0;
 pub const WANDER_RADIUS: f32 = 8.0;
 /// "Arrived" distance for a patrol target (triggers an early retarget).
 pub const WANDER_ARRIVE_DIST: f32 = 0.5;
-/// Delay between a creature's death and its respawn (s) — janela de design
-/// ~90-120 s para as pools dinâmicas não secarem (bounties repetíveis).
-pub const RESPAWN_DELAY_SECS: f32 = 100.0;
-/// R2-G6: um respawn que nasceria a menos distância do player é adiado
-/// (camping = nascer a 0 m com chase instantâneo, sentença sem combate).
-pub const RESPAWN_PLAYER_CLEARANCE_M: f32 = 3.5;
-/// Re-agendamento de um respawn adiado por camping (s).
-pub const RESPAWN_CAMPING_RETRY_SECS: f32 = 5.0;
 
 /// Below this planar speed (m/s) a character counts as standing still, and an
 /// explicit look-at (`viber.face_player`) is allowed to own the facing.
@@ -277,37 +263,6 @@ pub fn clamp_to_world(pos: Vec3, limit: f32) -> Vec3 {
     }
 }
 
-/// One pending creature respawn.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RespawnEntry {
-    /// World position to respawn at.
-    pub position: Vec3,
-    /// Template of the originating spawner group (kept for future scene picks).
-    pub template_index: usize,
-    /// Identifier of the originating spawner group.
-    pub group_id: u64,
-    /// `Time.elapsed_secs()` at which the creature comes back.
-    pub respawn_at: f32,
-    /// Cena do modelo original (mesmo tipo da criatura morta) — `None` nasce
-    /// com o placeholder esférico do [`respawn_spawners`].
-    pub scene: Option<Handle<WorldAsset>>,
-    /// glTF original para religar os clips de animação (`AnimatedScene`) —
-    /// sem isto o respawnado patrulhava em bind pose.
-    pub animated: Option<Handle<Gltf>>,
-}
-
-/// Creatures waiting to come back. [`queue_creature_respawns`] fills it from
-/// FSM corpses; [`respawn_spawners`] drains it.
-#[derive(Debug, Default, Resource)]
-pub struct RespawnQueue(pub Vec<RespawnEntry>);
-
-/// Drain the entries whose time has come (pure split for testability).
-pub fn split_due(queue: &mut Vec<RespawnEntry>, now: f32) -> Vec<RespawnEntry> {
-    let (due, pending): (Vec<_>, Vec<_>) = queue.drain(..).partition(|e| now >= e.respawn_at);
-    *queue = pending;
-    due
-}
-
 /// Criaturas sem script: visão, audição e a FSM Alert/Chase/Search.
 /// Sem estímulo ficam no sítio (não há perseguição por distância plana).
 pub fn enemy_ai(world: &mut World) {
@@ -448,144 +403,12 @@ pub fn ensure_fsm_vitals(
     }
 }
 
-/// Agenda o respawn das criaturas da FSM Rust mortas: um `Corpse` numa
-/// entidade com [`EnemyCreature`] (sem script Luau — as scriptadas são
-/// geridas pelos seus spawners/scripts, design respeitado) vira uma entrada
-/// na [`RespawnQueue`] na HOME da criatura, [`RESPAWN_DELAY_SECS`] depois,
-/// com a cena/glTF originais para renascer do mesmo tipo.
-#[allow(clippy::type_complexity)]
-pub fn queue_creature_respawns(
-    mut queue: ResMut<RespawnQueue>,
-    time: Res<Time>,
-    terrain: Option<Res<TerrainRuntime>>,
-    dead: Query<
-        (
-            &EnemyCreature,
-            &Transform,
-            Option<&WorldAssetRoot>,
-            Option<&crate::animation::AnimatedScene>,
-        ),
-        (
-            Added<crate::corpse::Corpse>,
-            Without<crate::luau::LuaScriptRef>,
-        ),
-    >,
-) {
-    for (enemy, transform, scene, animated) in &dead {
-        // Respawn na home (latchada no 1.º tick da IA); o Y assenta no piso
-        // SOB a altura atual (surface_below) — um respawn sob um overhang não
-        // renasce no topo do mundo.
-        let home = enemy
-            .home
-            .unwrap_or(Vec2::new(transform.translation.x, transform.translation.z));
-        let y = terrain
-            .as_ref()
-            .map(|t| {
-                t.surface_below(
-                    home.x,
-                    home.y,
-                    transform.translation.y + crate::player::GROUND_PROBE,
-                )
-                .unwrap_or_else(|| t.sample_mesh_surface(home.x, home.y))
-            })
-            .unwrap_or(transform.translation.y);
-        queue.0.push(RespawnEntry {
-            position: Vec3::new(home.x, y, home.y),
-            template_index: 0,
-            group_id: 0,
-            respawn_at: time.elapsed_secs() + RESPAWN_DELAY_SECS,
-            scene: scene.map(|root| root.0.clone()),
-            animated: animated.map(|a| a.gltf.clone()),
-        });
-    }
-}
-
-/// Spawn due [`RespawnEntry`] items back into the world — com a cena/glTF
-/// originais quando existem (respawn do MESMO tipo) ou, em alternativa, um
-/// placeholder visual (esfera vermelha).
-///
-/// Um vencido cujo ponto de nascença esteja a menos de
-/// [`RESPAWN_PLAYER_CLEARANCE_M`] do player é RE-ENFILEIRADO
-/// ([`RESPAWN_CAMPING_RETRY_SECS`] depois, mesma entrada — cena/glTF e
-/// estado intactos): camping no ponto de respawn não vira inimigo a 0 m.
-///
-/// Assets are `Option` on purpose: Bevy 0.19 panics on failed param
-/// validation, and headless worlds carry no render asset stores — there the
-/// creature respawns as a logic entity without the placeholder visual.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-pub fn respawn_spawners(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut queue: ResMut<RespawnQueue>,
-    players: Query<&GlobalTransform, With<crate::player::Player>>,
-    meshes: Option<ResMut<Assets<Mesh>>>,
-    materials: Option<ResMut<Assets<StandardMaterial>>>,
-) {
-    if queue.0.is_empty() {
-        return;
-    }
-    let (mut meshes, mut materials) = (meshes, materials);
-    let now = time.elapsed_secs();
-    let player_xz = players
-        .iter()
-        .next()
-        .map(|gt| Vec2::new(gt.translation().x, gt.translation().z));
-    for entry in split_due(&mut queue.0, now) {
-        // R2-G6: player encostado ao ponto de nascença — adia (a entrada
-        // volta à fila inteira, sem perder cena/glTF nem estado).
-        let too_close = player_xz.is_some_and(|p| {
-            Vec2::new(entry.position.x, entry.position.z).distance(p) < RESPAWN_PLAYER_CLEARANCE_M
-        });
-        if too_close {
-            let mut deferred = entry;
-            deferred.respawn_at = now + RESPAWN_CAMPING_RETRY_SECS;
-            queue.0.push(deferred);
-            continue;
-        }
-        let mut entity = commands.spawn((
-            Name::new(format!(
-                "enemy g{}#{}",
-                entry.group_id, entry.template_index
-            )),
-            Transform::from_translation(entry.position),
-            Visibility::Inherited,
-            EnemyCreature::default(),
-        ));
-        if let Some(scene) = entry.scene {
-            entity.insert(WorldAssetRoot(scene));
-            if let Some(gltf) = entry.animated {
-                entity.insert(crate::animation::AnimatedScene { gltf });
-            }
-        } else if let (Some(meshes), Some(materials)) = (&mut meshes, &mut materials) {
-            entity.insert((
-                Mesh3d(meshes.add(Mesh::from(bevy::shape::Sphere::new(0.5)))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.85, 0.2, 0.2),
-                    ..StandardMaterial::default()
-                })),
-            ));
-        }
-    }
-}
-
-/// Registers [`RespawnQueue`] plus the [`enemy_ai`] / [`ensure_fsm_vitals`] /
-/// [`queue_creature_respawns`] / [`respawn_spawners`] update systems. One
-/// line on top of `main`'s plugin stack.
 pub struct AiPlugin;
 
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RespawnQueue>()
-            .add_message::<crate::ambient::SfxEvent>()
-            .add_systems(
-                Update,
-                (
-                    timed(Group::Ai, enemy_ai),
-                    ensure_fsm_vitals,
-                    queue_creature_respawns,
-                    respawn_spawners,
-                ),
-            )
+        app.add_message::<crate::ambient::SfxEvent>()
+            .add_systems(Update, (timed(Group::Ai, enemy_ai), ensure_fsm_vitals))
             // O consumidor único do [`AiLocomotion`] corre DEPOIS de todos os
             // produtores do `Update` (a FSM aqui, a fila de comandos Luau no
             // `LuauPlugin`) e ANTES da propagação de transforms, para o passo
@@ -986,35 +809,6 @@ mod tests {
         assert_ne!(enemy_seed(3, 2), enemy_seed(3, 3));
     }
 
-    #[test]
-    fn test_split_due_drains_only_due_entries() {
-        let mut queue = vec![
-            RespawnEntry {
-                position: Vec3::ONE,
-                template_index: 0,
-                group_id: 1,
-                respawn_at: 0.0,
-                scene: None,
-                animated: None,
-            },
-            RespawnEntry {
-                position: Vec3::ZERO,
-                template_index: 2,
-                group_id: 1,
-                respawn_at: 9.5,
-                scene: None,
-                animated: None,
-            },
-        ];
-        let due = split_due(&mut queue, 4.0);
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].group_id, 1);
-        assert_eq!(due[0].respawn_at, 0.0);
-        assert_eq!(queue.len(), 1, "not-yet-due entry stays queued");
-        assert_eq!(queue[0].respawn_at, 9.5);
-        assert!(split_due(&mut Vec::new(), 100.0).is_empty(), "empty queue");
-    }
-
     /// Headless end-to-end: a procedural carved world + [`AiPlugin`], one
     /// wanderer and one player inside the aggro radius — the enemy must
     /// engage the chase, close distance and sit on the terrain height.
@@ -1194,231 +988,4 @@ mod tests {
         );
     }
 
-    /// Respawn queue drains due entries into real entities with the
-    /// placeholder visual.
-    #[test]
-    fn test_respawn_spawners_revives_due_entries_headless() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(AiPlugin);
-        app.insert_resource(RespawnQueue(vec![RespawnEntry {
-            position: Vec3::new(3.0, 1.0, -4.0),
-            template_index: 1,
-            group_id: 42,
-            respawn_at: 0.0, // due on the first update
-            scene: None,
-            animated: None,
-        }]));
-
-        app.update();
-        app.update(); // commands apply on the flush after the system
-
-        assert!(
-            app.world()
-                .get_resource::<RespawnQueue>()
-                .expect("queue kept")
-                .0
-                .is_empty(),
-            "due entry drained"
-        );
-        let world = app.world_mut();
-        let mut enemies = world.query::<(&EnemyCreature, &Transform, &Name)>();
-        let (enemy, transform, name) = enemies
-            .iter(world)
-            .next()
-            .expect("respawned creature exists");
-        assert_eq!(enemy.state, EnemyState::Wander);
-        assert_eq!(transform.translation, Vec3::new(3.0, 1.0, -4.0));
-        assert!(name.to_string().contains("g42"), "group id in the name");
-    }
-
-    /// R2-G6: um vencido cujo ponto de respawn está a <3,5 m do player é
-    /// RE-ENFILEIRADO (+5 s) em vez de nascer em cima do herói — e a entrada
-    /// adiada mantém cena/glTF/posição (nada se perde).
-    #[test]
-    fn test_respawn_deferred_when_player_camps_the_point_headless() {
-        let mut app = App::new();
-        // TimePlugin off: o relógio é avançado à mão (mesmo padrão dos
-        // testes acima) para o re-agendamento de +5 s ser determinístico.
-        app.add_plugins(MinimalPlugins.build().disable::<bevy::time::TimePlugin>())
-            .add_plugins(AiPlugin);
-        app.init_resource::<Time>();
-        // Player a 1 m do ponto de respawn (GlobalTransform direto: o teste
-        // não monta o TransformPlugin — a query só lê a global).
-        app.world_mut().spawn((
-            crate::player::Player::default(),
-            Transform::from_xyz(0.0, 0.0, 0.0),
-            GlobalTransform::from(Transform::from_xyz(1.0, 0.0, 0.0)),
-        ));
-        let original = RespawnEntry {
-            position: Vec3::new(0.0, 1.0, 0.0),
-            template_index: 1,
-            group_id: 7,
-            respawn_at: 0.0, // due on the first update
-            scene: None,
-            animated: None,
-        };
-        app.insert_resource(RespawnQueue(vec![original.clone()]));
-
-        app.update();
-        app.update(); // flush dos commands
-
-        // NADA nasceu e a entrada voltou à fila com +5 s.
-        let world = app.world_mut();
-        assert!(
-            world.query::<&EnemyCreature>().iter(world).next().is_none(),
-            "camping: nenhum inimigo nasce a 1 m do player"
-        );
-        let queue = &world.resource::<RespawnQueue>().0;
-        assert_eq!(queue.len(), 1, "entrada re-enfileirada, não descartada");
-        let mut expected = original;
-        expected.respawn_at += RESPAWN_CAMPING_RETRY_SECS;
-        assert_eq!(queue[0], expected, "mesma entrada com respawn_at +5 s");
-
-        // Player sai de perto → o vencido nasce na passada seguinte.
-        let player = world
-            .query::<(bevy::ecs::entity::Entity, &crate::player::Player)>()
-            .iter(world)
-            .next()
-            .map(|(e, _)| e)
-            .expect("player existe");
-        world.entity_mut(player).despawn();
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(
-                RESPAWN_CAMPING_RETRY_SECS + 0.1,
-            ));
-        app.update();
-        app.update(); // flush
-
-        assert!(
-            app.world()
-                .get_resource::<RespawnQueue>()
-                .expect("queue kept")
-                .0
-                .is_empty(),
-            "sem camping: entrada drena"
-        );
-        let world = app.world_mut();
-        let mut enemies = world.query::<(&EnemyCreature, &Transform)>();
-        let (_, transform) = enemies
-            .iter(world)
-            .next()
-            .expect("respawned creature exists");
-        assert_eq!(transform.translation, Vec3::new(0.0, 1.0, 0.0));
-    }
-
-    /// A morte de uma criatura da FSM Rust (EnemyCreature + Corpse, sem
-    /// script) agenda o respawn na HOME, [`RESPAWN_DELAY_SECS`] depois; a
-    /// cena/glTF originais viajam na entrada (respawn do mesmo tipo) e o
-    /// drain insere `WorldAssetRoot` em vez do placeholder.
-    #[test]
-    fn test_fsm_death_queues_home_respawn_headless() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins.build().disable::<bevy::time::TimePlugin>())
-            .add_plugins(AiPlugin);
-        app.init_resource::<Time>();
-        let home = Vec2::new(11.0, -5.0);
-        let entity = app
-            .world_mut()
-            .spawn((
-                EnemyCreature {
-                    home: Some(home),
-                    ..EnemyCreature::default()
-                },
-                Transform::from_xyz(15.0, 2.0, -9.0), // morreu longe da home
-            ))
-            .id();
-        // Sem Health prévia: o ensure_fsm_vitals trata disso.
-        assert!(app.world().get::<crate::vitals::Health>(entity).is_none());
-
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(250));
-        app.update(); // ensure_fsm_vitals insere Health
-        let now = app.world().resource::<Time>().elapsed_secs();
-        assert!(
-            app.world().get::<crate::vitals::Health>(entity).is_some(),
-            "FSM creature nasce com vitals (strike/bomba podem magoá-la)"
-        );
-
-        app.world_mut()
-            .entity_mut(entity)
-            .insert(crate::corpse::Corpse { timer: 1.4 });
-        app.update(); // Added<Corpse> → queue
-
-        let queue = &app.world().resource::<RespawnQueue>().0;
-        assert_eq!(queue.len(), 1, "morte da FSM agenda exatamente 1 respawn");
-        let entry = &queue[0];
-        assert_eq!(
-            Vec2::new(entry.position.x, entry.position.z),
-            home,
-            "respawn na home, não onde morreu"
-        );
-        assert!(
-            (entry.respawn_at - (now + RESPAWN_DELAY_SECS)).abs() < 0.3,
-            "respawn_at ≈ now + {}: {} vs {}",
-            RESPAWN_DELAY_SECS,
-            entry.respawn_at,
-            now
-        );
-        assert!(
-            entry.scene.is_none() && entry.animated.is_none(),
-            "sem cena → placeholder"
-        );
-
-        // Avança o relógio para lá do delay e drena a fila.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(RESPAWN_DELAY_SECS + 1.0));
-        app.update();
-        app.update(); // flush dos commands
-
-        assert!(
-            app.world()
-                .get_resource::<RespawnQueue>()
-                .expect("queue kept")
-                .0
-                .is_empty(),
-            "entrada drenada no delay"
-        );
-        let world = app.world_mut();
-        let mut enemies =
-            world.query::<(&EnemyCreature, &Transform, Option<&crate::corpse::Corpse>)>();
-        let mut respawned = None;
-        let mut fsm_total = 0;
-        for (_enemy, transform, corpse) in enemies.iter(world) {
-            if corpse.is_none() {
-                respawned = Some(*transform);
-            }
-            fsm_total += 1;
-        }
-        assert_eq!(fsm_total, 2, "cadáver + respawnado");
-        let transform = respawned.expect("criatura respawnada existe");
-        assert_eq!(
-            Vec2::new(transform.translation.x, transform.translation.z),
-            home,
-            "respawnada na posição da home"
-        );
-    }
-
-    /// Criaturas com script Luau (sem `EnemyCreature`) NÃO respawnam por
-    /// aqui — são geridas pelos seus spawners/scripts (design).
-    #[test]
-    fn test_scripted_corpses_do_not_respawn() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(AiPlugin);
-        app.world_mut().spawn((
-            Transform::default(),
-            crate::luau::LuaScriptRef {
-                path: "enemies/wolf.lua".into(),
-            },
-            crate::corpse::Corpse { timer: 1.4 },
-        ));
-        app.update();
-        app.update();
-        assert!(
-            app.world().resource::<RespawnQueue>().0.is_empty(),
-            "scripted corpse não entra na fila da FSM"
-        );
-    }
 }

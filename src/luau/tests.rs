@@ -21,7 +21,6 @@ fn test_app(host: LuaScriptHost) -> bevy::app::App {
     app.init_resource::<ButtonInput<KeyCode>>();
     app.add_message::<ScriptToast>();
     app.add_message::<crate::ambient::SfxEvent>();
-    app.add_message::<crate::feedback::PlayerHurt>();
     app.insert_resource(host);
     app.add_systems(Update, (luau_on_add, luau_update, luau_on_remove).chain());
     app
@@ -61,7 +60,7 @@ fn test_set_pose_writes_local_transform() {
     assert!((transform.translation.z - 5.0).abs() < 1e-4);
     assert!((transform.scale.x - 2.0).abs() < 1e-4, "escala mantém-se");
     let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    assert!((yaw - 1.5707963).abs() < 1e-4, "yaw {yaw}");
+    assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "yaw {yaw}");
 }
 
 #[test]
@@ -380,7 +379,6 @@ fn test_missing_script_on_disk_warns_but_does_not_panic() {
     app.init_resource::<ButtonInput<KeyCode>>();
     app.add_message::<ScriptToast>();
     app.add_message::<crate::ambient::SfxEvent>();
-    app.add_message::<crate::feedback::PlayerHurt>();
     app.insert_resource(LuaScriptHost::new(PathBuf::from("/nonexistent/scripts")).expect("host"));
     app.add_systems(Update, (luau_on_add, luau_update, luau_on_remove).chain());
     app.world_mut().spawn((
@@ -586,7 +584,6 @@ fn test_player_hp_read() {
         Player::default(),
         Transform::default(),
         crate::vitals::Health::default(),
-        crate::vitals::Xp::default(),
     ));
     app.world_mut().spawn((
         Transform::default(),
@@ -667,7 +664,7 @@ fn test_non_finite_and_unknown_key_args_are_rejected() {
     let host = host_with("function on_update(dt) end", "guards.lua");
     for snippet in [
         "return viber.set_pose(0/0, 0, 0, 0)",
-        "return viber.destructibles(0)",
+        "return viber.player_nearby(0)",
         "return viber.teleport_player(0/0, 0, 0)",
         "return viber.wander_target(0/0)",
         "return viber.set_interaction('Usar', 'zzz')",
@@ -695,12 +692,6 @@ fn test_non_finite_and_unknown_key_args_are_rejected() {
     }
     // Valores finitos continuam a passar (fora de on_update os setters
     // de combate/teleporte enfileiram à mesma — não precisam de entidade).
-    assert!(
-        host.lua
-            .load("return viber.destructibles(4)")
-            .exec()
-            .is_ok()
-    );
     assert!(
         host.lua
             .load("return viber.teleport_player(1, 2, 3)")
@@ -1068,7 +1059,6 @@ fn simple_box_spec() -> crate::recipes::EntitySpec {
         script: None,
         props: Vec::new(),
         links: Default::default(),
-        destructible: None,
         transform: crate::recipes::TransformSpec::default(),
         physics: crate::physics::PhysicsSpec::default(),
         kind: crate::recipes::EntityKind::Primitive {

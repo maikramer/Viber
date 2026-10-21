@@ -163,8 +163,8 @@ pub struct SaveGame {
     /// `(cena, portal)` por onde se entrou na cena gravada — o `@back` da porta de saída.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub came_from: Option<(String, String)>,
-    /// Nomes de props já colhidos (`Destructible`). Sem isto, gravar e
-    /// carregar replantava a floresta e a pedra com o loot ainda no cofre.
+    /// LEGADO: nomes de props colhidos. A colheita atual guarda a marca no
+    /// `world_kv` do jogo; o campo fica só para ler saves antigos.
     #[serde(default)]
     pub harvested: Vec<String>,
     /// Nó corrente de cada diálogo com grafo (`dialogue id → node`).
@@ -288,7 +288,6 @@ fn options_system(
         Commands,
         Option<Res<crate::scene_loader::CurrentScene>>,
         Option<Res<crate::terrain::runtime::TerrainRuntime>>,
-        Option<Res<crate::dialogue::DialogueSessions>>,
         Option<Res<crate::input_map::ActionMap>>,
     ),
     mut heroes: Query<(Entity, &mut Transform, &mut Player), With<Player>>,
@@ -365,13 +364,10 @@ fn options_system(
             if let Some(host) = host.as_mut() {
                 game.world_kv = crate::luau::game::game_to_json(&host.lua);
             }
-            if let Some(book) = world_save_host_request.7.as_deref() {
-                game.dialogue_nodes = book.node.clone();
-            }
             if let Some(terrain) = world_save_host_request.6.as_deref() {
                 game.terrain_patches = terrain.deltas.export_patches();
             }
-            if let Some(map) = world_save_host_request.8.as_deref() {
+            if let Some(map) = world_save_host_request.7.as_deref() {
                 game.action_keys = map
                     .bindings
                     .iter()
@@ -425,14 +421,8 @@ fn options_system(
                 }
                 apply_save(&game, &mut mixer);
                 let patches = game.terrain_patches.clone();
-                let nodes = game.dialogue_nodes.clone();
                 let keys = game.action_keys.clone();
                 world_save_host_request.4.queue(move |world: &mut World| {
-                    if let Some(mut sessions) =
-                        world.get_resource_mut::<crate::dialogue::DialogueSessions>()
-                    {
-                        sessions.node = nodes;
-                    }
                     if let Some(mut map) = world.get_resource_mut::<crate::input_map::ActionMap>() {
                         for (name, key) in keys {
                             if let Some(action) = crate::input_map::Action::parse(&name) {
@@ -506,10 +496,6 @@ fn options_system(
                             Some(&mut *player),
                         );
                     }
-                    world_save_host_request
-                        .4
-                        .entity(entity)
-                        .remove::<crate::feedback::Dying>();
                 }
                 toasts.write(ScriptToast("Jogo carregado.".into()));
                 sfx.write(crate::ambient::SfxEvent {

@@ -26,8 +26,6 @@ pub enum ScriptGameEvent {
     /// Criatura morreu (`kill_creature` do melee, ou HP de entidade a zero
     /// por `viber.entity_damage`). `name` = nome da entidade; `entity` = bits.
     Kill { name: String, entity: i64 },
-    /// O herói apanhou dano (pós i-frames; `hp` = HP após o golpe).
-    PlayerHurt { amount: f32, hp: f32 },
     /// Um projétil tocou um corpo. O jogo aplica o dano.
     Hit {
         entity: i64,
@@ -64,7 +62,6 @@ impl ScriptGameEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Kill { .. } => "kill",
-            Self::PlayerHurt { .. } => "player_hurt",
             Self::Hit { .. } => "hit",
             Self::PlayerDied => "player_died",
             Self::Collect { .. } => "collect",
@@ -87,10 +84,6 @@ impl ScriptGameEvent {
             Self::Kill { name, entity } => {
                 t.raw_set("name", name.clone())?;
                 t.raw_set("entity", *entity)?;
-            }
-            Self::PlayerHurt { amount, hp } => {
-                t.raw_set("amount", *amount)?;
-                t.raw_set("hp", *hp)?;
             }
             Self::Hit {
                 entity,

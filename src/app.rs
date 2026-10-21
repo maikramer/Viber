@@ -27,10 +27,10 @@ use crate::profiler::{Group, timed};
 use crate::recipes::ParsedWorld;
 use crate::recipes::spawn::{self, PendingWorld};
 use crate::{
-    a11y, ambient, animation, audio_space, camera, dialogue, editor_camera, foliage, grass, hud,
-    ik, impact, input_map, locale, lockon, luau, menus, meshopt, music, nav, netplay, particles,
-    physics, physics_fx, player, postfx, profiler, prop_tint, ragdoll, recipes, render_lod, save,
-    sky, spawner, streaming, terrain, textures, time_fx, trail, ui, weapon, worldsys, xml,
+    a11y, ambient, animation, attachment, audio_space, camera, editor_camera, foliage,
+    grass, hud, ik, impact, input_map, locale, luau, menus, meshopt, music, nav, netplay,
+    particles, physics, physics_fx, player, postfx, profiler, prop_tint, ragdoll, recipes,
+    render_lod, save, sky, spawner, streaming, terrain, textures, time_fx, ui, worldsys, xml,
 };
 
 /// Para quê a App é montada.
@@ -180,6 +180,12 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Preset de gráficos ANTES de construir a App: as cascatas do sol, o
     // shadow map e o raymarch volumétrico são lidos durante o spawn do mundo.
     let graphics = crate::graphics::resolve(config.graphics.as_deref());
+    // Perfil de post-FX do JOGO: também antes da App — o attach da câmara lê
+    // os gates no primeiro Update e o volumétrico decide-se no Startup.
+    crate::postfx::resolve_profile(config.postfx.as_ref());
+    // Perfil de reflexos: decide se o SSR nasce, se o chão entra no raymarch
+    // e o orçamento (passos/alcance) — antes de o plugin ser registado.
+    crate::water_ssr::resolve_profile(config.reflections.as_ref());
     info!("graphics preset: {}", graphics.name());
     let title = window_title
         .or_else(|| config.title.clone())
@@ -514,14 +520,10 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     >::default());
     app.add_plugins(animation::AnimationPlugin);
     app.add_plugins(ik::IkPlugin);
-    app.add_plugins(lockon::LockOnPlugin);
     app.add_plugins(ragdoll::RagdollPlugin);
     app.add_plugins(input_map::InputMapPlugin);
     app.add_plugins(a11y::A11yPlugin);
     app.add_plugins(audio_space::AudioSpacePlugin);
-    app.add_plugins(dialogue::DialoguePlugin {
-        dir: world_dir_pre.join("dialogues"),
-    });
     app.add_plugins(locale::LocalePlugin {
         dir: world_dir_pre.join("locale"),
     });
@@ -579,6 +581,8 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Save/load & opções: serviço de ENGINE (grava `world_kv`/posição/vitais
     // em qualquer preset; os campos RPG só entram quando os recursos existem).
     app.add_plugins(save::SavePlugin);
+    // Props em ossos (`viber.attach`): primitiva genérica (espada, volante…).
+    app.add_plugins(attachment::AttachmentPlugin);
     // FX puros para mundos SEM o preset RPG: o CombatPlugin registra o kick
     // de FOV e o hit-stop; sem ele, as primitivas `viber.fov_kick/hit_stop`
     // (e o shake/kick/punch que vivem em recursos incondicionais) ficariam
@@ -592,10 +596,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.init_resource::<time_fx::HitStop>();
     app.init_resource::<time_fx::BaseTimeScale>();
     app.add_systems(bevy::app::Update, time_fx::hit_stop_system);
-    // Mão do herói. O melee vive em Lua, mas a espada no osso `hand_r` é
-    // apresentação da engine. O [V] é do lock-on (Lua) — o ciclo de armas
-    // nativo foi removido para não haver dois donos do mesmo press.
-    app.init_resource::<weapon::HeldWeapon>();
 
     // Mundo vivo (loop 9): fog/tint por BiomeRegion, orçamento de luzes,
     // gestos idle de NPC, SFX.
@@ -606,9 +606,8 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.add_plugins(prop_tint::PropTintPlugin);
     // Física Fase 3 (loop 10): knockback cinemático + destrutíveis com queda.
     app.add_plugins(physics_fx::PhysicsFxPlugin);
-    // Colheita é `scripts/game/harvest.lua` (`viber.destructibles`).
+    // Colheita é `scripts/game/harvest.lua` (`viber.player_nearby`).
     // Sword trace (ribbon da lâmina) + bursts one-shot de partícula.
-    app.add_plugins(trail::TrailPlugin);
     app.add_plugins(particles::BurstPlugin);
     // FX de impacto de combate: recoil (squash-and-stretch) do inimigo
     // atingido + anel fino no chão (slam/bomba e avisos de golpe).
@@ -650,9 +649,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // registar `player_melee_attack`/`swing_track_system`/`cycle_weapon`.
     app.add_plugins(crate::feedback::FeedbackPlugin);
     // Colheita/destrutíveis são DADOS autorais + regras em Lua. Nenhum
-    // plugin de colheita: `viber.destructibles` só lê o que o spawner criou.
-    // A espada no osso `hand_r` é apresentação; quem decide o golpe é o Lua.
-    app.add_systems(bevy::app::Update, weapon::ensure_held_weapon);
+    // plugin de colheita: os props autorais viajam em `ScriptProps` e o Lua lê.
     // A instalação de `viber.ui` tem de ganhar ao runtime Luau: sem ordem,
     // um script activado no frame 1 via `luau_on_add` podia ver `viber.ui`
     // nil (morria — `Added` dispara 1×) ou queimar o warn-once.
@@ -731,8 +728,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
                 .chain(),
             timed(Group::Camera, spawn::auto_orbit),
             timed(Group::Spawner, spawn::gltf_scene_spawner),
-            timed(Group::Player, player::dialogue_interaction),
-            hud::hud_prompt_update,
             hud::compass::hud_compass_update,
             hud::compass::hud_compass_landmarks_update,
             hud::hide_world_hud_in_interior,

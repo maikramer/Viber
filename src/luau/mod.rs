@@ -100,7 +100,6 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         // SFX de scripts (`viber.sound`) — idempotente com o AmbientPlugin.
         app.add_message::<crate::ambient::SfxEvent>();
         // O dano de scripts segue o path único do feedback (i-frames etc.).
-        app.add_message::<crate::feedback::PlayerHurt>();
         // .chain() obriga on_add → update → on_remove dentro do mesmo frame
         // (um tuple simples não garante ordem no Bevy 0.19).
         app.add_message::<crate::feedback::AttackAlert>();
@@ -111,6 +110,10 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         app.init_resource::<ScriptEventQueue>();
         // Prompt de UI genérico publicado por scripts (`viber.prompt`).
         app.init_resource::<crate::ui::UiPrompt>();
+        // Props em ossos (`viber.attach`): a app completa acrescenta o
+        // AttachmentPlugin; aqui garante-se a fila para o runtime.
+        app.init_resource::<crate::attachment::AttachmentRequests>();
+        app.init_resource::<crate::attachment::AttachmentSlots>();
         // Posse de sistemas nativos por scripts (`viber.own_system`).
         app.init_resource::<ScriptSystemOwners>();
         // Fila de spawns de prototypes (viber.spawn_prototype) — consumida

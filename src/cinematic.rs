@@ -803,8 +803,6 @@ fn tick_cinematic(
     mut ended: MessageWriter<CinematicEnded>,
     mut events: Option<ResMut<crate::luau::ScriptEventQueue>>,
     mut ui_nodes: HudRoots<'_, '_>,
-    players: Query<Entity, With<crate::player::Player>>,
-    mut commands: Commands,
 ) {
     let stop_requested = stops.read().count() > 0;
     let playing = playback.active.is_some();
@@ -821,12 +819,6 @@ fn tick_cinematic(
         fx.boost.set_if_neq(boost);
         return;
     };
-    // Herói intocável enquanto a câmara não é dele.
-    for player in &players {
-        commands
-            .entity(player)
-            .try_insert(crate::feedback::Invulnerable { timer: 0.25 });
-    }
     // O mundo em volta da câmara ainda se está a construir?
     let streaming = terrain.as_deref().is_some_and(|t| t.busy)
         || mesh_lod.as_deref().is_some_and(|m| m.pending > 0)

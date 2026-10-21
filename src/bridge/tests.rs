@@ -244,7 +244,6 @@ fn lua_app(port: u16) -> App {
         crate::player::Player::default(),
         Transform::from_xyz(0.0, 1.0, 0.0),
         crate::vitals::Health::default(),
-        crate::vitals::Xp::default(),
     ));
     app.world_mut().spawn((
         Name::new("goblin"),
@@ -910,12 +909,6 @@ fn test_bridge_lua_introspection_round3() {
         // Pilha de nav: config + tile (census fica vazio — sem landmass).
         world.insert_resource(crate::nav::NavConfig::default());
         world.insert_resource(crate::nav::NavTile::default());
-        // Diário de quests (lidas do DISCO: dir das quests do exemplo).
-        world.insert_resource(crate::quests::QuestLog::with_dir(
-            &crate::quests::example_quests_dir(),
-        ));
-        // Skills sem nada aprendido.
-        world.insert_resource(crate::skills::SkillTree::default());
     }
     app.update();
 
@@ -1070,11 +1063,6 @@ fn test_bridge_lua_control_round4() {
                 ..Default::default()
             },
         ));
-        world.insert_resource(crate::quests::QuestLog::with_dir(
-            &crate::quests::example_quests_dir(),
-        ));
-        world.insert_resource(crate::economy::Vault::default());
-        world.insert_resource(crate::skills::SkillTree::default());
         world.insert_resource(crate::nav::NavConfig::default());
         world.insert_resource(crate::music::AudioMixerSettings::default());
         world.insert_resource(crate::music::CombatMusicState::default());
@@ -1157,7 +1145,7 @@ fn test_bridge_lua_control_round4() {
     );
 
     // nav_set ao vivo.
-    let r = lua(
+    let _ = lua(
         "viber.debug.nav_set{offroad_cost = 9.5, tile_size = 128} return true",
         &mut app,
     );
@@ -1176,7 +1164,7 @@ fn test_bridge_lua_control_round4() {
     );
 
     // audio_set reflete no mixer (lido pelo snapshot de áudio).
-    let r = lua("viber.debug.audio_set{music = 0.25} return true", &mut app);
+    let _ = lua("viber.debug.audio_set{music = 0.25} return true", &mut app);
     let r = lua("return viber.debug.audio().buses.music", &mut app);
     assert_eq!(r["result"].as_f64(), Some(0.25));
 

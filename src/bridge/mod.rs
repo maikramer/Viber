@@ -270,9 +270,7 @@ impl Plugin for BridgePlugin {
             .init_resource::<selection::SelectedEntity>()
             // Event log estruturado: os messages têm de existir (apps mínimas
             // de teste ficam auto-suficientes — add_message é idempotente).
-            .add_message::<crate::feedback::PlayerHurt>()
             .add_message::<crate::feedback::DamageNumberEvent>()
-            .add_message::<crate::vitals::LevelUpEvent>()
             .add_message::<crate::ui::actions::UiAction>()
             .add_message::<crate::luau::ScriptToast>()
             .init_resource::<events::BridgeEventLog>()

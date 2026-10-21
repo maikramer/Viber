@@ -110,13 +110,6 @@ const NPC_CAPSULE_RADIUS: f32 = 0.32;
 const NPC_CAPSULE_HALF_HEIGHT: f32 = 0.55;
 const NPC_CAPSULE_CENTER: f32 = NPC_CAPSULE_HALF_HEIGHT + NPC_CAPSULE_RADIUS;
 
-/// `<DialogueNPC>` marker: this entity is a dialogue target with the given
-/// quest/dialogue id (dialogue UI lands with the HUD phase).
-#[derive(Debug, Component)]
-pub struct DialogueNpc {
-    pub dialogue_id: String,
-}
-
 /// Pending `<GltfScene>`: the handle loads async; [`gltf_scene_spawner`]
 /// swaps it for a `SceneRoot` once loaded (and drops it on failure). Os
 /// handles de LOD opcionais (`lod1-url`/`lod2-url`) constroem a ladder de
@@ -174,11 +167,6 @@ fn is_ground_feature(kind: &EntityKind) -> bool {
             | EntityKind::DynamicSpawner { .. }
             | EntityKind::SpawnExclusion { .. }
             | EntityKind::Vegetation { .. }
-            // Catálogos RPG declaráveis (Fases B2/B3): dados puras para os
-            // recursos `travel::LandmarkCatalog` / `feedback::RespawnCatalog`,
-            // recolhidos em `collect_catalogs` — nunca spawna entidade.
-            | EntityKind::Landmark { .. }
-            | EntityKind::SpawnPoint { .. }
     )
 }
 
@@ -366,29 +354,6 @@ fn shift_lake(lake: &LakeSpec, offset: Vec2) -> LakeSpec {
     }
 }
 
-/// Recolhe os catálogos declaráveis (Fase B3): `<SpawnPoint>` →
-/// [`crate::feedback::RespawnCatalog`]. `<Landmark>` é só dado autoral
-/// (o jogo lê-o por Lua); não vira recurso de engine.
-fn collect_catalogs(specs: &[EntitySpec], out: &mut PendingCatalogs, offset: Vec2) {
-    for spec in specs {
-        let child_offset =
-            offset + Vec2::new(spec.transform.translation[0], spec.transform.translation[2]);
-        match &spec.kind {
-            EntityKind::SpawnPoint { at, label } => out
-                .spawn_points
-                .push((Vec2::new(at[0] + offset.x, at[1] + offset.y), label.clone())),
-            _ => {}
-        }
-        collect_catalogs(&spec.children, out, child_offset);
-    }
-}
-
-/// Catálogos pendentes de um mundo ([`collect_catalogs`]).
-#[derive(Default)]
-struct PendingCatalogs {
-    spawn_points: Vec<(bevy::math::Vec2, String)>,
-}
-
 /// Stats from a world spawn.
 #[derive(Debug, Default)]
 pub struct SpawnStats {
@@ -472,7 +437,7 @@ impl EditorGroups {
             Some("ScenePortal") | Some("SceneEntry") => self.gameplay,
             Some("PlayerGltf")
             | Some("ThirdPersonCamera")
-            | Some("DialogueNpc")
+            | Some("NpcBody")
             | Some("DynamicSpawner") => self.gameplay,
             // `Group` aninhado de topo, GLTFs soltos, landmarks e afins.
             _ => self.world,
@@ -549,16 +514,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     if !persistent {
         world.insert_resource(pending_terrain);
     }
-    // Catálogos RPG declaráveis (Fases B2/B3): os plugins já inicializaram os
-    // recursos com o fallback hardcoded; só SUBSTITUÍMOS quando o mundo
-    // declara <Landmark>/<SpawnPoint> — política aditiva (o simple-rpg fica
-    // a funcionar identicamente, com ou sem o landmarks.xml novo).
-    let mut catalogs = PendingCatalogs::default();
-    collect_catalogs(&parsed.entities, &mut catalogs, Vec2::ZERO);
-    if !catalogs.spawn_points.is_empty() {
-        world.insert_resource(crate::feedback::RespawnCatalog(catalogs.spawn_points));
-    }
-
     // Prototypes para spawn em runtime (viber.spawn_prototype) — o WorldIR
     // morre aqui; a biblioteca sobrevive.
     if !persistent {
@@ -1140,7 +1095,6 @@ fn push_shore_rock_group(
         template_props: Vec::new(),
         template_links: Default::default(),
         activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
-        template_destructible: None,
         cull_distance: crate::render_lod::DEFAULT_STATIC_CULL,
         cast_shadows: true,
         max_slope_attempts: 4,
@@ -1164,7 +1118,6 @@ fn push_shore_rock_group(
         template_hostile: false,
         template_health: None,
         activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
-        template_destructible: None,
         collider_handle: None,
     });
 }
@@ -1302,7 +1255,6 @@ fn collect_spawn_groups(
                     activation_radius: group.activation_radius,
                     template_collider: group.template_collider.clone(),
                     template_trigger: group.template_trigger,
-                    template_destructible: group.template_destructible.clone(),
                     collider_handle: group.template_collider.as_ref().and_then(|shape| {
                         // Só Mesh/Precompute consomem o glTF de colisão;
                         // Box/None/Auto nunca o usam — não pedir um load
@@ -1352,7 +1304,6 @@ fn collect_spawn_groups(
                     activation_radius: spawner_spec.activation_radius,
                     template_collider: spawner_spec.template_collider.clone(),
                     template_trigger: spawner_spec.template_trigger,
-                    template_destructible: spawner_spec.template_destructible.clone(),
                     // Como nos spawners: só Mesh/Precompute têm glTF de
                     // colisão — as outras formas pediam o load de um path vazio.
                     collider_handle: spawner_spec.template_collider.as_ref().and_then(|shape| {
@@ -1566,15 +1517,6 @@ fn spawn_entity(
     }
     if let Some(path) = &spec.script {
         entity.insert(crate::luau::LuaScriptRef { path: path.clone() });
-        let authored: Vec<_> = spec
-            .props
-            .iter()
-            .filter(|(key, _)| !key.starts_with("__"))
-            .cloned()
-            .collect();
-        if !authored.is_empty() {
-            entity.insert(crate::luau::ScriptProps(std::sync::Arc::new(authored)));
-        }
         // `tag="always-active"`: o script NUNCA congela pelo LOD de ativação
         // (mesma política dos scripts de UI). Para CONTROLLERS de jogo que
         // precisam de correr onde o herói andar (ex.: habilidades em Lua).
@@ -1584,10 +1526,16 @@ fn spawn_entity(
             });
         }
     }
-    // Destrutível standalone (`<Entity destructible="…">`) — o caminho do
-    // spawner cobre as instâncias; este cobre props autorais soltos.
-    if let Some(destructible) = &spec.destructible {
-        entity.insert(crate::harvest::Destructible::from_spec(destructible));
+    // Props autorais (inclui `destructible`/resource) valem para QUALQUER
+    // entidade, com ou sem script: são dados que o Lua lê por `viber.props`.
+    let authored: Vec<_> = spec
+        .props
+        .iter()
+        .filter(|(key, _)| !key.starts_with("__"))
+        .cloned()
+        .collect();
+    if !authored.is_empty() {
+        entity.insert(crate::luau::ScriptProps(std::sync::Arc::new(authored)));
     }
     attach_physics(&mut entity, ctx, spec);
     match &spec.kind {
@@ -1682,7 +1630,7 @@ fn spawn_entity(
             // Candidato ao batch de vegetação (`foliage::arm_candidates`
             // confirma um só mesh e nenhum colisor/script nos ancestrais).
             // Props com física ou script ficam entidades normais.
-            if spec.script.is_none() && spec.destructible.is_none() && spec.physics.is_empty() {
+            if spec.script.is_none() && spec.physics.is_empty() {
                 entity.insert(crate::foliage::FoliageCandidate);
             }
         }
@@ -1907,14 +1855,8 @@ fn spawn_entity(
             }
             stats.has_camera = true;
         }
-        EntityKind::DialogueNpc {
-            dialogue_id,
-            marker_height: _,
-        } => {
+        EntityKind::NpcBody => {
             entity.insert((
-                DialogueNpc {
-                    dialogue_id: dialogue_id.clone(),
-                },
                 Visibility::Inherited,
                 // Corpo do NPC: o herói deixava de o atravessar (cápsula de
                 // ~1,8 m nos pés do NPC, como a do herói).
@@ -2143,9 +2085,6 @@ fn spawn_entity(
                     attrs: attrs.clone(),
                 });
         }
-        // Catálogos B2/B3: consumidos a MONTANTE (is_ground_feature →
-        // collect_catalogs, no arranque) — nunca chegam aqui.
-        EntityKind::Landmark { .. } | EntityKind::SpawnPoint { .. } => {}
         EntityKind::SceneEntry => {
             entity.insert(crate::scene_loader::SceneEntryPoint {
                 name: spec.name.clone().unwrap_or_default(),

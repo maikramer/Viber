@@ -3,8 +3,6 @@
 
 use bevy::prelude::*;
 
-use crate::player::Player;
-use crate::recipes::spawn::DialogueNpc;
 
 /// Marker for the interaction prompt node (shown near a `<DialogueNPC>`).
 #[derive(Component)]
@@ -42,28 +40,6 @@ pub fn hud_toggle(
                 _ => Visibility::Hidden,
             };
         }
-    }
-}
-
-/// Show the interaction prompt when the player stands near a `<DialogueNPC>`
-/// within the authored range.
-pub fn hud_prompt_update(
-    players: Query<&GlobalTransform, With<Player>>,
-    npcs: Query<&GlobalTransform, With<DialogueNpc>>,
-    mut prompts: Query<(&mut Visibility, &HudPrompt)>,
-) {
-    let Ok(player) = players.single() else {
-        return;
-    };
-    for (mut visibility, prompt) in &mut prompts {
-        let near = npcs
-            .iter()
-            .any(|npc| npc.translation().distance(player.translation()) < prompt.range);
-        *visibility = if near {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
     }
 }
 

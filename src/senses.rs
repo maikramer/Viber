@@ -21,6 +21,8 @@ pub const HEAR_SHOT: f32 = 36.0;
 pub const ALERT_SECS: f32 = 0.4;
 pub const SEARCH_SECS: f32 = 6.0;
 pub const SENSE_RAYS_PER_FRAME: usize = 8;
+/// Folga do raio de LOS (m): evita "bloqueado" por encostar à parede.
+pub const LOS_SLACK: f32 = 0.45;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SenseKind {
@@ -246,7 +248,7 @@ pub fn sense_ai(world: &mut World) {
                 let aim = player + Vec3::Y * 1.0;
                 let dist = origin.distance(aim);
                 let blocked = los_hit(world, origin, aim)
-                    .is_some_and(|toi| toi + crate::lockon::LOS_SLACK < dist);
+                    .is_some_and(|toi| toi + LOS_SLACK < dist);
                 saw = !blocked;
             }
         }

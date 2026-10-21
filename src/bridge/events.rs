@@ -108,23 +108,11 @@ pub fn event_json(event: &BridgeEvent) -> Json {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn collect_bridge_events(
     mut log: ResMut<BridgeEventLog>,
-    mut hurt: MessageReader<crate::feedback::PlayerHurt>,
     mut damage_numbers: MessageReader<crate::feedback::DamageNumberEvent>,
-    mut level_ups: MessageReader<crate::vitals::LevelUpEvent>,
     mut ui_actions: MessageReader<crate::ui::actions::UiAction>,
     mut toasts: MessageReader<crate::luau::ScriptToast>,
     deaths: Query<(Entity, Option<&Name>, &crate::vitals::Health), Changed<crate::vitals::Health>>,
 ) {
-    for event in hurt.read() {
-        log.push(
-            "hurt",
-            json!({
-                "amount": event.amount,
-                "status": event.status,
-                "from": event.from.map(|f| json!([f.x, f.y, f.z])),
-            }),
-        );
-    }
     let mut damage_seen = 0usize;
     for event in damage_numbers.read() {
         damage_seen += 1;
@@ -140,9 +128,6 @@ pub fn collect_bridge_events(
                 "z": event.position.z,
             }),
         );
-    }
-    for event in level_ups.read() {
-        log.push("levelup", json!({ "level": event.new_level }));
     }
     for event in ui_actions.read() {
         log.push(

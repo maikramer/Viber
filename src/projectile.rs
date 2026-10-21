@@ -466,8 +466,7 @@ impl Plugin for ProjectilePlugin {
     fn build(&self, app: &mut App) {
         // `add_message` é idempotente: com o preset RPG os plugins de
         // combate já os registaram; com `gameplay: none` é aqui.
-        app.add_message::<crate::feedback::PlayerHurt>()
-            .add_message::<crate::feedback::DamageNumberEvent>()
+        app.add_message::<crate::feedback::DamageNumberEvent>()
             .add_message::<crate::feedback::AttackAlert>()
             .add_message::<crate::luau::ScriptToast>()
             .add_message::<crate::ambient::SfxEvent>()
@@ -576,7 +575,6 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
-            .add_message::<crate::feedback::PlayerHurt>()
             .add_message::<crate::feedback::DamageNumberEvent>()
             .add_message::<crate::feedback::AttackAlert>()
             .add_message::<crate::luau::ScriptToast>()

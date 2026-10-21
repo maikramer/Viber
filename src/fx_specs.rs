@@ -2,7 +2,7 @@
 //!
 //! São receitas de apresentação (bursts de impacto, orientação de cast e um
 //! roll determinístico). Nenhuma regra de combate vive aqui — o dano, a
-//: chain e o alvo são do Lua.
+// chain e o alvo são do Lua.
 
 use bevy::prelude::*;
 

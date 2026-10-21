@@ -680,9 +680,6 @@ pub struct SpawnGroupState {
     pub template_collider: Option<crate::physics::ColliderShape>,
     /// `trigger` do collider do template.
     pub template_trigger: bool,
-    /// Destrutível do template: cada instância nasce colhível
-    /// ([`crate::harvest::Destructible`]).
-    pub template_destructible: Option<crate::recipes::DestructibleSpec>,
     /// Handle do glTF de colisão do template (pré-carregado).
     pub collider_handle: Option<bevy::asset::Handle<bevy::gltf::Gltf>>,
     /// Ladder de LOD por template: `(lod1, lod2, near, mid)`, mesmo índice
@@ -1119,7 +1116,7 @@ fn spawn_instance(
             entity.insert(connections);
         }
     }
-    if group.template_script.is_some() && !group.spec.template_props.is_empty() {
+    if !group.spec.template_props.is_empty() {
         entity.insert(crate::luau::ScriptProps(std::sync::Arc::new(
             group.spec.template_props.clone(),
         )));
@@ -1197,12 +1194,6 @@ fn spawn_instance(
             group.template_script.is_some(),
         );
     }
-    // Destrutível é coisa de prop estático — criaturas morrem por combate.
-    if !group.dynamic
-        && let Some(destructible) = &group.template_destructible
-    {
-        entity.insert(crate::harvest::Destructible::from_spec(destructible));
-    }
 }
 
 /// Semi-extensões do AABB das posições de uma malha (espaço do modelo).
@@ -1260,7 +1251,6 @@ mod tests {
             template_health: None,
             template_collider: None,
             template_trigger: false,
-            template_destructible: None,
             activation_radius: 45.0,
             template_lods: Vec::new(),
             cull_distance: crate::render_lod::DEFAULT_STATIC_CULL,

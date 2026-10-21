@@ -45,16 +45,8 @@ pub enum ScriptCommand {
         via: Option<String>,
     },
     /// Empurrão do herói (dash/salto lateral) pelo character controller —
-    /// colide com paredes, ao contrário do teleporte. `iframes` > 0 dá
-    /// invulnerabilidade durante o movimento.
-    PushPlayer {
-        velocity: Vec3,
-        iframes: f32,
-    },
-    DamagePlayer {
-        amount: f32,
-        from: Option<Vec3>,
-    },
+    /// colide com paredes, ao contrário do teleporte.
+    PushPlayer { velocity: Vec3 },
     HealPlayer(f32),
     /// Dispara um projétil de um `<ProjectileTemplate>` (`viber.fire_projectile`).
     FireProjectile {
@@ -62,12 +54,6 @@ pub enum ScriptCommand {
         origin: Vec3,
         target: Vec3,
         shooter: Option<Entity>,
-    },
-    /// Aplica um status effect ao herói (hoje: `"venom"`) — tratado pelo
-    /// feedback (tick 1/s, path único de dano).
-    ApplyStatus {
-        kind: String,
-        secs: f32,
     },
      /// Destrutível com queda (`break-style: fall`) — tomba na direção
     /// herói→entidade e despawna no fim.
@@ -149,8 +135,6 @@ pub enum ScriptCommand {
         pos: Vec3,
         color: Option<[f32; 3]>,
     },
-    /// Limpa um status effect do herói (`viber.status_clear`).
-    StatusClear(String),
     /// Balão de diálogo nativo (`viber.say(texto, segundos?)`).
     Say {
         text: String,
@@ -211,6 +195,18 @@ pub enum ScriptCommand {
     /// a engine só deixa de a animar e, se tiver `RagdollDeath`
     /// (`ragdoll="true"`), começa o ragdoll. Não despawna — isso é do jogo.
     Corpse { entity: Entity },
+    /// Anexa um GLB a um osso (`viber.attach`) ou remove o slot
+    /// (`url = None`, `viber.detach`). Genérico: a engine não sabe o que é
+    /// uma arma; só encontra o osso e pendura o prop.
+    Attach {
+        owner: Option<Entity>,
+        slot: String,
+        url: Option<String>,
+        bone: String,
+        pos: Vec3,
+        rot: Vec3,
+        scale: f32,
+    },
     /// Prompt de interação de MUNDO (`viber.prompt(key, label)`): um
     /// controller publica o verbo do alvo atual sem ser ele a entidade
     /// interagida. `label` vazio limpa. É UI genérica — o jogo decide quando.
@@ -271,10 +267,6 @@ pub enum ScriptCommand {
         beacons: Vec<Vec3>,
         waypoint: Option<(Vec3, String)>,
     },
-    /// `viber.lock_target(id|nil)` — fixa ou limpa o lock-on do herói.
-    LockTarget(Option<Entity>),
-    /// `viber.cycle_lock()` — próximo hostil com linha de visão.
-    CycleLock,
     /// `viber.noise(loudness)` — audição das criaturas sem script.
     Noise { pos: Vec3, loudness: f32 },
 }

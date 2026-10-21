@@ -189,26 +189,16 @@ fn the_tile_is_centred_on_the_player_and_bounded() {
     );
 }
 
-/// Who prefers roads is decided by hostility, which the engine already knows —
-/// not by a second marker for the world author to keep in sync.
+/// Who prefers roads is decided by hostility (`vitals::Hostile`), which the
+/// engine already knows — not by a second marker for the world author to keep
+/// in sync.
 #[test]
 fn hostility_decides_who_walks_the_streets() {
-    let enemy = viber::luau::LuaScriptRef {
-        path: "enemies/wolf.lua".into(),
-    };
-    let boss = viber::luau::LuaScriptRef {
-        path: "bosses/witch.lua".into(),
-    };
-    let townsfolk = viber::luau::LuaScriptRef {
-        path: "townsfolk.lua".into(),
-    };
-    assert_eq!(default_profile(Some(&enemy), false), NavProfile::Wild);
-    assert_eq!(default_profile(Some(&boss), false), NavProfile::Wild);
-    assert_eq!(default_profile(Some(&townsfolk), false), NavProfile::Civil);
+    assert_eq!(default_profile(true, false), NavProfile::Wild);
     // A Rust-FSM creature has no script at all and is always a hunter.
-    assert_eq!(default_profile(None, true), NavProfile::Wild);
-    // Anything else scripted (a harvestable prop that walks, an NPC) is civil.
-    assert_eq!(default_profile(None, false), NavProfile::Civil);
+    assert_eq!(default_profile(false, true), NavProfile::Wild);
+    // Anything else scripted (a prop that walks, an NPC) is civil.
+    assert_eq!(default_profile(false, false), NavProfile::Civil);
     assert_ne!(
         ROAD_TYPE_INDEX, GROUND_TYPE_INDEX,
         "estrada e chão têm de ser tipos distintos ou não há preferência a dar"

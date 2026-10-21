@@ -1247,7 +1247,8 @@ fn audit_ktx2(path: &Path, context: &str, issues: &mut Vec<AuditIssue>) {
     let Some(bytes) = read_header(path, 4096) else {
         return;
     };
-    if bytes.len() < 12 || bytes[..12] != KTX2_MAGIC {
+    // 12 bytes é só a magia; o campo de formato ocupa 12..16.
+    if bytes.len() < 16 || bytes[..12] != KTX2_MAGIC {
         issues.push(AuditIssue {
             severity: Severity::Warning,
             message: format!(
@@ -1257,8 +1258,6 @@ fn audit_ktx2(path: &Path, context: &str, issues: &mut Vec<AuditIssue>) {
         });
         return;
     }
-    let vk_format = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-    let _ = vk_format;
     if let Some(problem) = ktx2_payload_problem(&bytes) {
         issues.push(AuditIssue {
             severity: Severity::Warning,
@@ -1321,7 +1320,6 @@ mod tests {
             script: None,
             props: Vec::new(),
             links: Default::default(),
-            destructible: None,
             transform: TransformSpec::default(),
             physics: PhysicsSpec {
                 collider,

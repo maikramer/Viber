@@ -11,7 +11,7 @@ use bevy::math::Vec3;
 use bevy::prelude::*;
 
 use crate::camera::low_pass_factor;
-use crate::recipes::spawn::{DialogueNpc, OrbitCamera};
+use crate::recipes::spawn::OrbitCamera;
 use crate::terrain::runtime::TerrainRuntime;
 
 /// Gravity magnitude (m/s²) — `DEFAULT_GRAVITY = -60` in the original
@@ -384,8 +384,6 @@ pub fn player_movement(
     mut cameras: Query<&mut OrbitCamera>,
     mut sfx: MessageWriter<crate::ambient::SfxEvent>,
     actions: Option<Res<crate::input_map::ActionState>>,
-    locks: Query<&crate::lockon::LockOn>,
-    lock_targets: Query<&GlobalTransform, Without<Player>>,
     mut players: Query<
         (
             Entity,
@@ -394,7 +392,6 @@ pub fn player_movement(
             Option<&mut bevy_rapier3d::prelude::KinematicCharacterController>,
             Option<&bevy_rapier3d::prelude::KinematicCharacterControllerOutput>,
             Option<&mut TeleportSettle>,
-            Option<&crate::feedback::Dying>,
             Option<&crate::physics_fx::Knockback>,
         ),
         // `own_system("locomotion")` cala este sistema por completo (kart).
@@ -412,7 +409,7 @@ pub fn player_movement(
         .as_ref()
         .is_some_and(|owners| owners.owns(crate::luau::ownership::SYSTEM_LOCOMOTION))
     {
-        for (_, _, _, controller, _, _, _, _) in &mut players {
+        for (_, _, _, controller, _, _, _) in &mut players {
             if let Some(mut controller) = controller {
                 controller.translation = Some(Vec3::ZERO);
             }
@@ -425,7 +422,7 @@ pub fn player_movement(
     // persiste e é reaplicado em todos os steps (o herói deslizava com o
     // menu aberto e, se estava em salto, subia indefinidamente).
     if menus.any() {
-        for (_, _, mut player, controller, _, _, _, _) in &mut players {
+        for (_, _, mut player, controller, _, _, _) in &mut players {
             player.vel_y = 0.0;
             if let Some(mut controller) = controller {
                 controller.translation = Some(Vec3::ZERO);
@@ -465,16 +462,9 @@ pub fn player_movement(
     // Borda, não nível: o buffer é de 100 ms. `pressed` renovava o relógio
     // em todo o frame com a barra premida e o herói saltava em cada aterragem.
 
-    for (entity, mut transform, mut player, mut controller, output, mut settle, dying, knockback) in
+    for (entity, mut transform, mut player, mut controller, output, mut settle, knockback) in
         &mut players
     {
-        // Herói a cair em combate: sem andar, rodar a câmara nem saltar até
-        // ao respawn — a gravidade e o chão continuam (o corpo assenta).
-        let (move_x, move_forward, jump_pressed) = if dying.is_some() {
-            (0.0, 0.0, false)
-        } else {
-            (move_x, move_forward, jump_pressed)
-        };
         // Tutela pós-teleporte: enquanto dura, o chão ANALÍTICO manda mesmo
         // que já exista collider algures — a coluna de destino pode estar a
         // assar e uma queda a 55 m/s atravessa o trimesh antes disso.
@@ -521,18 +511,7 @@ pub fn player_movement(
         let interior_floor = (interior_mode
             && interior_state.as_deref().is_some_and(|state| state.active))
         .then_some(crate::worldsys::INTERIOR_FLOOR_Y);
-        let lock_dir = locks.get(entity).ok().and_then(|lock| {
-            lock_targets.get(lock.target).ok().and_then(|target| {
-                crate::lockon::lock_flat_dir(transform.translation, target.translation())
-            })
-        });
-        let (dir, input_mag) = if let Some(flat) = lock_dir {
-            let cam_yaw = crate::camera::behind_yaw_deg(flat.x, flat.z);
-            (
-                process_input(move_forward, move_x, cam_yaw),
-                input_magnitude(move_forward, move_x),
-            )
-        } else if interior_mode {
+        let (dir, input_mag) = if interior_mode {
             let yaw = interior
                 .as_deref()
                 .map(|scene| scene.camera_yaw_deg)
@@ -592,12 +571,9 @@ pub fn player_movement(
             motion += knockback.velocity.with_y(0.0) * dt;
         }
 
-        // Facing: com lock-on o herói olha o alvo mesmo parado. Sem lock,
-        // slerp toward the move heading at `rotation_speed` rad/s,
+        // Facing: slerp toward the move heading at `rotation_speed` rad/s,
         // only while moving (rotation mode 1 — idle keeps facing).
-        let face = lock_dir.map(facing_rotation).or_else(|| {
-            (dir.length_squared() > 0.0).then(|| facing_rotation(dir))
-        });
+        let face = (dir.length_squared() > 0.0).then(|| facing_rotation(dir));
         if let Some(target) = face {
             let factor = facing_slerp_factor(transform.rotation, target, player.rotation_speed, dt);
             transform.rotation = transform.rotation.slerp(target, factor);
@@ -773,45 +749,6 @@ pub fn player_movement(
                 position: Some(transform.translation),
             });
         }
-    }
-}
-
-/// Proximity interaction: when the player stands near a `<DialogueNPC>`,
-/// pressing E logs the dialogue target (dialogue UI lands with the HUD phase;
-/// the bridge's `viber debug logs` shows the same lines).
-pub fn dialogue_interaction(
-    keys: Res<ButtonInput<KeyCode>>,
-    players: Query<&GlobalTransform, With<Player>>,
-    npcs: Query<(&GlobalTransform, &DialogueNpc)>,
-) {
-    // Todo o custo (varrer os NPC e medir distâncias) só existe no frame em que
-    // [E] é premido. Fora disso o resultado era descartado (`let _ = near`),
-    // portanto era N `distance` (sqrt) + um `min_by` por frame sem leitor.
-    if !keys.just_pressed(KeyCode::KeyE) {
-        return;
-    }
-    let Ok(player) = players.single() else {
-        return;
-    };
-    let player_pos = player.translation();
-    // O MAIS PRÓXIMO em alcance, não o primeiro da ordem de query — com dois
-    // NPC em alcance, `.next()` devolvia o id errado (order-dependent).
-    let nearest = npcs
-        .iter()
-        .filter(|(t, _)| {
-            let range = crate::interact::default_range();
-            t.translation().distance_squared(player_pos) < range * range
-        })
-        .min_by(|(a, _), (b, _)| {
-            a.translation()
-                .distance_squared(player_pos)
-                .partial_cmp(&b.translation().distance_squared(player_pos))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(_, npc)| npc.dialogue_id.as_str());
-    match nearest {
-        Some(id) => bevy::log::info!("interaction: dialogue {} available", id),
-        None => bevy::log::info!("interaction: nothing nearby"),
     }
 }
 

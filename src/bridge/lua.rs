@@ -37,7 +37,7 @@ use super::{BrpResult, invalid, parse_params};
 use crate::luau::LuaScriptHost;
 use crate::player::Player;
 use crate::recipes::spawn::OrbitCamera;
-use crate::vitals::{Health, Xp};
+use crate::vitals::Health;
 
 /// Número máximo de entidades no snapshot (`entities()`/`find`), ordenadas
 /// por distância ao player — mundos com terreno têm milhares de chunks.
@@ -207,7 +207,6 @@ pub struct PlayerInfo {
     pub entity: Entity,
     pub position: Vec3,
     pub health: Option<(f32, f32)>,
-    pub xp: Option<(u32, u32)>,
     pub speed: f32,
 }
 
@@ -1913,7 +1912,6 @@ fn find_player(world: &mut World) -> Option<PlayerInfo> {
             entity: e.id(),
             position,
             health: e.get::<Health>().map(|h| (h.current, h.max)),
-            xp: e.get::<Xp>().map(|x| (x.current, x.next)),
             speed: player.speed,
         });
     }
@@ -2881,10 +2879,6 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
             if let Some((current, max)) = p.health {
                 table.raw_set("hp", current)?;
                 table.raw_set("max_hp", max)?;
-            }
-            if let Some((current, next)) = p.xp {
-                table.raw_set("xp", current)?;
-                table.raw_set("xp_next", next)?;
             }
             table.raw_set("speed", p.speed)?;
             Ok(Value::Table(table))
@@ -4341,22 +4335,10 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
         }
         DebugOp::Heal(amount) => change_player_health(world, amount, warnings),
         DebugOp::Damage(amount) => change_player_health(world, -amount, warnings),
-        DebugOp::AddXp(gain) => match player_entity_mut(world) {
-            Some(mut entity) => match entity.get_mut::<Xp>() {
-                Some(mut xp) => {
-                    crate::vitals::gain_xp(&mut xp, gain);
-                    true
-                }
-                None => {
-                    warnings.push("player sem Xp".into());
-                    false
-                }
-            },
-            None => {
-                warnings.push("sem player — xp ignorado".into());
-                false
-            }
-        },
+        DebugOp::AddXp(_gain) => {
+            warnings.push("xp: o XP e do JOGO (Lua), a engine nao o conhece".into());
+            false
+        }
         DebugOp::Give(kind, amount) => {
             warnings.push(format!("give: '{kind}'x{amount} — o cofre e do JOGO (viber.game()), a engine nao o conhece"));
             false

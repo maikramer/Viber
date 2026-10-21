@@ -48,11 +48,12 @@ pub struct ScriptCtx {
     /// Snapshot `(current, max)` do HP de cada entidade COM `Health` (sem o
     /// player — esse já vive em `player_hp`) para `viber.entity_hp(id)`.
     pub hp_snapshot: std::collections::HashMap<i64, (f32, f32)>,
+    /// Props autorais (`prop-*`, `destructible`, resource-*) por entidade,
+    /// para `viber.nearby` devolver `props` — DADOS que o jogo interpreta.
+    pub props_snapshot: std::collections::HashMap<i64, std::sync::Arc<Vec<(String, String)>>>,
     /// Hostis vivos (`enemies/`/`bosses/`) para `viber.hostiles`. As criaturas
     /// de `<DynamicSpawner>` não têm nome — `find_all("wolf")` não as acha.
     pub hostiles: Vec<HostileSnap>,
-    /// Props `destructible` a ≤ 40 m do herói (`viber.destructibles`).
-    pub destructibles: Vec<DestructibleSnap>,
     /// Posição de MUNDO das entidades nomeadas (`viber.entity_position`,
     /// `viber.nearby`) — o mesmo snapshot de nomes, com o GlobalTransform.
     pub pos_snapshot: std::collections::HashMap<i64, (String, Vec3)>,
@@ -167,27 +168,6 @@ impl Default for A11ySnap {
             interact_hold: false,
         }
     }
-}
-
-/// Prop colhível perto do herói (`viber.destructibles`).
-#[derive(Debug, Clone)]
-pub struct DestructibleSnap {
-    pub id: i64,
-    /// Golpes totais autorados (o script conta os que deu).
-    pub hits: u32,
-    pub hits_left: u32,
-    pub kind: String,
-    pub amount: u32,
-    pub pos: Vec3,
-    pub range: f32,
-    /// Alcance EFETIVO (o autorado escalado por `interact::scaled_range`) —
-    /// o script compara a distância a este número, sem duplicar a escala.
-    pub effective_range: f32,
-    /// Nome de mundo do prop (vazio se o spawner não o nomeou).
-    pub name: String,
-    /// `burst` | `fall` | `shatter`.
-    pub style: String,
-    pub popup: String,
 }
 
 /// Estradas e água, partilhadas com os scripts.

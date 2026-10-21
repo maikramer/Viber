@@ -621,6 +621,82 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.attach(slot, url [, opts]) / viber.detach(slot [, id]) — prende
+    // um GLB a um osso do rig. `url` vazio/nil solta o slot. Primitiva
+    // genérica (volante, capacete, espada…): a engine só encontra o osso.
+    // opts: {bone="hand_r", id, x, y, z, rx, ry, rz (rad), scale}.
+    api.set(
+        "attach",
+        lua.create_function(
+            |lua, (slot, url, opts): (String, Option<String>, Option<mlua::Table>)| {
+                if slot.trim().is_empty() {
+                    return Err(mlua::Error::runtime("viber.attach: slot vazio"));
+                }
+                let mut owner = None;
+                let mut bone = "hand_r".to_string();
+                let mut pos = Vec3::ZERO;
+                let mut rot = Vec3::ZERO;
+                let mut scale = 1.0f32;
+                if let Some(opts) = opts {
+                    if let Some(bits) = opts.raw_get::<Option<i64>>("id")? {
+                        owner = Some(super::entity::entity_from_id(bits)?);
+                    }
+                    if let Some(name) = opts.raw_get::<Option<String>>("bone")? {
+                        bone = name;
+                    }
+                    pos.x = opts.raw_get::<Option<f32>>("x")?.unwrap_or(0.0);
+                    pos.y = opts.raw_get::<Option<f32>>("y")?.unwrap_or(0.0);
+                    pos.z = opts.raw_get::<Option<f32>>("z")?.unwrap_or(0.0);
+                    rot.x = opts.raw_get::<Option<f32>>("rx")?.unwrap_or(0.0);
+                    rot.y = opts.raw_get::<Option<f32>>("ry")?.unwrap_or(0.0);
+                    rot.z = opts.raw_get::<Option<f32>>("rz")?.unwrap_or(0.0);
+                    scale = opts.raw_get::<Option<f32>>("scale")?.unwrap_or(1.0);
+                }
+                if !scale.is_finite() || scale <= 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "viber.attach: scale tem de ser finito e > 0",
+                    ));
+                }
+                let url = url.filter(|u| !u.trim().is_empty());
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::Attach {
+                        owner,
+                        slot,
+                        url,
+                        bone,
+                        pos,
+                        rot,
+                        scale,
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    api.set(
+        "detach",
+        lua.create_function(|lua, (slot, id): (String, Option<i64>)| {
+            let owner = match id {
+                Some(bits) => Some(super::entity::entity_from_id(bits)?),
+                None => None,
+            };
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::Attach {
+                    owner,
+                    slot,
+                    url: None,
+                    bone: String::new(),
+                    pos: Vec3::ZERO,
+                    rot: Vec3::ZERO,
+                    scale: 1.0,
+                });
+            Ok(())
+        })?,
+    )?;
+
     // viber.wander_target(radius) -> x, z — ponto determinístico ao redor
     // do home (mesma matemática da IA da engine, exposta ao script).
     api.set(
@@ -653,31 +729,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // viber.lock_target(id|nil) — câmara e strafe presos ao hostil.
-    api.set(
-        "lock_target",
-        lua.create_function(|lua, id: Option<i64>| {
-            let target = match id {
-                Some(bits) => Some(super::entity::entity_from_id(bits)?),
-                None => None,
-            };
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("ScriptCtx")
-                .commands
-                .push(ScriptCommand::LockTarget(target));
-            Ok(())
-        })?,
-    )?;
-    api.set(
-        "cycle_lock",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("ScriptCtx")
-                .commands
-                .push(ScriptCommand::CycleLock);
-            Ok(())
-        })?,
-    )?;
     api.set(
         "noise",
         lua.create_function(|lua, loudness: f32| {
@@ -775,18 +826,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     api.set(
-        "apply_status",
-        lua.create_function(|lua, (kind, secs): (String, f32)| {
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
-                .commands
-                .push(ScriptCommand::ApplyStatus { kind, secs });
-            Ok(())
-        })?,
-    )?;
-    // ── Combate & FX (primitivas de jogo) ─────────────────────────
-    // viber.entity_position(id?) -> x, y, z | nil — snapshot do frame.
-    api.set(
         "entity_position",
         lua.create_function(|lua, id: Option<i64>| {
             let ctx = lua.app_data_ref::<ScriptCtx>();
@@ -853,53 +892,23 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(out)
         })?,
     )?;
-    // viber.destructibles([raio]) -> props colhíveis perto do herói.
+    // viber.interact_range(base) -> alcance EFETIVO (o autorado escalado
+    // pela configuração global de interação). O script compara distâncias
+    // sem duplicar a escala.
     api.set(
-        "destructibles",
-        lua.create_function(|lua, radius: Option<f32>| {
-            let radius = radius.unwrap_or(4.0);
-            if !radius.is_finite() || radius <= 0.0 {
+        "interact_range",
+        lua.create_function(|_, base: f32| {
+            if !base.is_finite() || base < 0.0 {
                 return Err(mlua::Error::runtime(
-                    "viber.destructibles: raio tem de ser finito e > 0",
+                    "viber.interact_range: base tem de ser finita e >= 0",
                 ));
             }
-            let out = lua.create_table()?;
-            let ctx = lua.app_data_ref::<ScriptCtx>();
-            let Some(ctx) = ctx.as_ref() else {
-                return Ok(out);
-            };
-            let Some(hero) = ctx.player else {
-                return Ok(out);
-            };
-            let mut rows: Vec<_> = ctx
-                .destructibles
-                .iter()
-                .filter(|row| row.pos.distance(hero) <= radius)
-                .collect();
-            rows.sort_by(|a, b| a.pos.distance(hero).total_cmp(&b.pos.distance(hero)));
-            for (i, row) in rows.into_iter().take(16).enumerate() {
-                let t = lua.create_table()?;
-                t.raw_set("id", row.id)?;
-                t.raw_set("hits", row.hits)?;
-                t.raw_set("hits_left", row.hits_left)?;
-                t.raw_set("kind", row.kind.clone())?;
-                t.raw_set("amount", row.amount)?;
-                t.raw_set("x", row.pos.x)?;
-                t.raw_set("y", row.pos.y)?;
-                t.raw_set("z", row.pos.z)?;
-                t.raw_set("range", row.range)?;
-                t.raw_set("effective_range", row.effective_range)?;
-                t.raw_set("name", row.name.clone())?;
-                t.raw_set("style", row.style.clone())?;
-                t.raw_set("popup", row.popup.clone())?;
-                t.raw_set("distance", row.pos.distance(hero))?;
-                out.raw_set(i + 1, t)?;
-            }
-            Ok(out)
+            Ok(crate::interact::scaled_range(base))
         })?,
     )?;
-    // viber.nearby(raio [, limite]) -> { {id, name, x, y, z, distance}, … }
+    // viber.nearby(raio [, limite]) -> { {id, name, x, y, z, distance, props?}, … }
     // — entidades NOMEADAS à volta da entidade corrente, mais perto 1.º.
+    // `props` são os dados autorais (`prop-*`, `destructible`, resource-*).
     api.set(
         "nearby",
         lua.create_function(|lua, (radius, limit): (f32, Option<usize>)| {
@@ -929,6 +938,59 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 t.raw_set("y", pos.y)?;
                 t.raw_set("z", pos.z)?;
                 t.raw_set("distance", distance)?;
+                if let Some(props) = ctx.props_snapshot.get(&bits) {
+                    let table = lua.create_table()?;
+                    for (key, value) in props.iter() {
+                        table.raw_set(key.as_str(), value.as_str())?;
+                    }
+                    t.raw_set("props", table)?;
+                }
+                out.raw_set(i + 1, t)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    // viber.player_nearby(raio [, limite]) — o mesmo que `nearby`, mas
+    // centrado no HERÓI (controllers always-active não vivem no herói).
+    api.set(
+        "player_nearby",
+        lua.create_function(|lua, (radius, limit): (f32, Option<usize>)| {
+            let out = lua.create_table()?;
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(mlua::Error::runtime(
+                    "viber.player_nearby: raio tem de ser finito e > 0",
+                ));
+            }
+            let ctx = lua.app_data_ref::<ScriptCtx>();
+            let Some(ctx) = ctx.as_ref() else {
+                return Ok(out);
+            };
+            let Some(origin) = ctx.player else {
+                return Ok(out);
+            };
+            let mut found: Vec<(f32, i64, String, Vec3)> = ctx
+                .pos_snapshot
+                .iter()
+                .map(|(bits, (name, pos))| (pos.distance(origin), *bits, name.clone(), *pos))
+                .filter(|(d, ..)| *d <= radius)
+                .collect();
+            found.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let cap = limit.unwrap_or(16).min(64);
+            for (i, (distance, bits, name, pos)) in found.into_iter().take(cap).enumerate() {
+                let t = lua.create_table()?;
+                t.raw_set("id", bits)?;
+                t.raw_set("name", name)?;
+                t.raw_set("x", pos.x)?;
+                t.raw_set("y", pos.y)?;
+                t.raw_set("z", pos.z)?;
+                t.raw_set("distance", distance)?;
+                if let Some(props) = ctx.props_snapshot.get(&bits) {
+                    let table = lua.create_table()?;
+                    for (key, value) in props.iter() {
+                        table.raw_set(key.as_str(), value.as_str())?;
+                    }
+                    t.raw_set("props", table)?;
+                }
                 out.raw_set(i + 1, t)?;
             }
             Ok(out)
@@ -1206,20 +1268,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // viber.status_clear(kind?) — limpa um status do herói (hoje: venom).
-    api.set(
-        "status_clear",
-        lua.create_function(|lua, kind: Option<String>| {
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("seeded")
-                .commands
-                .push(ScriptCommand::StatusClear(
-                    kind.unwrap_or_else(|| "venom".to_string()),
-                ));
-            Ok(())
-        })?,
-    )?;
-
     // viber.own_system(nome) — reclama um sistema NATIVO para Lua
     // (`dialogue`, `abilities`, `bomb`, `guard`, `hotbar`, `harvest`,
     // `locomotion`): o handler nativo correspondente cala e a lógica passa
@@ -1440,14 +1488,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // viber.push_player(dx, dz[, iframes]) — desloca o herói ~(dx, dz) metros
-    // pelo character controller (colide com muros; o dash não atravessa
-    // paredes como o teleporte). `iframes` = segundos invulnerável.
+    // viber.push_player(dx, dz) — desloca o herói ~(dx, dz) metros pelo
+    // character controller (colide com muros; o dash não atravessa paredes
+    // como o teleporte). I-frames são regra do jogo (Lua).
     api.set(
         "push_player",
-        lua.create_function(|lua, (dx, dz, iframes): (f32, f32, Option<f32>)| {
-            let iframes = iframes.unwrap_or(0.0);
-            if !(dx.is_finite() && dz.is_finite() && iframes.is_finite()) {
+        lua.create_function(|lua, (dx, dz): (f32, f32)| {
+            if !(dx.is_finite() && dz.is_finite()) {
                 return Err(mlua::Error::runtime(
                     "viber.push_player: valores não finitos (NaN/inf)",
                 ));
@@ -1457,7 +1504,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .commands
                 .push(ScriptCommand::PushPlayer {
                     velocity: crate::physics_fx::push_velocity(Vec3::new(dx, 0.0, dz)),
-                    iframes: iframes.clamp(0.0, 2.0),
                 });
             Ok(())
         })?,

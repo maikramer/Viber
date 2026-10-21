@@ -25,7 +25,6 @@ use bevy::prelude::*;
 
 use crate::luau::ScriptInteraction;
 use crate::player::Player;
-use crate::recipes::spawn::DialogueNpc;
 
 /// Alcance histórico de interação (m) — a unidade em que o conteúdo foi
 /// autorado. O valor EFETIVO é este × [`range_scale`].
@@ -115,7 +114,6 @@ pub fn focus_interactions(
     mut focus: ResMut<InteractionFocus>,
     players: Query<&GlobalTransform, With<Player>>,
     targets: Query<(Entity, &GlobalTransform, &ScriptInteraction), Without<Player>>,
-    npcs: Query<(Entity, &GlobalTransform), (With<DialogueNpc>, Without<Player>)>,
 ) {
     focus.clear();
     // `iter().next()` e não `single()`: ≥2 players não pode matar a interação.
@@ -127,13 +125,6 @@ pub fn focus_interactions(
         let distance = transform.translation().distance(origin);
         if distance <= interaction.range {
             focus.consider(interaction.key, entity, distance);
-        }
-    }
-    let dialogue_range = default_range();
-    for (entity, transform) in &npcs {
-        let distance = transform.translation().distance(origin);
-        if distance <= dialogue_range {
-            focus.consider(KeyCode::KeyE, entity, distance);
         }
     }
 }

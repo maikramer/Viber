@@ -440,20 +440,14 @@ pub fn third_person_camera(
     mut shake: ResMut<CameraShake>,
     mut kick: ResMut<CameraKick>,
     mut cameras: Query<(&mut Transform, &mut OrbitCamera)>,
-    players: Query<(&GlobalTransform, &Player, Option<&crate::lockon::LockOn>), With<Player>>,
-    lock_targets: Query<&GlobalTransform, Without<Player>>,
+    players: Query<(&GlobalTransform, &Player), With<Player>>,
     runtime: Option<Res<TerrainRuntime>>,
     interior: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     a11y: Option<Res<crate::a11y::A11y>>,
 ) {
-    let Some((target, player, lock)) = players.iter().next() else {
+    let Some((target, player)) = players.iter().next() else {
         return;
     };
-    let lock_yaw = lock.and_then(|lock| {
-        lock_targets.get(lock.target).ok().and_then(|xf| {
-            crate::lockon::lock_camera_yaw(target.translation(), xf.translation())
-        })
-    });
     let target_pos = target.translation();
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
@@ -476,11 +470,6 @@ pub fn third_person_camera(
     let interior_room = interior
         .as_deref()
         .filter(|scene| scene.contains(target_pos.x, target_pos.z));
-    let view_distance_scale = if lock_yaw.is_some() {
-        crate::lockon::LOCK_DISTANCE_SCALE
-    } else {
-        1.0
-    };
     for (mut transform, mut cam) in &mut cameras {
         if cam.target.is_some() {
             continue; // named-target camera: rigid follow owns it
@@ -519,22 +508,18 @@ pub fn third_person_camera(
         let facing = target.rotation() * Vec3::Z;
         let behind_facing = behind_yaw_deg(facing.x, facing.z);
         let settle_allowed = player.last_moving_time.is_finite();
-        if lock_yaw.is_none() {
-            cam.yaw_deg = auto_camera_yaw(
-                cam.yaw_deg,
-                AutoCameraInput {
-                    heading,
-                    speed,
-                    heading_alignment: alignment,
-                    behind_facing_yaw: behind_facing,
-                    settle_allowed,
-                    seconds_since_steer: now - player.last_steer_time,
-                },
-                dt,
-            );
-        } else if let Some(yaw) = lock_yaw {
-            cam.yaw_deg = yaw;
-        }
+        cam.yaw_deg = auto_camera_yaw(
+            cam.yaw_deg,
+            AutoCameraInput {
+                heading,
+                speed,
+                heading_alignment: alignment,
+                behind_facing_yaw: behind_facing,
+                settle_allowed,
+                seconds_since_steer: now - player.last_steer_time,
+            },
+            dt,
+        );
         // First frame: snap the smoothed state onto the target (no startup
         // swoop from the world origin).
         if !cam.initialized {
@@ -544,7 +529,7 @@ pub fn third_person_camera(
                 + camera_offset(
                     cam.smooth_yaw_deg,
                     cam.pitch_state_deg,
-                    cam.distance * view_distance_scale,
+                    cam.distance,
                     cam.height,
                 );
             cam.initialized = true;
@@ -569,7 +554,7 @@ pub fn third_person_camera(
             + camera_offset(
                 cam.smooth_yaw_deg,
                 cam.pitch_state_deg,
-                cam.distance * view_distance_scale,
+                cam.distance,
                 cam.height,
             );
 

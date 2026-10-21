@@ -12,8 +12,7 @@ use super::assets::{
 use super::compass::{CompassDistance, CompassLetter, CompassTick};
 use super::interact::{BALLOON_DURATION, HudBalloon, HudPrompt};
 use super::minimap::{MinimapAnchor, MinimapArrow, MinimapDot, MinimapRange};
-use super::vitals::xp_label_text;
-use super::vitals::{HudHealthFill, HudHealthLabel, HudXpFill, HudXpLabel};
+use super::vitals::{HudHealthFill, HudHealthLabel};
 
 fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     attrs
@@ -192,96 +191,6 @@ pub fn spawn_hud(world: &mut World, tag: &str, attrs: &[(String, String)]) {
                                     ));
                                 });
                         });
-                });
-        }
-        "xpbar" => {
-            bevy::log::warn!(
-                "hud: tag legada `XpBar` — usa `<UiBar bind=\"xp\">` num UiRoot (HUD declarativo)"
-            );
-            // Level badge (gold coin) + slim dark bar with a gold fill.
-            world
-                .spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: Val::Px(66.0),
-                        left: Val::Px(12.0),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(10.0),
-                        padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
-                        border_radius: BorderRadius::all(Val::Px(13.0)),
-                        ..Default::default()
-                    },
-                    panel_base(),
-                    panel_shadow(),
-                    Name::new("hud:xp"),
-                ))
-                .with_children(|p| {
-                    p.spawn(gradient_overlay(&hud, 13.0));
-                })
-                .with_children(|panel| {
-                    panel
-                        .spawn((
-                            Node {
-                                width: Val::Px(26.0),
-                                height: Val::Px(26.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                border_radius: BorderRadius::all(Val::Px(13.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgb(0.86, 0.65, 0.12)),
-                            BorderColor::all(Color::srgb(0.42, 0.29, 0.04)),
-                        ))
-                        .with_children(|coin| {
-                            coin.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(3.0),
-                                    top: Val::Px(3.0),
-                                    width: Val::Px(20.0),
-                                    height: Val::Px(20.0),
-                                    border_radius: BorderRadius::all(Val::Px(10.0)),
-                                    ..Default::default()
-                                },
-                                BackgroundColor(Color::srgba(1.0, 0.86, 0.35, 0.55)),
-                            ));
-                            coin.spawn(label(&hud, "1", 14.0, Color::srgb(0.32, 0.21, 0.02)));
-                        });
-                    panel
-                        .spawn((
-                            Node {
-                                width: Val::Px(170.0),
-                                height: Val::Px(12.0),
-                                padding: UiRect::all(Val::Px(2.0)),
-                                border_radius: BorderRadius::all(Val::Px(6.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-                        ))
-                        .with_children(|track| {
-                            track.spawn((
-                                Node {
-                                    width: Val::Percent(0.0),
-                                    height: Val::Percent(100.0),
-                                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                                    ..Default::default()
-                                },
-                                BackgroundColor(Color::srgb(0.94, 0.71, 0.15)),
-                                HudXpFill,
-                            ));
-                        });
-                    // Dim numeric readout parked right of the bar.
-                    panel.spawn((
-                        label(
-                            &hud,
-                            xp_label_text(0, 100),
-                            10.0,
-                            Color::srgba(1.0, 0.95, 0.8, 0.65),
-                        ),
-                        HudXpLabel,
-                    ));
                 });
         }
         "minimap" => {

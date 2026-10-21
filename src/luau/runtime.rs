@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
 use crate::player::Player;
-use crate::vitals::{Health, Xp};
+use crate::vitals::Health;
 
 use super::commands::ScriptCommand;
 use super::components::{
@@ -76,9 +76,6 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub scene_index: Option<bevy::ecs::system::Res<'w, crate::scene_loader::SceneIndex>>,
     /// Warn 1× por entidade sem rig/clip de gesto.
     pub gesture_warned: bevy::ecs::system::Local<'s, std::collections::HashSet<Entity>>,
-    /// Warn 1× por kind de status desconhecido (`viber.apply_status`) — o
-    /// script corre por frame; sem isto o warn unknown-kind virava spam.
-    pub status_warned: bevy::ecs::system::Local<'s, std::collections::HashSet<String>>,
     /// Snapshot partilhado de estradas/água (`viber.on_road`/`in_water`).
     pub surfaces: bevy::ecs::system::Local<'s, SurfaceCache>,
     /// Locomoção das entidades scriptadas. Fica aqui, e não como parâmetro
@@ -101,6 +98,10 @@ pub struct LuauRuntimeLocals<'w, 's> {
     /// Fila de eventos engine→Lua (producers → fan-out por-path). `Option`
     /// pelas apps mínimas, como o resto.
     pub events: Option<bevy::ecs::system::ResMut<'w, ScriptEventQueue>>,
+    /// Props anexados a ossos (`viber.attach`/`detach`) — consumidos pelo
+    /// `AttachmentPlugin` da app completa.
+    pub attachments:
+        Option<bevy::ecs::system::ResMut<'w, crate::attachment::AttachmentRequests>>,
     /// Warn 1× por path com a fila de eventos cheia.
     pub events_dropped: bevy::ecs::system::Local<'s, std::collections::HashSet<String>>,
     /// HP mutável de entidades NÃO-player (`viber.entity_*`). A MESMA query
@@ -112,17 +113,6 @@ pub struct LuauRuntimeLocals<'w, 's> {
         (
             Entity,
             &'static mut crate::vitals::Health,
-            &'static GlobalTransform,
-        ),
-        Without<Player>,
-    >,
-    /// Props com `destructible` (`viber.destructibles`), filtrados à volta do herói.
-    pub destructibles: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static crate::harvest::Destructible,
             &'static GlobalTransform,
         ),
         Without<Player>,
@@ -150,7 +140,7 @@ pub struct LuauRuntimeLocals<'w, 's> {
     /// Nomes removidos (inclui despawns) — saem do snapshot.
     pub names_removed: bevy::ecs::lifecycle::RemovedComponents<'w, 's, Name>,
     /// Props `prop-*` das entidades com script — semeia `ctx.self_props`.
-    pub script_props: Query<'w, 's, &'static crate::luau::ScriptProps>,
+    pub script_props: Query<'w, 's, (Entity, &'static crate::luau::ScriptProps)>,
     /// Warn 1× por entidade de dano/cura em quem não tem `Health`.
     pub entity_vitals_warned: bevy::ecs::system::Local<'s, HashSet<Entity>>,
     /// Warn 1× por chave para avisos que um script repete por frame (plugin
@@ -267,14 +257,12 @@ pub fn luau_update(
             &GlobalTransform,
             Option<&mut Transform>,
             Option<&mut Health>,
-            Option<&mut Xp>,
         ),
         With<crate::player::Player>,
     >,
     terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
     mut toasts: bevy::ecs::message::MessageWriter<ScriptToast>,
     mut sfx: bevy::ecs::message::MessageWriter<crate::ambient::SfxEvent>,
-    mut hurts: bevy::ecs::message::MessageWriter<crate::feedback::PlayerHurt>,
     // Gestos (`viber.gesture`): rig da entidade + os AnimationPlayers das
     // cenas glTF (play_action precisa dos dois).
     mut animators: Query<&mut crate::animation::CharacterAnimator>,
@@ -295,13 +283,13 @@ pub fn luau_update(
         ctx.locale_table = Some(std::sync::Arc::new(locale.table.clone()));
     }
     let (player_pos, mut player_components, player_forward) = match players.single_mut() {
-        Ok((p_entity, global, transform, health, xp)) => {
+        Ok((p_entity, global, transform, health)) => {
             // Forward do modelo (+Z) na MESMA extração (o borrow mutável de
             // `players` vive em `player_components`).
             let f = crate::player::hero_forward(global);
             (
                 Some(global.translation()),
-                Some((p_entity, transform, health, xp)),
+                Some((p_entity, transform, health)),
                 Vec2::new(f.x, f.z),
             )
         }
@@ -310,6 +298,15 @@ pub fn luau_update(
     let just_pressed: Vec<KeyCode> = keys.get_just_pressed().copied().collect();
     let keys_down: Vec<KeyCode> = keys.get_pressed().copied().collect();
     let keys_released: Vec<KeyCode> = keys.get_just_released().copied().collect();
+
+    // Snapshot dos props autorais para `viber.nearby` (dados, não regra).
+    if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
+        ctx.props_snapshot.clear();
+        for (entity, props) in locals.script_props.iter() {
+            ctx.props_snapshot
+                .insert(entity.to_bits() as i64, props.0.clone());
+        }
+    }
 
     // Semeia as teclas ANTES de correr os on_update: `viber.interacted`
     // tem de ver as teclas pressionadas NESTE frame (semear só no fim
@@ -338,13 +335,13 @@ pub fn luau_update(
         // Snapshot do HP do herói para `viber.player_hp` (frame-start).
         ctx.player_hp = player_components
             .as_ref()
-            .and_then(|(_, _, health, _)| health.as_deref().map(|h| (h.current, h.max)));
+            .and_then(|(_, _, health)| health.as_deref().map(|h| (h.current, h.max)));
         ctx.player_bits = player_components
             .as_ref()
-            .map(|(entity, _, _, _)| entity.to_bits() as i64);
+            .map(|(entity, _, _)| entity.to_bits() as i64);
         ctx.clip_durations = player_components
             .as_ref()
-            .and_then(|(entity, _, _, _)| animators.get(*entity).ok())
+            .and_then(|(entity, _, _)| animators.get(*entity).ok())
             .map(|animator| {
                 animator
                     .clip_names
@@ -475,41 +472,6 @@ pub fn luau_update(
                 hp.insert(e.to_bits() as i64, (h.current, h.max));
             }
             ctx.hp_snapshot = hp;
-            ctx.destructibles.clear();
-            if let Some(hero) = player_pos {
-                for (e, prop, global) in locals.destructibles.iter() {
-                    let pos = global.translation();
-                    if pos.distance(hero) > 40.0 {
-                        continue;
-                    }
-                    let (kind, amount) =
-                        prop.resource.clone().unwrap_or_else(|| (String::new(), 0));
-                    ctx.destructibles.push(super::ctx::DestructibleSnap {
-                        id: e.to_bits() as i64,
-                        hits: prop.hits,
-                        hits_left: prop.hits.saturating_sub(prop.hits_taken),
-                        kind,
-                        amount,
-                        pos,
-                        range: prop.range,
-                        effective_range: crate::interact::scaled_range(
-                            prop.range.min(crate::interact::BASE_RANGE_M),
-                        ),
-                        name: locals
-                            .entity_names
-                            .get(e)
-                            .map(|n| n.as_str().to_string())
-                            .unwrap_or_default(),
-                        style: match prop.break_style {
-                            crate::harvest::BreakStyle::Fall => "fall",
-                            crate::harvest::BreakStyle::Shatter => "shatter",
-                            crate::harvest::BreakStyle::Burst => "burst",
-                        }
-                        .to_string(),
-                        popup: prop.popup.clone().unwrap_or_default(),
-                    });
-                }
-            }
             ctx.hostiles.clear();
             for (e, script, _fsm, global) in locals.hostile_entities.iter() {
                 let Some(&(cur, max)) = ctx.hp_snapshot.get(&(e.to_bits() as i64)) else {
@@ -594,7 +556,7 @@ pub fn luau_update(
             // Nome PRÓPRIO da entidade que vai correr (fora do snapshot com
             // cap — ver `entity_names`).
             ctx.self_name = locals.entity_names.get(entity).ok().map(Name::to_string);
-            ctx.self_props = locals.script_props.get(entity).ok().map(|p| p.0.clone());
+            ctx.self_props = locals.script_props.get(entity).ok().map(|(_, p)| p.0.clone());
             ctx.sense = locals
                 .sense
                 .as_deref()
@@ -730,7 +692,7 @@ pub fn luau_update(
             if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
                 ctx.interaction_range = interaction.map(|i| i.range);
                 ctx.self_name = locals.entity_names.get(target).ok().map(Name::to_string);
-                ctx.self_props = locals.script_props.get(target).ok().map(|p| p.0.clone());
+                ctx.self_props = locals.script_props.get(target).ok().map(|(_, p)| p.0.clone());
             }
             match host.run_method(
                 target,
@@ -887,7 +849,7 @@ pub fn luau_update(
                 });
             }
             ScriptCommand::TeleportPlayer(pos) => {
-                if let Some((entity, Some(transform), _, _)) = player_components.as_mut() {
+                if let Some((entity, Some(transform), _)) = player_components.as_mut() {
                     // ASSENTA no destino em vez de largar o herói no ar: as
                     // colunas do destino podem estar por assar (vinha de uma
                     // bolsa de interior a 2,6 km) e, sem collider, o herói
@@ -901,28 +863,11 @@ pub fn luau_update(
                         .try_insert(crate::player::TeleportSettle::default());
                 }
             }
-            ScriptCommand::PushPlayer { velocity, iframes } => {
-                if let Some((entity, _, _, _)) = player_components.as_ref() {
+            ScriptCommand::PushPlayer { velocity } => {
+                if let Some((entity, _, _)) = player_components.as_ref() {
                     commands
                         .entity(*entity)
                         .try_insert(crate::physics_fx::Knockback { velocity });
-                    if iframes > 0.0 {
-                        commands
-                            .entity(*entity)
-                            .try_insert(crate::feedback::Invulnerable { timer: iframes });
-                    }
-                }
-            }
-            ScriptCommand::DamagePlayer { amount, from } => {
-                // Path único de dano: o feedback aplica (i-frames, vinheta,
-                // número flutuante, morte, knockback) no próximo processamento.
-                hurts.write(crate::feedback::PlayerHurt {
-                    amount,
-                    status: false,
-                    from,
-                });
-                if std::env::var_os("VIBER_COMBAT_DEBUG").is_some() {
-                    info!(target: "viber::combat", "damage {amount} pedido por script");
                 }
             }
             ScriptCommand::FireProjectile {
@@ -943,22 +888,8 @@ pub fn luau_update(
                 }
             }
             ScriptCommand::HealPlayer(amount) => {
-                if let Some((_, _, Some(health), _)) = player_components.as_mut() {
+                if let Some((_, _, Some(health))) = player_components.as_mut() {
                     health.current = (health.current + amount).min(health.max);
-                }
-            }
-            ScriptCommand::ApplyStatus { kind, secs } => {
-                if kind.eq_ignore_ascii_case("venom") {
-                    if let Some((p_entity, _, _, _)) = player_components.as_mut() {
-                        commands
-                            .entity(*p_entity)
-                            .try_insert(crate::feedback::StatusEffects {
-                                venom: secs.max(0.0),
-                                venom_tick: 0.0,
-                            });
-                    }
-                } else if locals.status_warned.insert(kind.clone()) {
-                    warn!(target: "viber::luau", "apply_status: kind desconhecido '{kind}'");
                 }
             }
             ScriptCommand::Toast(msg) => {
@@ -1058,36 +989,31 @@ pub fn luau_update(
                 sfx.write(crate::ambient::SfxEvent { clip, position });
             }
             ScriptCommand::Topple { entity } => {
-                // tomba na direção herói→entidade (break-style: fall)
-                let target_pos =
-                    scripts
-                        .get(entity)
-                        .ok()
-                        .and_then(|(_, _, transform, global, _, _)| {
-                            global
-                                .map(GlobalTransform::translation)
-                                .or_else(|| transform.as_ref().map(|t| t.translation))
-                        });
-                if let (Some(target_pos), Some(player_pos)) = (target_pos, player_pos) {
-                    let dir = (target_pos - player_pos).normalize_or_zero();
-                    // initial preserva o yaw autoral — sem ele o prop "popeava"
-                    // para identidade no 1.º frame da queda.
-                    let initial = scripts
-                        .get(entity)
-                        .ok()
-                        .and_then(|(_, _, transform, _, _, _)| {
-                            transform.as_ref().map(|t| t.rotation)
-                        })
+                // Tomba QUALQUER entidade (um prop do spawner não tem
+                // script): física genérica; a direção sai do herói ao alvo.
+                commands.queue(move |world: &mut World| {
+                    let Some(player) = player_pos else {
+                        return;
+                    };
+                    let Some(global) = world.get::<GlobalTransform>(entity) else {
+                        return;
+                    };
+                    let target = global.translation();
+                    let dir = (target - player).normalize_or_zero();
+                    let initial = world
+                        .get::<Transform>(entity)
+                        .map(|t| t.rotation)
                         .unwrap_or_default();
-                    commands
-                        .entity(entity)
-                        .try_insert(crate::physics_fx::Falling {
-                            axis: Vec3::new(dir.z, 0.0, -dir.x),
-                            timer: 0.0,
-                            initial,
-                        });
-                    commands.entity(entity).try_remove::<LuaScriptRef>();
-                }
+                    let Ok(mut prop) = world.get_entity_mut(entity) else {
+                        return;
+                    };
+                    prop.insert(crate::physics_fx::Falling {
+                        axis: Vec3::new(dir.z, 0.0, -dir.x),
+                        timer: 0.0,
+                        initial,
+                    });
+                    prop.remove::<LuaScriptRef>();
+                });
             }
             ScriptCommand::PlayCinematic { id, anchor } => {
                 commands.queue(move |world: &mut World| {
@@ -1131,7 +1057,7 @@ pub fn luau_update(
                     .unwrap_or_else(|_| "creature".to_string());
                 let player_hit = player_components
                     .as_ref()
-                    .is_some_and(|(id, _, _, _)| *id == entity);
+                    .is_some_and(|(id, _, _)| *id == entity);
                 // Morte do herói não é um abate: o Kill disparava loot/quests.
                 macro_rules! kill_if_dead {
                     ($before:expr, $hp:expr) => {
@@ -1151,9 +1077,9 @@ pub fn luau_update(
                     kill_if_dead!(before, health.current);
                 } else if player_components
                     .as_ref()
-                    .is_some_and(|(id, _, health, _)| *id == entity && health.is_some())
+                    .is_some_and(|(id, _, health)| *id == entity && health.is_some())
                 {
-                    if let Some((_, _, Some(health), _)) = player_components.as_mut() {
+                    if let Some((_, _, Some(health))) = player_components.as_mut() {
                         let before = health.current;
                         crate::vitals::apply_damage(health, amount);
                         kill_if_dead!(before, health.current);
@@ -1177,9 +1103,9 @@ pub fn luau_update(
                     health.current = apply_heal(health.current, health.max, amount);
                 } else if player_components
                     .as_ref()
-                    .is_some_and(|(id, _, health, _)| *id == entity && health.is_some())
+                    .is_some_and(|(id, _, health)| *id == entity && health.is_some())
                 {
-                    if let Some((_, _, Some(health), _)) = player_components.as_mut() {
+                    if let Some((_, _, Some(health))) = player_components.as_mut() {
                         health.current = apply_heal(health.current, health.max, amount);
                     }
                 } else if let Some((cur, max)) = locals.fresh_health.get_mut(&entity) {
@@ -1228,6 +1154,30 @@ pub fn luau_update(
                 commands.entity(entity).try_insert(crate::corpse::Corpse {
                     timer: crate::corpse::CORPSE_LIFETIME,
                 });
+            }
+            ScriptCommand::Attach {
+                owner,
+                slot,
+                url,
+                bone,
+                pos,
+                rot,
+                scale,
+            } => {
+                if let Some(queue) = locals.attachments.as_deref_mut() {
+                    queue.0.push(crate::attachment::AttachmentRequest {
+                        owner,
+                        slot,
+                        url,
+                        bone,
+                        pos,
+                        rot,
+                        scale,
+                    });
+                } else if locals.once_warned.insert("attach".into()) {
+                    warn!(target: "viber::luau",
+                        "viber.attach sem AttachmentPlugin — pedido ignorado");
+                }
             }
             ScriptCommand::A11ySet {
                 subtitle_scale,
@@ -1328,23 +1278,6 @@ pub fn luau_update(
             ScriptCommand::DamageNumber { text, pos, color } => {
                 locals.fx.damage_number(text, pos, color);
             }
-            ScriptCommand::StatusClear(kind) => {
-                // Reusa o path do status: zerar o veneno limpa o efeito no
-                // tick seguinte (o mesmo que o antídoto da hotbar nativa).
-                if kind.eq_ignore_ascii_case("venom") {
-                    if let Some((p_entity, _, _, _)) = player_components.as_mut() {
-                        commands
-                            .entity(*p_entity)
-                            .try_insert(crate::feedback::StatusEffects {
-                                venom: 0.0,
-                                venom_tick: 0.0,
-                            });
-                    }
-                } else if locals.status_warned.insert(kind.clone()) {
-                    warn!(target: "viber::luau",
-                        "viber.status_clear: status desconhecido '{kind}' (válidos: venom)");
-                }
-            }
             ScriptCommand::OwnSystem(name) => {
                 if let Some(owners) = locals.system_owners.as_deref_mut() {
                     owners.0.insert(name);
@@ -1410,7 +1343,7 @@ pub fn luau_update(
                 // `players` já está emprestado em `player_components` desde o
                 // início do frame — um segundo `get_mut` não compila.
                 let mut applied = false;
-                if let Some((p_entity, Some(transform), _, _)) = player_components.as_mut()
+                if let Some((p_entity, Some(transform), _)) = player_components.as_mut()
                     && *p_entity == entity
                 {
                     apply(transform);
@@ -1467,24 +1400,6 @@ pub fn luau_update(
                     markers.waypoint = waypoint
                         .map(|(position, label)| crate::hud::markers::HudPoint { position, label });
                 }
-            }
-            ScriptCommand::LockTarget(target) => {
-                commands.queue(move |world: &mut World| {
-                    let Some(mut requests) = world.get_resource_mut::<crate::lockon::LockRequests>()
-                    else {
-                        return;
-                    };
-                    requests.set = Some(target);
-                });
-            }
-            ScriptCommand::CycleLock => {
-                commands.queue(move |world: &mut World| {
-                    if let Some(mut requests) =
-                        world.get_resource_mut::<crate::lockon::LockRequests>()
-                    {
-                        requests.cycle = true;
-                    }
-                });
             }
             ScriptCommand::Noise { pos, loudness } => {
                 commands.queue(move |world: &mut World| {

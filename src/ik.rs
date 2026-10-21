@@ -7,7 +7,6 @@
 use bevy::prelude::*;
 
 use crate::animation::{AnimState, CharacterAnimator, FrozenAnimation};
-use crate::lockon::LockOn;
 
 /// Folga (m) entre a planta do pé e a superfície amostrada.
 pub const FOOT_CLEARANCE: f32 = 0.02;
@@ -184,20 +183,19 @@ fn apply_aim(
 
 /// Assenta os pés e, com lock-on, vira a cabeça. Corre depois da animação.
 pub fn foot_ik_system(
-    mut characters: Query<(&CharacterAnimator, &GlobalTransform, Option<&LockOn>), With<FootIk>>,
+    mut characters: Query<(&CharacterAnimator, &GlobalTransform), With<FootIk>>,
     names: Query<&Name>,
     children: Query<&Children>,
     parents: Query<&ChildOf>,
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
     rigs: Query<Has<FrozenAnimation>>,
-    targets: Query<&GlobalTransform, Without<FootIk>>,
     terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
 ) {
     let Some(terrain) = terrain.as_deref() else {
         return;
     };
-    for (animator, xform, lock) in &mut characters {
+    for (animator, _xform) in &mut characters {
         if rigs.get(animator.player).unwrap_or(false) {
             continue;
         }
@@ -226,34 +224,6 @@ pub fn foot_ik_system(
                 &parents,
                 &globals,
                 &mut transforms,
-            );
-        }
-        if let Some(lock) = lock
-            && let Some(head_entity) = bones.iter().find(|(_, n)| is_head(n)).map(|(e, _)| *e)
-            && let Ok(target) = targets.get(lock.target)
-        {
-            let Some(head_pos) = world_of(head_entity, &globals) else {
-                continue;
-            };
-            let to = target.translation() + Vec3::Y * 1.4 - head_pos;
-            let forward = xform.rotation() * Vec3::Z;
-            let to_dir = to.normalize_or_zero();
-            if to_dir.length_squared() < 1e-8 {
-                continue;
-            }
-            let aimed = forward.slerp(to_dir, HEAD_LOOK_WEIGHT);
-            let parent = parents
-                .get(head_entity)
-                .map(|c| c.parent())
-                .unwrap_or(animator.player);
-            let from = forward * 0.2;
-            apply_aim(
-                head_entity,
-                parent,
-                head_pos + from,
-                head_pos + aimed * 0.2,
-                &mut transforms,
-                &globals,
             );
         }
     }

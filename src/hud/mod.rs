@@ -32,17 +32,14 @@ pub use compass::{
 pub use elements::{spawn_hud, spawn_resource_chip};
 pub use interact::{
     BALLOON_DURATION, BALLOON_RANGE_M, HudBalloon, HudPrompt, HudToggle, apply_subtitle_scale,
-    balloon_tick, hud_balloon_update, hud_prompt_update, hud_toggle,
+    balloon_tick, hud_balloon_update, hud_toggle,
 };
 pub use markers::HudMarkers;
 pub use minimap::{
     MinimapAnchor, MinimapArrow, MinimapDot, MinimapLandmark, MinimapRange, MinimapTower,
     arrow_rotation_rad, hud_minimap_landmarks_update, hud_minimap_update, minimap_xy,
 };
-pub use vitals::{
-    HudHealthFill, HudHealthLabel, HudXpFill, HudXpLabel, health_label_text, hud_health_sync,
-    hud_xp_sync, xp_label_text,
-};
+pub use vitals::{HudHealthFill, HudHealthLabel, health_label_text, hud_health_sync};
 
 /// Painéis do HUD que só fazem sentido no MUNDO aberto (bússola, minimapa):
 /// dentro de uma sala da bolsa de interior mostravam distâncias de 2,6 km e

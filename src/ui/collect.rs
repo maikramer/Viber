@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use super::bind::UiData;
 use super::runtime::{UiBind, UiTag};
-use crate::vitals::{Health, Xp};
+use crate::vitals::Health;
 
 /// Newest toast plus its remaining lifetime, so `toast.active` can fade.
 #[derive(Debug, Default, Resource)]
@@ -92,10 +92,6 @@ pub fn collect_ui_prompt(
         (&GlobalTransform, &crate::luau::ScriptInteraction),
         Without<crate::player::Player>,
     >,
-    npcs: Query<
-        (&GlobalTransform, &crate::recipes::spawn::DialogueNpc),
-        Without<crate::player::Player>,
-    >,
 ) {
     let Ok(player) = players.single() else {
         prompt.label.clear();
@@ -122,12 +118,6 @@ pub fn collect_ui_prompt(
                 interaction.label.clone()
             };
             consider(distance, key_label(interaction.key), label);
-        }
-    }
-    for (transform, _) in &npcs {
-        let distance = transform.translation().distance(origin);
-        if distance <= crate::interact::default_range() {
-            consider(distance, "E".to_string(), "falar".to_string());
         }
     }
     match best {
@@ -169,29 +159,15 @@ pub fn key_label(key: bevy::input::keyboard::KeyCode) -> String {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn collect_ui_data(
     mut data: ResMut<UiData>,
-    hero: Query<
-        (
-            Option<&Health>,
-            Option<&Xp>,
-            Option<&crate::feedback::StatusEffects>,
-        ),
-        With<crate::player::Player>,
-    >,
+    hero: Query<Option<&Health>, With<crate::player::Player>>,
     day: Option<Res<crate::worldsys::DayCycleState>>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
     prompt: Option<Res<UiPrompt>>,
     toast: Res<UiToast>,
 ) {
-    if let Ok((health, xp, effects)) = hero.single() {
-        if let Some(health) = health {
-            data.health = health.current;
-            data.health_max = health.max;
-        }
-        if let Some(xp) = xp {
-            data.xp = xp.current as f32;
-            data.xp_next = xp.next as f32;
-        }
-        data.status_venom = effects.is_some_and(|effects| effects.venom > 0.0);
+    if let Ok(Some(health)) = hero.single() {
+        data.health = health.current;
+        data.health_max = health.max;
     }
     data.weather_rain = weather.as_deref().map(|w| w.rain).unwrap_or(0.0);
     if let Some(day) = day.as_deref() {
@@ -438,60 +414,6 @@ mod tests {
     use super::*;
     use bevy::input::keyboard::KeyCode;
 
-    #[test]
-    fn test_dialogue_prompt_uses_e_and_preserves_script_keys() {
-        let mut app = App::new();
-        app.init_resource::<UiPrompt>()
-            .add_systems(Update, collect_ui_prompt);
-        app.world_mut()
-            .spawn((crate::player::Player::default(), GlobalTransform::default()));
-        let npc = app
-            .world_mut()
-            .spawn((
-                crate::recipes::spawn::DialogueNpc {
-                    dialogue_id: "test".into(),
-                },
-                // Dentro do alcance EFETIVO (metade do autorado: 1,75 m).
-                GlobalTransform::from_translation(Vec3::new(1.2, 0.0, 0.0)),
-            ))
-            .id();
-        app.update();
-        let prompt = app.world().resource::<UiPrompt>();
-        assert_eq!(prompt.key, "E");
-        assert_eq!(prompt.label, "falar");
-
-        let scripted = app
-            .world_mut()
-            .spawn((
-                crate::luau::ScriptInteraction {
-                    label: "assinar".into(),
-                    key: KeyCode::KeyF,
-                    // `range` aqui é o EFETIVO (o `set_interaction` já
-                    // escalou; o teste insere o componente à mão).
-                    range: 1.5,
-                },
-                GlobalTransform::from_translation(Vec3::new(0.6, 0.0, 0.0)),
-            ))
-            .id();
-        app.update();
-        let prompt = app.world().resource::<UiPrompt>();
-        assert_eq!(prompt.key, "F", "closer script keeps its authored key");
-        assert_eq!(prompt.label, "assinar");
-
-        app.world_mut().despawn(scripted);
-        app.world_mut()
-            .entity_mut(npc)
-            .insert(GlobalTransform::from_translation(Vec3::new(
-                DIALOGUE_RANGE_M + 1.0,
-                0.0,
-                0.0,
-            )));
-        app.update();
-        let prompt = app.world().resource::<UiPrompt>();
-        assert!(prompt.key.is_empty());
-        assert!(prompt.label.is_empty());
-    }
-
     fn toast_app() -> (App, Entity) {
         let mut app = App::new();
         app.add_systems(Update, retire_legacy_toast_layer);
@@ -619,48 +541,6 @@ mod tests {
         assert_eq!(zone_display_name(Some("   "), Some("desert")), "Ermo Rubro");
         // Com id desconhecido E sem attr, o id deriva o título.
         assert_eq!(zone_display_name(Some("Nome"), None), "Nome");
-    }
-
-    #[test]
-    fn test_collect_publishes_the_venom_status_of_the_hero() {
-        use crate::feedback::StatusEffects;
-
-        let mut app = App::new();
-        app.init_resource::<UiData>()
-            .init_resource::<UiToast>()
-            .add_systems(Update, collect_ui_data);
-        let hero = app
-            .world_mut()
-            .spawn((
-                crate::player::Player::default(),
-                Health {
-                    current: 100.0,
-                    max: 100.0,
-                },
-                Xp {
-                    current: 0,
-                    next: 100,
-                },
-            ))
-            .id();
-        app.update();
-        assert!(!app.world().resource::<UiData>().status_venom);
-
-        // Envenenado: o bind acende sem o collect tocar no estado.
-        app.world_mut().entity_mut(hero).insert(StatusEffects {
-            venom: 2.5,
-            venom_tick: 0.0,
-        });
-        app.update();
-        assert!(app.world().resource::<UiData>().status_venom);
-
-        // Expirou (venom = 0): apaga.
-        app.world_mut().entity_mut(hero).insert(StatusEffects {
-            venom: 0.0,
-            venom_tick: 0.0,
-        });
-        app.update();
-        assert!(!app.world().resource::<UiData>().status_venom);
     }
 
     #[test]

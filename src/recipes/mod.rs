@@ -76,7 +76,7 @@ pub const KNOWN_TAGS: &[&str] = &[
     "vegetation",
     "playergltf",
     "thirdpersoncamera",
-    "dialoguenpc",
+    "npcbody",
     "resourcechip",
     "audiomixer",
     "musiclayer",
@@ -88,9 +88,6 @@ pub const KNOWN_TAGS: &[&str] = &[
     "interiorscene",
     "navmesh",
     "spawngate",
-    // Catálogos RPG declaráveis (Fases B2/B3).
-    "landmark",
-    "spawnpoint",
     "sceneentry",
     "sceneportal",
     "cinematic",
@@ -294,18 +291,6 @@ pub enum UiStyleSource {
     File(String),
 }
 
-/// Dados autorais de um `<Landmark>`. A engine não os interpreta: o jogo
-/// (Lua) decide o que fazer com o bioma/raio/quest de agrimensura.
-#[derive(Debug, Clone, Default)]
-pub struct LandmarkSpec {
-    pub name: String,
-    pub biome_id: String,
-    pub label: String,
-    pub survey_quest: String,
-    pub mark_radius: f32,
-    pub tower_reveals: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub enum EntityKind {
     /// Transform-only container (the `entity` and `group` tags).
@@ -489,12 +474,9 @@ pub enum EntityKind {
     PlayerGltf {
         url: String,
     },
-    /// `<DialogueNPC>` — marks the parent NPC as a dialogue target
-    /// (`dialogue-id`), with a floating marker at `marker-height`.
-    DialogueNpc {
-        dialogue_id: String,
-        marker_height: f32,
-    },
+    /// `<NpcBody>` — só o CORPO do NPC (cápsula de colisão). O diálogo é do
+    /// jogo (Lua).
+    NpcBody,
     /// `<ResourceChip>` — HUD readout of one resource (visual HUD lands with
     /// the UI phase; the entity carries the parsed data).
     ResourceChip {
@@ -600,20 +582,6 @@ pub enum EntityKind {
         tag: String,
         attrs: Vec<(String, String)>,
     },
-    /// `<Landmark name biome label [survey-quest] [mark-radius]>` (Fase B2) —
-    /// marco de traçado declarável. A engine só guarda os dados autorais; o
-    /// HUD/viagem do jogo lê-os por Lua (`viber.markers`). Nunca spawna
-    /// entidade: o marco físico é a entidade com aquele `name`.
-    Landmark { spec: LandmarkSpec },
-    /// `<SpawnPoint at="x z" [label="praça"]>` (Fase B3) — ponto de respawn
-    /// declarável. Recolhido num [`crate::feedback::RespawnCatalog`]; sem
-    /// nenhum, fallback dos 5 pontos do const. Nunca spawna entidade.
-    SpawnPoint {
-        /// XZ do ponto (offsets de grupo acumulados, convenção `at`).
-        at: [f32; 2],
-        /// Rótulo do toast de retorno; vazio → heurística de direção.
-        label: String,
-    },
     /// `<SceneEntry name>` — ponto de chegada de uma cena (`viber.change_scene(cena,
     /// entrada)`); a pose é a do nó. Ver [`crate::scene_loader`].
     SceneEntry,
@@ -681,133 +649,6 @@ pub struct ParticleSpec {
     pub world_space: bool,
 }
 
-/// Estilo de quebra de um prop destrutível (`break-style` no component-string
-/// `destructible`) — port do enum da referência (`destructible`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BreakStyleSpec {
-    /// Só o burst de partículas (default).
-    #[default]
-    Burst,
-    /// Árvore tomba (toco persiste; a malha `Top` pré-dividida cai).
-    Fall,
-    /// Rocha estilhaça em pedaços balísticos.
-    Shatter,
-}
-
-/// `destructible="…"` (attr universal, em component-string) — os
-/// valores crus do XML; a resolução para o componente runtime
-/// [`crate::harvest::Destructible`] aplica os defaults da referência.
-///
-/// Chaves aceites sem efeito funcional: `spark-on-hit` (sparks de hit são
-/// sempre ligadas), `crack-on-hit`/`crack-style` (o darken por hit cobre o
-/// mesmo papel), `cut-height` (os GLBs do mundo já vêm pré-divididos em
-/// `Stump`/`Top`), `impact-fraction`/`face-on-hit` (a engine usa os valores
-/// do melee). Chaves desconhecidas são ignoradas em silêncio — o attr migra
-/// verbatim e o `analyze` não ganha warnings novos.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DestructibleSpec {
-    /// `popup-text` — texto flutuante no break.
-    pub popup_text: Option<String>,
-    /// `popup-color` (#hex) — cor do popup.
-    pub popup_color: Option<[f32; 3]>,
-    /// `preset` — preset de partículas do burst de break.
-    pub preset: Option<String>,
-    /// `burst-count` — partículas do burst de break.
-    pub burst_count: Option<u32>,
-    /// `hits` — golpes até quebrar (default 3, aplicado na conversão).
-    pub hits: Option<u32>,
-    /// `hit-preset` — preset do burst por golpe (mapeado na conversão:
-    /// rockshards→sparks, woodchips→leaves, dust→ground-dust).
-    pub hit_preset: Option<String>,
-    /// `hit-burst-count` — partículas do burst por golpe.
-    pub hit_burst_count: Option<u32>,
-    /// `shake-on-hit` — wobble do visual por golpe.
-    pub shake_on_hit: bool,
-    /// `break-style` — burst/fall/shatter (default burst).
-    pub break_style: BreakStyleSpec,
-    /// `range` — alcance do golpe em metros (default 3.5 na conversão).
-    pub range: Option<f32>,
-    /// `(kind, yield)` do `<ResourceNode>` do template — preenchido pelo
-    /// parse do spawner (o loot não vem do attr `destructible`).
-    pub resource: Option<(String, u32)>,
-}
-
-impl Default for DestructibleSpec {
-    fn default() -> Self {
-        Self {
-            popup_text: None,
-            popup_color: None,
-            preset: None,
-            burst_count: None,
-            hits: None,
-            hit_preset: None,
-            hit_burst_count: None,
-            shake_on_hit: false,
-            break_style: BreakStyleSpec::Burst,
-            range: None,
-            resource: None,
-        }
-    }
-}
-
-impl DestructibleSpec {
-    /// Parser tolerante do component-string (`"hits: 3; break-style: fall"`).
-    /// Nunca falha: valores inválidos caem no default da chave.
-    pub fn parse(value: &str) -> Self {
-        let mut spec = Self::default();
-        for (key, val) in parse_component_string(value) {
-            match key.as_str() {
-                "popup-text" => {
-                    let text = val.trim().to_string();
-                    if !text.is_empty() {
-                        spec.popup_text = Some(text);
-                    }
-                }
-                "popup-color" => {
-                    spec.popup_color = values::parse_color(&val, "destructible popup-color").ok();
-                }
-                "preset" => spec.preset = non_empty(&val),
-                "burst-count" => spec.burst_count = parse_u32_tolerant(&val),
-                "hits" => spec.hits = parse_u32_tolerant(&val),
-                "hit-preset" => spec.hit_preset = non_empty(&val),
-                "hit-burst-count" => spec.hit_burst_count = parse_u32_tolerant(&val),
-                "shake-on-hit" => {
-                    spec.shake_on_hit =
-                        values::parse_bool(&val, "destructible shake-on-hit").unwrap_or(false);
-                }
-                "break-style" => {
-                    spec.break_style = match val.trim().to_ascii_lowercase().as_str() {
-                        "fall" => BreakStyleSpec::Fall,
-                        "shatter" => BreakStyleSpec::Shatter,
-                        _ => BreakStyleSpec::Burst,
-                    };
-                }
-                "range" => {
-                    spec.range = parse_u32_tolerant(&val)
-                        .map(|v| v as f32)
-                        .or_else(|| val.trim().parse::<f32>().ok().filter(|v| v.is_finite()));
-                }
-                // aceites sem efeito (ver doc do struct)
-                "spark-on-hit" | "crack-on-hit" | "crack-style" | "cut-height"
-                | "impact-fraction" | "face-on-hit" => {}
-                // desconhecidas: ignoradas em silêncio (sem warnings novos)
-                _ => {}
-            }
-        }
-        spec
-    }
-}
-
-fn non_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-/// u32 tolerante (o `values::parse_u32` erra; aqui o default manda).
-fn parse_u32_tolerant(value: &str) -> Option<u32> {
-    value.trim().parse::<u32>().ok()
-}
-
 /// Placement rules + template urls of a `<StaticSpawner>` (attribute names as
 /// authored in the source worlds — the element migrates verbatim).
 #[derive(Debug, Clone)]
@@ -872,9 +713,6 @@ pub struct StaticSpawnerSpec {
     pub template_collider: Option<crate::physics::ColliderShape>,
     /// `trigger` do collider do template (sensor em cada instância).
     pub template_trigger: bool,
-    /// `destructible` do template — cada instância spawna colhível
-    /// (componente [`crate::harvest::Destructible`]).
-    pub template_destructible: Option<DestructibleSpec>,
     /// Ladder de LOD por template (mesmo índice de `template_urls`).
     pub template_lods: Vec<TemplateLod>,
     /// Raio (metros) além do qual a instância deixa de renderizar
@@ -1001,7 +839,6 @@ impl VegetationSpec {
             activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
             template_collider: None,
             template_trigger: false,
-            template_destructible: None,
             template_lods: Vec::new(),
             cull_distance: self.cull_distance,
             cast_shadows: self.cast_shadows,
@@ -1079,8 +916,6 @@ pub struct EntitySpec {
     pub props: Vec<(String, String)>,
     /// Grupos e conexões de sinal do nó (`groups=`, `connect-<sinal>=`).
     pub links: NodeLinks,
-    /// `destructible="…"` — prop colhível/destrutível (`crate::harvest`).
-    pub destructible: Option<DestructibleSpec>,
     pub transform: TransformSpec,
     /// Colliders / rigid bodies for the physics runtime.
     pub physics: PhysicsSpec,
@@ -1379,7 +1214,7 @@ fn apply_use_overrides(
             }
             key if spec.links.apply_attr(key, value) => None,
             "destructible" => {
-                spec.destructible = Some(DestructibleSpec::parse(value));
+                spec.props.push(("destructible".into(), value.clone()));
                 None
             }
             "collider" => {
@@ -1555,7 +1390,6 @@ fn parse_entity_kind(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Option<Entity
         "sky" => finish_sky(node, ctx).map(Some),
         "navmesh" | "spawngate" | "projectiletemplate" | "postfxdebugtoggle"
         | "adaptivequality" => finish_engine_config(node, ctx).map(Some),
-        "landmark" => finish_landmark(node, ctx).map(Some),
         // Timeline de câmara/legendas (`crate::cinematic`): os filhos são
         // planos e falas, não entidades.
         "cinematic" => {
@@ -1565,7 +1399,6 @@ fn parse_entity_kind(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Option<Entity
             }
             Ok(None)
         }
-        "spawnpoint" => finish_spawn_point(node, ctx).map(Some),
         "sceneentry" => finish_scene_entry(node, ctx).map(Some),
         "sceneportal" => finish_scene_portal(node, ctx).map(Some),
         "daycycle" => finish_daycycle(node, ctx).map(Some),
@@ -1582,18 +1415,7 @@ fn parse_entity_kind(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Option<Entity
                 Ok(None)
             }
         },
-        "dialoguenpc" => match node
-            .attr("dialogue-id")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(_) => finish_dialogue_npc(node, ctx).map(Some),
-            None => {
-                ctx.warnings
-                    .push(format!("<{}>: missing dialogue-id — skipped", node.tag));
-                Ok(None)
-            }
-        },
+        "npcbody" => finish_npc_body(node, ctx).map(Some),
         "resourcechip" => finish_resource_chip(node, ctx).map(Some),
         "hudscreenlayer" | "healthbar" | "xpbar" | "bossbar" | "targetbar" | "minimap"
         | "compass" | "interactionprompt" | "dialogueballoon" | "tabbedmodal" => {
@@ -1636,7 +1458,6 @@ struct Common {
     /// `prop-<nome>` (sem o prefixo) — props exportados do script.
     props: Vec<(String, String)>,
     links: NodeLinks,
-    destructible: Option<DestructibleSpec>,
     transform: TransformSpec,
     /// Colliders / rigid bodies (`collider`, `rigidbody`, `body`).
     physics: PhysicsSpec,
@@ -1669,13 +1490,10 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
         script: None,
         props: Vec::new(),
         links: Default::default(),
-        destructible: None,
         transform: TransformSpec::default(),
         physics: PhysicsSpec::default(),
     };
     let mut rest = Vec::new();
-    let mut resource_kind: Option<String> = None;
-    let mut resource_yield: u32 = 1;
     for (key, value) in &node.attrs {
         match key.as_str() {
             "name" => common.name = Some(value.clone()),
@@ -1710,18 +1528,22 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
                 common.props.push((name.to_owned(), value.clone()));
             }
             key if common.links.apply_attr(key, value) => {}
-            // Component-string do plugin `destructible` — o
-            // prop nasce colhível (árvores/rochas dos spawners).
-            "destructible" => common.destructible = Some(DestructibleSpec::parse(value)),
+            // `destructible="…"` é DADO do jogo (Lua): fica como prop
+            // autoral verbatim, ao lado de `resource-kind`/`resource-yield`.
+            "destructible" => common.props.push(("destructible".into(), value.clone())),
             // `<ResourceNode kind yield>` em forma de attr — é assim que o
             // `viber bake` emite árvores colhíveis estáticas (o nó filho
             // só é parseado dentro de templates de spawner).
-            "resource-kind" => resource_kind = Some(value.trim().to_string()),
+            "resource-kind" => common
+                .props
+                .push(("resource-kind".into(), value.trim().to_string())),
             // Metadados de edição (`crate::scene::tools`): que gerador produziu este grupo e o
             // id de uma receita — sem efeito no runtime.
             "generated-by" | "id"
                 if matches!(node.tag.to_ascii_lowercase().as_str(), "group" | "scatter") => {}
-            "resource-yield" => resource_yield = value.trim().parse::<u32>().unwrap_or(1).max(1),
+            "resource-yield" => common
+                .props
+                .push(("resource-yield".into(), value.trim().to_string())),
             "collider" => {
                 let (shape, trigger, warning) = crate::physics::parsed_collider(value);
                 common.physics.collider = shape;
@@ -1780,14 +1602,6 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
             other => rest.push((other.to_string(), value.clone())),
         }
     }
-    // Merge do resource no destructible (colheita sem `destructible` não
-    // existe — o spec default leva os defaults de hits/break do harvest).
-    if let Some(kind) = resource_kind.filter(|k| !k.is_empty()) {
-        let spec = common
-            .destructible
-            .get_or_insert_with(DestructibleSpec::default);
-        spec.resource = Some((kind, resource_yield));
-    }
     Ok((common, rest))
 }
 
@@ -1826,7 +1640,6 @@ fn finish_group(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Group,
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -1905,7 +1718,6 @@ fn finish_composition(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
             gravity_scale: common.physics.gravity_scale,
             trigger: false,
         },
-        destructible: common.destructible,
         kind: EntityKind::Composition {
             body,
             collider,
@@ -1936,7 +1748,6 @@ fn finish_use(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             script: None,
             props: Vec::new(),
             links: Default::default(),
-            destructible: None,
             transform: TransformSpec::default(),
             physics: PhysicsSpec::default(),
             kind: EntityKind::Group,
@@ -1957,7 +1768,6 @@ fn finish_use(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         script: None,
         props: Vec::new(),
         links: Default::default(),
-        destructible: None,
         transform: TransformSpec::default(),
         physics: PhysicsSpec::default(),
         kind: EntityKind::Use {
@@ -2059,7 +1869,6 @@ fn finish_primitive(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Primitive { shape, material },
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -2094,7 +1903,6 @@ fn finish_point_light(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::PointLight {
             color,
             intensity,
@@ -2134,7 +1942,6 @@ fn finish_directional_light(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Entity
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::DirectionalLight {
             color,
             illuminance,
@@ -2170,7 +1977,6 @@ fn finish_ambient_light(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::AmbientLight { color, brightness },
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -2242,7 +2048,6 @@ fn finish_orbit_camera(
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind,
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -2368,33 +2173,31 @@ fn collect_template_traits(node: &XmlNode) -> (bool, Option<f32>) {
     (hostile, health)
 }
 
-/// Primeiro attr `destructible=` na subárvore do template
-/// (`<GameObject destructible="…">`) — o props nascem colhíveis.
-fn collect_template_destructible(node: &XmlNode) -> Option<DestructibleSpec> {
+/// Props de colheita autorais do template (`destructible=`,
+/// `<ResourceNode kind yield>`) — DADOS do jogo (Lua), transportados como
+/// props normais para as instâncias.
+fn collect_template_harvest_props(node: &XmlNode, out: &mut Vec<(String, String)>) {
     if let Some(value) = node
         .attr("destructible")
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return Some(DestructibleSpec::parse(value));
+        out.push(("destructible".into(), value.to_string()));
     }
-    node.children.iter().find_map(collect_template_destructible)
-}
-
-/// Primeiro `<ResourceNode kind="…" yield="…">` na subárvore do template
-/// (qualquer profundidade) — o loot nativo da colheita.
-fn collect_resource_node(node: &XmlNode) -> Option<(String, u32)> {
     if node.tag.eq_ignore_ascii_case("resourcenode")
         && let Some(kind) = node.attr("kind").map(str::trim).filter(|s| !s.is_empty())
     {
+        out.push(("resource-kind".into(), kind.to_string()));
         let amount = node
             .attr("yield")
             .and_then(|v| v.trim().parse::<u32>().ok())
             .unwrap_or(1)
             .max(1);
-        return Some((kind.to_string(), amount));
+        out.push(("resource-yield".into(), amount.to_string()));
     }
-    node.children.iter().find_map(collect_resource_node)
+    for child in &node.children {
+        collect_template_harvest_props(child, out);
+    }
 }
 
 /// A receita de um `<Scatter>` (mesmos atributos e template de um `<StaticSpawner>`) — para
@@ -2453,7 +2256,6 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
         activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
         template_collider: None,
         template_trigger: false,
-        template_destructible: None,
         template_lods: Vec::new(),
         cull_distance: crate::render_lod::DEFAULT_STATIC_CULL,
         cast_shadows: true,
@@ -2474,14 +2276,8 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
     let (template_hostile, template_health) = collect_template_traits(node);
     spec.template_hostile = template_hostile;
     spec.template_health = template_health;
-    // Destrutível do template: o attr `destructible` + o loot do
-    // `<ResourceNode kind yield>` filho (árvores→wood, rochas→stone).
-    spec.template_destructible = collect_template_destructible(node);
-    if let Some(template) = spec.template_destructible.as_mut()
-        && template.resource.is_none()
-    {
-        template.resource = collect_resource_node(node);
-    }
+    // Dados de colheita do template (destructible/resource) viram props.
+    collect_template_harvest_props(node, &mut spec.template_props);
     // Collider do template: primeiro filho com attr `collider`.
     for child in &node.children {
         if let Some(value) = child
@@ -2519,7 +2315,6 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
             links: common.links,
             transform: common.transform,
             physics: common.physics,
-            destructible: common.destructible,
             kind: if dynamic {
                 EntityKind::DynamicSpawner { spec }
             } else {
@@ -2601,7 +2396,6 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: if dynamic {
             EntityKind::DynamicSpawner { spec }
         } else {
@@ -2705,7 +2499,6 @@ fn finish_particle_system(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySp
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::ParticleSystem { spec },
         children: Vec::new(),
         source: None,
@@ -2740,7 +2533,6 @@ fn finish_spawn_exclusion(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySp
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::SpawnExclusion { center, radius },
         children: Vec::new(),
         source: None,
@@ -2836,7 +2628,6 @@ fn finish_vegetation(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Vegetation { spec },
         children: Vec::new(),
         source: None,
@@ -2859,7 +2650,6 @@ fn finish_player_gltf(node: &XmlNode, url: String, ctx: &mut ParseCtx) -> Result
         script: common.script,
         props: common.props,
         links: common.links,
-        destructible: common.destructible,
         transform: common.transform,
         physics: common.physics,
         kind: EntityKind::PlayerGltf { url },
@@ -2868,26 +2658,17 @@ fn finish_player_gltf(node: &XmlNode, url: String, ctx: &mut ParseCtx) -> Result
     })
 }
 
-fn finish_dialogue_npc(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
+fn finish_npc_body(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
     let (common, rest) = parse_common(node, ctx)?;
     let ctx_tag = format!("<{}>", node.tag);
-    let dialogue_id = node
-        .attr("dialogue-id")
-        .map(str::trim)
-        .expect("caller checked dialogue-id")
-        .to_string();
-    let mut marker_height = 2.5;
-    for (key, value) in rest {
-        let kctx = format!("{ctx_tag} {key}");
-        match key.as_str() {
-            // already consumed from `node.attr` above
-            "dialogue-id" => {}
-            "marker-height" => marker_height = values::parse_f32(&value, &kctx)?,
-            // accepted no-ops (visual/audio dialogue UI lands with the HUD phase)
-            "portrait-url" | "voice-sfx" => {}
-            other => ctx
-                .warnings
-                .push(format!("{ctx_tag}: ignored attribute `{other}`")),
+    for (key, _value) in rest {
+        // Dados de diálogo do mundo antigo: a engine já não os interpreta.
+        if !matches!(
+            key.as_str(),
+            "dialogue-id" | "marker-height" | "portrait-url" | "voice-sfx"
+        ) {
+            ctx.warnings
+                .push(format!("{ctx_tag}: ignored attribute `{key}`"));
         }
     }
     Ok(EntitySpec {
@@ -2899,11 +2680,7 @@ fn finish_dialogue_npc(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
-        kind: EntityKind::DialogueNpc {
-            dialogue_id,
-            marker_height,
-        },
+        kind: EntityKind::NpcBody,
         children: Vec::new(),
         source: None,
     })
@@ -2938,7 +2715,6 @@ fn finish_resource_chip(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::ResourceChip {
             resource,
             icon,
@@ -2976,7 +2752,6 @@ fn finish_audio_mixer(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::AudioMixer { master, music, sfx },
         children: Vec::new(),
         source: None,
@@ -3009,7 +2784,6 @@ fn finish_music_layer(node: &XmlNode, layer: &str, ctx: &mut ParseCtx) -> Result
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::MusicLayer {
             layer,
             sound,
@@ -3076,7 +2850,6 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::DayCycle {
             minute_of_day: c.minute_of_day,
             minutes_per_real_second: c.minutes_per_real_second,
@@ -3129,7 +2902,6 @@ fn finish_weather(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Weather {
             wind: w.wind,
             wind_strength: w.wind_strength,
@@ -3215,7 +2987,6 @@ fn finish_biome_region(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::BiomeRegion {
             id,
             display_name,
@@ -3257,7 +3028,6 @@ fn finish_world_border(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::WorldBorder {
             radius,
             warn_seconds,
@@ -3324,7 +3094,6 @@ fn finish_interior_scene(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpe
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::InteriorScene {
             min: [center[0] - half[0], center[1] - half[1]],
             max: [center[0] + half[0], center[1] + half[1]],
@@ -3354,7 +3123,6 @@ fn finish_engine_config(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::EngineConfig {
             tag: node.tag.to_ascii_lowercase(),
             attrs: node
@@ -3363,73 +3131,6 @@ fn finish_engine_config(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec
                 .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                 .collect(),
         },
-        children: Vec::new(),
-        source: None,
-    })
-}
-
-/// `<Landmark>` (Fase B2) — marco de traçado da Nota declarável:
-///
-/// ```xml
-/// <Landmark name="forest-outpost-tower" biome="dark_forest"
-///           label="Torre do Posto Avançado" survey-quest="forest_survey"
-///           mark-radius="10"/>
-/// ```
-///
-/// `name` (a entidade física no mundo), `biome` e `label` são obrigatórios;
-/// `survey-quest` e `mark-radius` são opcionais — o default vem do bioma
-/// (`Biome::survey_quest` / `Biome::mark_radius`). O marco não spawna
-/// entidade: a entrada vai para o `travel::LandmarkCatalog` no arranque.
-fn finish_landmark(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
-    let (common, rest) = parse_common(node, ctx)?;
-    let ctx_tag = format!("<{}>", node.tag);
-    let name = common
-        .name
-        .ok_or_else(|| anyhow!("{ctx_tag}: `name` (a entidade do marco no mundo) é obrigatório"))?;
-    let mut biome_id: Option<String> = None;
-    let mut label: Option<String> = None;
-    let mut survey_quest: Option<String> = None;
-    let mut mark_radius: Option<f32> = None;
-    let mut tower_reveals: Option<String> = None;
-    for (key, value) in rest {
-        let kctx = format!("{ctx_tag} {key}");
-        match key.as_str() {
-            "biome" => biome_id = Some(value.trim().to_ascii_lowercase()),
-            "label" => label = Some(value),
-            "survey-quest" => survey_quest = Some(value),
-            "mark-radius" => mark_radius = Some(values::parse_f32(&value, &kctx)?),
-            // Atalaia de agrimensura: o bioma que esta torre REVELA ao ser
-            // ativada (`viber.reveal_biome` no script dela).
-            "tower-reveals" => tower_reveals = Some(value.trim().to_ascii_lowercase()),
-            other => ctx
-                .warnings
-                .push(format!("{ctx_tag}: ignored attribute `{other}`")),
-        }
-    }
-    let biome_id = biome_id.ok_or_else(|| anyhow!("{ctx_tag}: `biome` é obrigatório"))?;
-    let label =
-        label.ok_or_else(|| anyhow!("{ctx_tag}: `label` (rótulo legível) é obrigatório"))?;
-    // Defaults neutros: o jogo (Lua) aplica os seus por bioma. A engine só
-    // transporta o que o mundo autorou.
-    let spec = LandmarkSpec {
-        name,
-        biome_id,
-        label,
-        survey_quest: survey_quest.unwrap_or_default(),
-        mark_radius: mark_radius.unwrap_or(10.0),
-        tower_reveals,
-    };
-    Ok(EntitySpec {
-        prototype_instance: None,
-        name: None,
-        tag: None,
-        script: None,
-        props: Vec::new(),
-        links: Default::default(),
-        transform: TransformSpec::default(),
-        physics: PhysicsSpec::default(),
-        destructible: None,
-        kind: EntityKind::Landmark { spec },
         children: Vec::new(),
         source: None,
     })
@@ -3451,7 +3152,6 @@ fn finish_scene_entry(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::SceneEntry,
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -3493,49 +3193,8 @@ fn finish_scene_portal(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::ScenePortal { spec },
         children: parse_entities(&node.children, ctx)?,
-        source: None,
-    })
-}
-
-/// `<SpawnPoint at="x z" label="praça"/>` (Fase B3) — ponto de respawn
-/// declarável. `at` é obrigatório; `label` é opcional (vazio → a
-/// heurística de direção do fallback no toast). Vai para o
-/// `feedback::RespawnCatalog` no arranque; não spawna entidade.
-fn finish_spawn_point(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
-    let (common, rest) = parse_common(node, ctx)?;
-    let ctx_tag = format!("<{}>", node.tag);
-    let off = terrain_offset(&common, node, ctx);
-    let mut at: Option<[f32; 2]> = None;
-    let mut label = String::new();
-    for (key, value) in rest {
-        let kctx = format!("{ctx_tag} {key}");
-        match key.as_str() {
-            "at" => {
-                let p = values::parse_vec2(&value, &kctx)?;
-                at = Some([p[0] + off.x, p[1] + off.y]);
-            }
-            "label" => label = value,
-            other => ctx
-                .warnings
-                .push(format!("{ctx_tag}: ignored attribute `{other}`")),
-        }
-    }
-    let at = at.ok_or_else(|| anyhow!("{ctx_tag}: `at` com \"x z\" é obrigatório"))?;
-    Ok(EntitySpec {
-        prototype_instance: None,
-        name: None,
-        tag: None,
-        script: None,
-        props: Vec::new(),
-        links: Default::default(),
-        transform: TransformSpec::default(),
-        physics: PhysicsSpec::default(),
-        destructible: None,
-        kind: EntityKind::SpawnPoint { at, label },
-        children: Vec::new(),
         source: None,
     })
 }
@@ -3555,7 +3214,6 @@ fn finish_sky(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::HudElement {
             tag: "sky".to_string(),
             attrs: node
@@ -3581,7 +3239,6 @@ fn finish_hud_element(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::HudElement {
             tag: node.tag.to_ascii_lowercase(),
             attrs: node
@@ -3623,7 +3280,6 @@ fn finish_ui_style(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::UiStyle { source },
         children: Vec::new(),
         source: None,
@@ -3643,7 +3299,6 @@ fn finish_ui_tree(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::UiTree {
             node: Box::new(node.clone()),
         },
@@ -3696,7 +3351,6 @@ fn finish_gltf_scene(node: &XmlNode, url: String, ctx: &mut ParseCtx) -> Result<
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::GltfScene {
             url,
             lod1,
@@ -3850,7 +3504,6 @@ fn finish_terrain(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Terrain { spec },
         children: Vec::new(),
         source: None,
@@ -3892,7 +3545,6 @@ fn finish_terrain_pad(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::TerrainPad { spec },
         children: Vec::new(),
         source: None,
@@ -3991,7 +3643,6 @@ fn finish_lake(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Lake { spec },
         children: Vec::new(),
         source: None,
@@ -4055,7 +3706,6 @@ fn finish_cut(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Cut { spec },
         children: Vec::new(),
         source: None,
@@ -4117,7 +3767,6 @@ fn finish_plateau(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Plateau { spec },
         children: Vec::new(),
         source: None,
@@ -4194,7 +3843,6 @@ fn finish_ground_decal(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::GroundDecal { spec },
         children: Vec::new(),
         source: None,
@@ -4279,7 +3927,6 @@ fn finish_river(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::River { spec },
         children: Vec::new(),
         source: None,
@@ -4357,7 +4004,6 @@ fn finish_cliff(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Cliff { spec },
         children: Vec::new(),
         source: None,
@@ -4451,7 +4097,6 @@ fn finish_cave(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Cave { spec },
         children: Vec::new(),
         source: None,
@@ -4614,7 +4259,6 @@ fn finish_arch(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Arch { spec },
         children: Vec::new(),
         source: None,
@@ -4706,7 +4350,6 @@ fn finish_bridge(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Bridge { spec },
         children: Vec::new(),
         source: None,
@@ -4816,7 +4459,6 @@ fn finish_rock_features(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::RockFeatures { spec },
         children: Vec::new(),
         source: None,
@@ -4980,7 +4622,6 @@ fn finish_road(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::Road { spec },
         children: Vec::new(),
         source: None,
@@ -5150,7 +4791,6 @@ fn finish_road_network(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec>
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        destructible: common.destructible,
         kind: EntityKind::RoadNetwork { spec },
         children: Vec::new(),
         source: None,
@@ -5209,8 +4849,8 @@ pub struct WorldSummary {
     pub players: usize,
     /// `<Vehicle>` karts (corrida, `gameplay: racing`).
     pub vehicles: usize,
-    /// `<DialogueNPC>` dialogue targets.
-    pub dialogue_npcs: usize,
+    /// `<NpcBody>` (corpo de NPC sem diálogo nativo).
+    pub npc_bodies: usize,
     /// `<UiStyle>` stylesheets.
     pub ui_stylesheets: usize,
     /// `<UiRoot>` declarative UI trees.
@@ -5357,7 +4997,7 @@ pub fn summarize(world: &ParsedWorld) -> WorldSummary {
                 EntityKind::SpawnExclusion { .. } => out.spawn_exclusions += 1,
                 EntityKind::Vegetation { .. } => out.vegetation += 1,
                 EntityKind::PlayerGltf { .. } => out.players += 1,
-                EntityKind::DialogueNpc { .. } => out.dialogue_npcs += 1,
+                EntityKind::NpcBody => out.npc_bodies += 1,
                 EntityKind::ResourceChip { .. } => out.resource_chips += 1,
                 EntityKind::HudElement { .. } => out.hud_elements += 1,
                 EntityKind::UiStyle { .. } => out.ui_stylesheets += 1,
@@ -5373,8 +5013,6 @@ pub fn summarize(world: &ParsedWorld) -> WorldSummary {
                 | EntityKind::WorldBorder { .. }
                 | EntityKind::InteriorScene { .. }
                 | EntityKind::EngineConfig { .. }
-                | EntityKind::Landmark { .. }
-                | EntityKind::SpawnPoint { .. }
                 | EntityKind::SceneEntry
                 | EntityKind::ScenePortal { .. } => out.world_systems += 1,
             }
@@ -5465,125 +5103,6 @@ mod tests {
             error.contains("2 problema(s)") && error.contains("viber tool scatter"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn test_landmark_tag_parses_into_catalog_spec() {
-        // Fase B2: attrs explícitos; nenhum warning (todos conhecidos).
-        let (spec, w) = parse_one(&node(
-            "Landmark",
-            &[
-                ("name", "forest-outpost-tower"),
-                ("biome", "dark_forest"),
-                ("label", "Torre do Posto Avançado"),
-                ("survey-quest", "forest_survey"),
-                ("mark-radius", "10"),
-            ],
-        ))
-        .unwrap();
-        assert!(w.is_empty(), "{w:?}");
-        let EntityKind::Landmark { spec } = spec.kind else {
-            panic!("não é um Landmark: {:?}", spec.kind);
-        };
-        assert_eq!(spec.name, "forest-outpost-tower");
-        assert_eq!(spec.biome_id, "dark_forest");
-        assert_eq!(spec.label, "Torre do Posto Avançado");
-        assert_eq!(spec.survey_quest, "forest_survey");
-        assert_eq!(spec.mark_radius, 10.0);
-    }
-
-    #[test]
-    fn test_landmark_defaults_are_neutral() {
-        // A engine só transporta o que o mundo autorou; os defaults por
-        // bioma são do JOGO (Lua).
-        let (spec, w) = parse_one(&node(
-            "Landmark",
-            &[
-                ("name", "desert-arch"),
-                ("biome", "desert"),
-                ("label", "Arco do Deserto"),
-            ],
-        ))
-        .unwrap();
-        assert!(w.is_empty(), "{w:?}");
-        let EntityKind::Landmark { spec } = spec.kind else {
-            panic!("não é um Landmark: {:?}", spec.kind);
-        };
-        assert_eq!(spec.survey_quest, "");
-        assert_eq!(spec.mark_radius, 10.0);
-    }
-
-    #[test]
-    fn test_landmark_unknown_biome_parses_without_engine_policy() {
-        let (spec, w) = parse_one(&node(
-            "Landmark",
-            &[
-                ("name", "mystery-spire"),
-                ("biome", "vale"),
-                ("label", "Aguja"),
-            ],
-        ))
-        .unwrap();
-        assert!(w.is_empty(), "{w:?}");
-        let EntityKind::Landmark { spec } = spec.kind else {
-            panic!("não é um Landmark: {:?}", spec.kind);
-        };
-        assert_eq!(spec.biome_id, "vale");
-        assert_eq!(spec.mark_radius, 10.0);
-    }
-
-    #[test]
-    fn test_landmark_requires_name_biome_label() {
-        let mut ctx = ParseCtx::default();
-        assert!(
-            parse_entity(
-                &node("Landmark", &[("biome", "desert"), ("label", "x")]),
-                &mut ctx
-            )
-            .is_err()
-        );
-        let mut ctx = ParseCtx::default();
-        assert!(
-            parse_entity(
-                &node("Landmark", &[("name", "x"), ("label", "y")]),
-                &mut ctx
-            )
-            .is_err()
-        );
-        let mut ctx = ParseCtx::default();
-        assert!(
-            parse_entity(
-                &node("Landmark", &[("name", "x"), ("biome", "desert")]),
-                &mut ctx
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_spawn_point_tag_parses() {
-        // Fase B3: `at` obrigatório, label opcional.
-        let (spec, w) = parse_one(&node(
-            "SpawnPoint",
-            &[("at", "0 -50"), ("label", "portão sul")],
-        ))
-        .unwrap();
-        assert!(w.is_empty(), "{w:?}");
-        let EntityKind::SpawnPoint { at, label } = spec.kind else {
-            panic!("não é um SpawnPoint: {:?}", spec.kind);
-        };
-        assert_eq!(at, [0.0, -50.0]);
-        assert_eq!(label, "portão sul");
-
-        let (spec, _) = parse_one(&node("SpawnPoint", &[("at", "12 34")])).unwrap();
-        let EntityKind::SpawnPoint { at, label } = spec.kind else {
-            panic!("não é um SpawnPoint: {:?}", spec.kind);
-        };
-        assert_eq!(at, [12.0, 34.0]);
-        assert!(label.is_empty());
-
-        let mut ctx = ParseCtx::default();
-        assert!(parse_entity(&node("SpawnPoint", &[("label", "x")]), &mut ctx).is_err());
     }
 
     #[test]
@@ -5970,39 +5489,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dialogue_npc_parses() {
-        let (spec, w) = parse_one(&node(
-            "DialogueNPC",
-            &[
-                ("dialogue-id", "city_stone"),
-                ("marker-height", "3"),
-                ("portrait-url", ""),
-                ("voice-sfx", ""),
-            ],
-        ))
-        .unwrap();
+    fn test_npc_body_parses() {
+        let (spec, w) = parse_one(&node("NpcBody", &[])).unwrap();
         assert!(w.is_empty(), "{w:?}");
-        let EntityKind::DialogueNpc {
-            dialogue_id,
-            marker_height,
-        } = spec.kind
-        else {
-            panic!("expected dialogue npc");
-        };
-        assert_eq!(dialogue_id, "city_stone");
-        assert_eq!(marker_height, 3.0);
-    }
-
-    #[test]
-    fn test_dialogue_npc_without_id_is_skipped() {
-        let mut ctx = ParseCtx::default();
-        let spec = parse_entity(&node("DialogueNPC", &[]), &mut ctx).unwrap();
-        assert!(spec.is_none());
-        assert!(
-            ctx.warnings
-                .iter()
-                .any(|m| m.contains("missing dialogue-id"))
-        );
+        assert!(matches!(spec.kind, EntityKind::NpcBody));
     }
 
     #[test]
@@ -6294,49 +5784,6 @@ mod tests {
     }
 
     #[test]
-    fn test_destructible_spec_parses_all_fields() {
-        let spec = DestructibleSpec::parse(
-            "popup-text: Dark Wood; popup-color: #1a3320; preset: leaves; burst-count: 24; \
-             hits: 3; spark-on-hit: 1; hit-preset: woodchips; hit-burst-count: 12; \
-             shake-on-hit: 1; crack-on-hit: 1; crack-style: vertical; break-style: fall; \
-             cut-height: 0.7; range: 3.2",
-        );
-        assert_eq!(spec.popup_text.as_deref(), Some("Dark Wood"));
-        let [r, g, b] = spec.popup_color.expect("popup-color");
-        assert!((r - 26.0 / 255.0).abs() < 1e-5);
-        assert!((g - 51.0 / 255.0).abs() < 1e-5);
-        assert!((b - 32.0 / 255.0).abs() < 1e-5);
-        assert_eq!(spec.preset.as_deref(), Some("leaves"));
-        assert_eq!(spec.burst_count, Some(24));
-        assert_eq!(spec.hits, Some(3));
-        assert_eq!(spec.hit_preset.as_deref(), Some("woodchips"));
-        assert_eq!(spec.hit_burst_count, Some(12));
-        assert!(spec.shake_on_hit);
-        assert_eq!(spec.break_style, BreakStyleSpec::Fall);
-        assert!((spec.range.unwrap() - 3.2).abs() < 1e-4);
-        assert!(spec.resource.is_none());
-    }
-
-    #[test]
-    fn test_destructible_spec_defaults_are_tolerant() {
-        let spec = DestructibleSpec::parse("popup-text: Stone; break-style: shatter");
-        assert_eq!(spec.break_style, BreakStyleSpec::Shatter);
-        assert_eq!(spec.hits, None, "default aplicado na conversão runtime");
-        assert!(!spec.shake_on_hit);
-        assert_eq!(spec.range, None);
-        // desconhecidas/lixo não quebram nem produzem dados
-        let junk = DestructibleSpec::parse("hits: abc; burst-count: -2; range: nan; foo: bar");
-        assert_eq!(junk.hits, None);
-        assert_eq!(junk.burst_count, None);
-        assert_eq!(junk.range, None);
-        // default puro: burst
-        assert_eq!(
-            DestructibleSpec::parse("").break_style,
-            BreakStyleSpec::Burst
-        );
-    }
-
-    #[test]
     fn test_spawner_collects_template_destructible_and_resource_node() {
         let mut destructible = node(
             "GameObject",
@@ -6375,11 +5822,20 @@ mod tests {
         let EntityKind::StaticSpawner { spec } = spec.kind else {
             panic!("expected static spawner");
         };
-        let template = spec.template_destructible.expect("template destructible");
-        assert_eq!(template.popup_text.as_deref(), Some("Stone"));
-        assert_eq!(template.hits, Some(3));
-        assert_eq!(template.break_style, BreakStyleSpec::Shatter);
-        assert_eq!(template.resource, Some(("stone".into(), 4)));
+        let prop = |key: &str| {
+            spec.template_props
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert!(
+            prop("destructible")
+                .is_some_and(|v| v.contains("popup-text: Stone") && v.contains("hits: 3")),
+            "destructible vai verbatim como prop: {:?}",
+            spec.template_props
+        );
+        assert_eq!(prop("resource-kind"), Some("stone"));
+        assert_eq!(prop("resource-yield"), Some("4"));
     }
 
     #[test]
@@ -6524,7 +5980,7 @@ mod tests {
                     "PlayerGLTF",
                     &[("model-url", "/assets/meshes/characters/hero_lod0.glb")],
                 ),
-                node("DialogueNPC", &[("dialogue-id", "city_stone")]),
+                node("NpcBody", &[]),
                 node(
                     "ResourceChip",
                     &[("resource", "gold"), ("target-entity", "player")],
@@ -6576,7 +6032,7 @@ mod tests {
                 spawn_exclusions: 1,
                 players: 1,
                 vehicles: 0,
-                dialogue_npcs: 1,
+                npc_bodies: 1,
                 resource_chips: 1,
                 hud_elements: 1,
                 ui_stylesheets: 0,

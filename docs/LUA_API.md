@@ -92,7 +92,7 @@ function on_update(dt)
   st.state = viber.next_state(st.state, dist, 12.0, 22.0)
   if st.state == "chase" then
     viber.move_towards(px, pz, 3.2)
-    if dist < 1.6 then viber.damage_player(8) end
+    if dist < 1.6 then viber.entity_damage(8, viber.player_id()) end
   else
     local tx, tz = viber.wander_target(8.0)
     viber.move_towards(tx, tz, 1.1)
@@ -349,8 +349,6 @@ As mesmas máquinas da engine (`src/ai.rs`), expostas para os scripts comporem.
 |--------|---------|-------|
 | `viber.wander_target(radius)` | `x, z` | ponto determinístico ao redor do `home`; incrementa `state.picks`. O `home` é gravado pela engine na **ativação** da entidade (`activate_at` usa a posição de spawn) — não é preciso chamar `viber.state()` antes |
 | `viber.next_state(cur, dist, aggro, deaggro)` | `"wander"` \| `"chase"` \| `"alert"` \| `"search"` | FSM por distância (sem sentidos). `cur` desconhecido conta como wander |
-| `viber.lock_target(id\|nil)` | | fixa ou limpa o lock-on (câmara atrás do alvo, strafe). Idempotente |
-| `viber.cycle_lock()` | | próximo hostil em 18 m com linha de visão |
 | `viber.noise(loudness)` | | som que as criaturas sem script ouvem (`loudness / distância`) |
 | `viber.sense()` | `"see"` \| `"hear"` \| `nil` | último sentido deste frame |
 | `viber.action(nome)` | bool | `jump` `sprint` `attack` `interact` `lock` `menu` — teclado ou gamepad |
@@ -373,44 +371,38 @@ foldarms/lean/idle`.
 
 ## Combate & progressão
 
+A engine não tem HP de herói, XP, quests, cofre nem talentos: essas regras
+vivem no jogo (`scripts/lib/rules.lua` no Vael). As primitivas genéricas são
+`viber.entity_damage`/`entity_heal`/`entity_set_max_hp` (qualquer entidade
+com `Health`), `viber.radial_damage` e `viber.fire_projectile`.
+
 | Função | Notas |
 |--------|-------|
-| `viber.damage_player(amount)` | dano pelo path único do feedback (i-frames, vinheta, número flutuante, morte, knockback com `from` = posição da entidade) |
-| `viber.heal_player(amount)` | cura direta no HP do herói |
-| `viber.fire_projectile(id [, x, y, z])` | dispara um projétil do `<ProjectileTemplate id=…>` do mundo, da boca da entidade (+1.2 m) para o peito do herói (+1.1 m) ou para o ponto dado; devolve `false` sem herói nem alvo. A facção do template decide quem leva o dano (`enemy` → herói pelo path único do feedback; `player` → criaturas com `Health`; `neutral` → só terreno); `gravity > 0` faz arco balístico. O projétil nunca acerta a entidade que o disparou e o acerto é varrido (não atravessa alvos num frame longo). Template desconhecido = warn 1× e o disparo cai |
-| `viber.apply_status(kind, secs)` | status effect no herói; hoje só `kind = "venom"` (tick 1/s) |
-| `viber.add_xp(gain)` | XP direto no herói |
-| `viber.topple()` | destrutível (`break-style: fall`): tomba na direção herói→entidade, remove o script e despawna no fim da queda |
+| `viber.fire_projectile(id [, x, y, z])` | dispara um projétil do `<ProjectileTemplate id=…>` do mundo, da boca da entidade (+1.2 m) para o peito do herói (+1.1 m) ou para o ponto dado; devolve `false` sem herói nem alvo. A facção do template decide quem leva o dano (`enemy` → herói; `player` → criaturas com `Health`; `neutral` → só terreno); `gravity > 0` faz arco balístico. O acerto emite o evento `hit` para o Lua. Template desconhecido = warn 1× e o disparo cai |
+| `viber.topple([id])` | tomba a entidade com física genérica (`physics_fx::Falling`) e despawna no fim; a regra de quando tombar é do script |
 | `viber.teleport_player(x, y, z)` | move o herói (teleporte: atravessa tudo — para viagens, não para dash) |
-| `viber.push_player(dx, dz[, iframes])` | desloca o herói ~(dx, dz) m pelo character controller (colide com muros — o dash certo; `iframes` s invulnerável) |
+| `viber.push_player(dx, dz)` | desloca o herói ~(dx, dz) m pelo character controller (colide com muros — o dash certo). I-frames são regra do jogo (Lua) |
 
 ## Quests
 
-Definições em JSON (27 quests do exemplo, embutidas em `src/quests.rs` via
-`include_str!`); o estado viaja no save. `viber.quest_state` devolve
-`"not_taken" | "active" | "ready" | "done" | "unknown"`.
-
-| Função | Notas |
-|--------|-------|
-| `viber.quest_state(id)` | estado atual da quest `id` (frame-start) |
-| `viber.quest_accept(id)` | aceita (toast "Quest aceita") |
-| `viber.quest_turn_in(id)` | entrega se `ready`; aplica recompensas (XP/ouro/itens) e toast |
-| `viber.report_kill(kind)` | reporta 1 kill do alvo `kind` (objetivo `kill`, auto-progresso) |
-| `viber.report_visit(place)` | reporta visita ao marco `place` (objetivo `visit`) |
-| `viber.report_collect(item, amount)` | colheita: deposita no **vault**; objetivos `collect` leem o inventário (auto-progresso). Recursos (`gold/wood/stone`) e itens de objetivo (`"dark-wood"`, `"bog-moss"`) |
+Quests são CONTEÚDO e REGRA do jogo. A engine só lê JSON
+(`viber.load_json("quests/….json")`) e persiste `viber.game()` no save.
+O Vael implementa o ciclo completo em `scripts/lib/rules.lua`
+(`quest_state`/`quest_accept`/`quest_turn_in`/`report_kill`/…). Não há
+`viber.quest_*` na engine.
 
 ## Economia, quests e progressão
 
 Cofre, XP, quests, veneno e biomas do `simple-rpg` vivem em
 `../Vael/scripts/lib/rules.lua` (`rules.vault_*`, `rules.quest_*`,
-`rules.add_xp`). O estado plano vai no `viber.game()` e no save. O jogo não
-deve usar as funções antigas que ainda estão registadas:
-`viber.vault_add`, `viber.vault_get`, `viber.item_add`, `viber.item_count`,
-`viber.add_skill_points`, `viber.reveal_biome`, `viber.biome_revealed`,
-`viber.alive_in_region` **não estão na engine**. O jogo usa
-`scripts/lib/rules.lua` (`rules.vault_add`, `rules.quest_state`, …).
-`viber.load_json` lê os `quests/*.json`. `viber.destructibles` e
-`viber.markers` são as primitivas que a colheita, a Nota e o mapa usam.
+`rules.add_xp`). O estado plano vai no `viber.game()` e no save. As funções
+antigas (`viber.vault_add`, `viber.vault_get`, `viber.item_add`,
+`viber.item_count`, `viber.add_skill_points`, `viber.reveal_biome`,
+`viber.biome_revealed`, `viber.alive_in_region`, `viber.player_stats`,
+`viber.sync_skills`, `viber.add_xp`, `viber.damage_player`) **não estão na
+engine**. `viber.load_json` lê os `quests/*.json`. `viber.player_nearby` e
+`viber.markers` são as primitivas de dados que a colheita, a Nota e o mapa
+usam; a regra é sempre do script.
 
 ## Corrida
 
@@ -451,11 +443,9 @@ end
 | `type` | Campos | Quando |
 |--------|--------|--------|
 | `kill` | `name` (kind do script, ex. `"wolf"`), `entity` (bits) | abate pelo melee nativo OU HP a zero por `viber.entity_damage` |
-| `player_hurt` | `amount` (pós-guard/parry), `hp` | o herói apanhou dano real |
-| `player_died` | — | respawn efetuado |
-| `collect` | `item`, `amount` | entrou algo no vault (loot, report_collect, item_add) |
-| `quest_done` | `id` | quest entregue |
-| `level_up` | `level` | subida de nível |
+| `collect` | `item`, `amount` | LEGADO — o cofre é do jogo (Lua); a engine já não o produz |
+| `quest_done` | `id` | LEGADO — as quests são do jogo (Lua) |
+| `level_up` | `level` | LEGADO — o XP é do jogo (Lua) |
 | `ui_action` | `name`, `arg` | ação da UI declarativa (`viber.ui.action`) — os handlers nativos correm à mesma, SALVO as ações reclamadas por `viber.own_action` |
 | `scene_unloading` | `scene` | a cena vai ser descarregada (`viber.change_scene`/portal) |
 | `scene_loaded` | `scene`, `entry` | a cena nova acabou de carregar |
@@ -487,14 +477,15 @@ aplica pós-frame.
 | `viber.entity_set_max_hp(max, id?)` | cria o `Health` se faltar (current = max); redimensiona se existir |
 | `viber.self_id()` | bits da entidade que corre o script (`nil` fora) — chave para tabelas partilhadas em `viber.game()` |
 | `viber.set_scale(s, id?)` | escala uniforme 0.05..20 (ex.: elites maiores) |
-| `viber.entity_damage(amount, id?)` | dano direto (sem i-frames — esses são do path do player). HP ≤ 0 EMITE `{type="kill"}` e NÃO corre o caminho nativo (cadáver/XP/quests são do melee) — o script decide |
+| `viber.entity_damage(amount, id?)` | dano direto (sem i-frames — esses são do path do player). HP ≤ 0 EMITE `{type="kill"}`; cadáver, XP, quests e loot são do JOGO |
 | `viber.entity_heal(amount, id?)` | cura, clampe ao max |
 | `viber.corpse(id?)` | marca a morte (componente `Corpse`): se a entidade tiver `ragdoll="true"`, o ragdoll começa; NÃO despawna nem paga XP/loot — isso é do jogo |
 | `viber.hit_flash(id?, segundos?)` | acende o flash branco de impacto (feedback visual, default 0,16 s) |
 | `viber.entity_knockback(id, dx, dz, força)` | impulso físico horizontal (força em m/s, ex. `0.45 * 6.0`); direção normalizada |
-| `viber.player_stats()` | `{bonus_damage, crit_bonus, speed_mult, max_hp_bonus}` das passivas — para o jogo compor o dano |
 | `viber.set_player_speed(mult)` | multiplicador da velocidade base do herói (0.1..5); o jogo soma as passivas |
 | `viber.clip_duration(nome)` | duração (s) do clip do herói, fuzzy pelo nome normalizado (`nil` se o rig não o tem) |
+| `viber.attach(slot, url [, opts])` | prende um GLB a um osso do rig. `slot` lógico (`"weapon"`, `"helmet"`) substitui o que lá estiver; `opts = {bone="hand_r", id, x, y, z, rx, ry, rz (rad), scale}`. Primitiva genérica (volante, capacete, espada): a engine só encontra o osso |
+| `viber.detach(slot [, id])` | remove o que estiver no slot (default: herói) |
 | `viber.prompt(key, label)` | publica o prompt de mundo (o controller decide o alvo); `label` vazio limpa |
 | `viber.localize(texto)` | resolve `@chave` do locale ativo (linha a linha) |
 
@@ -567,8 +558,9 @@ que só dependem de componentes/mensagens sempre registados.
 |--------|---------|
 | `viber.entity_position(id?)` | `ok, x, y, z` do snapshot do frame (`ok == false` sem entrada; sem `id` = a própria) |
 | `viber.entity_name(id?)` | nome de MUNDO da entidade (`nil` se não nomeada — spawns de spawner podem não ter; sem `id` = a própria). É o que deixa um script partilhado por várias entidades descobrir QUEM é (ex.: `portal.<room>[.sufixo]`) |
-| `viber.nearby(raio [, limite])` | lista `{id, name, x, y, z, distance}` de entidades NOMEADAS à volta da própria, mais perto 1.º (cap 64; default 16) |
-| `viber.destructibles([raio])` | props `destructible` a ≤ `raio` (default 4) do herói: `id`, `hits` (total autorado), `hits_left`, `kind`, `amount`, `x/y/z`, `range`, `effective_range` (já escalado), `name`, `style` (`burst`/`fall`/`shatter`), `popup`, `distance`. Só DADOS: a engine não golpeia, não conta golpes nem dá loot — a regra é do script (ver `../Vael/scripts/game/harvest.lua`). `viber.topple([id])` tomba o prop (física genérica) |
+| `viber.nearby(raio [, limite])` | lista `{id, name, x, y, z, distance, props?}` de entidades NOMEADAS à volta da própria, mais perto 1.º (cap 64; default 16). `props` = dados autorais (`prop-*`, `destructible`, resource-*) |
+| `viber.player_nearby(raio [, limite])` | o mesmo que `nearby`, mas centrado no HERÓI (controllers `always-active` não vivem no herói). É o que a colheita usa; o `props.destructible`/`props["resource-kind"]` são dados que o script interpreta |
+| `viber.interact_range(base)` | alcance efetivo (o autorado escalado pela config global) — o script compara distâncias sem duplicar a escala |
 | `viber.markers({blips, beacons, waypoint})` | substitui as marcas do HUD. `blips` = `{{x,y,z,tower},…}` (bússola/minimapa, máx. 32); `beacons` = faróis (máx. 16); `waypoint` = `{x,y,z,label}` ou ausente (seta de rumo) |
 | `viber.hostiles([raio])` | lista `{id, kind, x, y, z, hp, max, distance}` de criaturas vivas (`enemies/`/`bosses/`) à volta do herói (cap 128; default 2.4 m). Os spawners não lhes dão nome — `find_all("wolf")` não as vê |
 | `viber.player_forward()` | `dx, dz` — forward do herói no plano (modelo olha +Z), para dash/mira |
@@ -577,9 +569,8 @@ que só dependem de componentes/mensagens sempre registados.
 
 | Função | Efeito |
 |--------|--------|
-| `viber.radial_damage(x, z, raio, dano [, opts])` | dano em ÁREA com falloff linear (cheio no centro → metade na borda); `opts.knockback = força` empurra radialmente. Mortes seguem a **paridade do melee** (corpo + XP + quests `kill` + evento `{type="kill"}` + SFX) |
+| `viber.radial_damage(x, z, raio, dano [, opts])` | dano em ÁREA com falloff linear (cheio no centro → metade na borda); `opts.knockback = força` empurra radialmente. Mortes emitem `{type="kill"}`; XP/quests/loot são do SCRIPT |
 | `viber.entity_despawn(id)` | remove a entidade (`despawn_self` é o atalho da própria) |
-| `viber.status_clear(kind)` | limpa um status do herói (`"venom"`; default sem arg) — o que o antídoto nativo faz |
 
 ### Partículas
 
@@ -627,22 +618,19 @@ Um NPC/dador pode conduzir o seu PRÓPRIO diálogo em Lua:
 | `viber.prompt(key, label)` | publica um prompt de interação de MUNDO (um controller mostra o verbo de um prop que não é a sua entidade). `label` vazio/nil limpa. UI genérica: o jogo decide quando |
 | `viber.quest_def(id)` | tabela da definição autoral (`id/title/npc/biome/kind/target/count/radius/gold/xp/items/lines_intro/lines_progress/lines_complete`) ou `nil` — lê o MESMO `<mundo>/quests/*.json` da engine |
 | `viber.quest_defs()` | lista com todas as definições do mundo |
-| `viber.own_system(nome)` | **reclama um sistema nativo** para Lua: o handler da engine cala e a lógica passa a ser do script. Nomes: `dialogue` (o `[E]` dos `<DialogueNPC>` **com script** — os NPCs sem script continuam no diálogo nativo; era global e um único NPC em Lua emudecia todos os dadores do mundo), `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J), `locomotion` (o corpo do herói). Sem posse, o comportamento nativo é o de sempre |
-| `viber.sync_skills(ids)` | a lista é a fonte da verdade das passivas (`vitality1`, `strength1`, …). Aplica o delta de HP máximo e velocidade e actualiza dano/crítico do melee. A mesma lista não mexe no herói. Não gasta pontos — o jogo já os cobrou |
+| `viber.own_system(nome)` | **reclama um sistema nativo** para Lua (compat): `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J), `locomotion` (o corpo do herói), `dialogue` ([E] dos NPCs). O handler nativo correspondente cala; os plugins de RPG já não correm no App, por isso a posse é sobretudo documental. Sem posse, o comportamento nativo (quando existe) é o de sempre |
 
 Exemplo completo: `../Vael/scripts/npc/forest-wolves.lua` (Hald —
-linhas do JSON, `say` no balão, `quest_accept`/`quest_turn_in`).
+linhas do JSON, `say` no balão, `rules.quest_accept`/`rules.quest_turn_in`).
 
 > **GOTCHA**: o top-level do script corre ANTES do primeiro snapshot do
-> frame — leituras como `viber.quest_def`/`viber.find` só têm dados dentro do
-> `on_update` (o exemplo busca a def laziamente, na 1.ª chamada).
+> frame — leituras como `viber.find` só têm dados dentro do `on_update`.
 
 ## Economia adicional
 
 | Função | Efeito |
 |--------|--------|
-| `viber.vault_take(kind, amount)` | consome do vault (recurso OU item); sem stock = no-op com warn 1× (o script guarda-se com `vault_get`) |
-| `viber.own_action(nome)` | reclama uma ação da UI para Lua: o handler nativo cala e a ação chega via `viber.events()`. Sem dono, o comportamento nativo é o de sempre (compat) — ver `scripts/game/shop.lua` do exemplo |
+| `viber.own_action(nome)` | reclama uma ação da UI para Lua: o handler nativo cala e a ação chega via `viber.events()`. Sem dono, o comportamento nativo (quando existe) é o de sempre — ver `scripts/game/shop.lua` do exemplo |
 
 ## Interação & UI
 
