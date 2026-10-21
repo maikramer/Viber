@@ -909,6 +909,17 @@ pub struct ParticleEmitter {
 /// Gate de emissor vazio: sem partículas vivas, o mesh já está degenerado e a
 /// reescrita + upload por frame não muda um pixel. `VIBER_PARTICLE_IDLE_GATE=0`
 /// desliga (comportamento anterior — o braço de controlo do A/B no profiler).
+/// Olho da simulação. `--camera free` tem duas `Camera3d`: `single()` falha
+/// e a chuva/os bursts param. A câmara de editor ganha; senão a primeira 3D;
+/// senão qualquer `Camera` (testes headless).
+fn simulation_camera<'a>(
+    editor: &'a Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
+    cameras: &'a Query<&GlobalTransform, With<Camera3d>>,
+    any_camera: &'a Query<&GlobalTransform, With<Camera>>,
+) -> Option<&'a GlobalTransform> {
+    crate::editor_camera::active_camera_eye(editor, cameras).or_else(|| any_camera.iter().next())
+}
+
 fn idle_gate_enabled() -> bool {
     std::env::var("VIBER_PARTICLE_IDLE_GATE").as_deref() != Ok("0")
 }
@@ -924,11 +935,13 @@ fn idle_gate_enabled() -> bool {
 /// Advance every emitter and rewrite its billboard mesh.
 pub fn particle_emitter_update(
     time: Res<Time>,
-    cameras: Query<&GlobalTransform, With<Camera>>,
+    editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    any_camera: Query<&GlobalTransform, With<Camera>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut emitters: Query<(&GlobalTransform, &mut ParticleEmitter, &Mesh3d)>,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let Some(camera) = simulation_camera(&editor, &cameras, &any_camera) else {
         return;
     };
     let camera_pos = camera.translation();
@@ -1352,7 +1365,9 @@ type AmbientFxItem<'w, 's> = (
 #[allow(clippy::too_many_arguments)]
 pub fn ambient_fx_manager(
     time: Res<Time>,
-    cameras: Query<&GlobalTransform, With<Camera>>,
+    editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    any_camera: Query<&GlobalTransform, With<Camera>>,
     mut markers: Query<AmbientFxItem<'_, '_>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1361,7 +1376,7 @@ pub fn ambient_fx_manager(
     mut scan: Local<f32>,
     mut last_camera: Local<Option<Vec3>>,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let Some(camera) = simulation_camera(&editor, &cameras, &any_camera) else {
         return;
     };
     let camera_pos = camera.translation();
