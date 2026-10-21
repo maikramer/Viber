@@ -876,6 +876,23 @@ fn emitter_material(resolved: &ResolvedEmitter) -> StandardMaterial {
 /// one of the 105 emitters in `simple-rpg` was still paying a full CPU
 /// simulation step plus a vertex-buffer upload on every frame.
 pub const EMITTER_CULL_DISTANCE: f32 = 110.0;
+/// Frames entre reescritas do mesh de um emissor, pela distância à câmara.
+///
+/// Cada reescrita é um `Modified` do mesh e um re-upload no render app: a
+/// vila mantinha ~80 emissores (chamas das lanternas, fumo, fogueiras) a
+/// re-uploadar em TODOS os frames (~3 000 malhas/s). A simulação continua a
+/// correr em todos os frames; só a escrita é espaçada — uma chama a 40 m a
+/// 30 Hz não se distingue de uma a 60.
+pub fn write_interval(distance: f32) -> u32 {
+    if distance < 25.0 {
+        1
+    } else if distance < 55.0 {
+        2
+    } else {
+        4
+    }
+}
+
 /// Re-activation distance, so an emitter sitting on the boundary does not flip
 /// between simulated and cleared every frame.
 pub const EMITTER_CULL_HYSTERESIS: f32 = 12.0;
@@ -939,16 +956,19 @@ pub fn particle_emitter_update(
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     any_camera: Query<&GlobalTransform, With<Camera>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut emitters: Query<(&GlobalTransform, &mut ParticleEmitter, &Mesh3d)>,
+    mut emitters: Query<(Entity, &GlobalTransform, &mut ParticleEmitter, &Mesh3d)>,
+    mut frame: Local<u32>,
 ) {
     let Some(camera) = simulation_camera(&editor, &cameras, &any_camera) else {
         return;
     };
     let camera_pos = camera.translation();
     let dt = time.delta_secs().clamp(0.0, 0.1);
-    for (transform, mut emitter, mesh_handle) in &mut emitters {
+    *frame = frame.wrapping_add(1);
+    for (entity, transform, mut emitter, mesh_handle) in &mut emitters {
         let position = transform.translation();
-        let culled = cull_state(position.distance(camera_pos), emitter.culled);
+        let distance = position.distance(camera_pos);
+        let culled = cull_state(distance, emitter.culled);
         if culled {
             // Clear once on the way out, then leave the emitter alone.
             if !emitter.culled {
@@ -983,6 +1003,16 @@ pub fn particle_emitter_update(
             emitter.idle = true;
         } else {
             emitter.idle = false;
+        }
+        // Escrita espaçada pela distância, desfasada por entidade para os
+        // uploads não caírem todos no mesmo frame. A transição para vazio
+        // (acima) escreve sempre.
+        let interval = write_interval(distance);
+        if interval > 1
+            && !emitter.idle
+            && (frame.wrapping_add(entity.index_u32())) % interval != 0
+        {
+            continue;
         }
         if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
             let fade = BillboardFade::from_resolved(&emitter.sim.resolved);
@@ -1480,6 +1510,20 @@ impl bevy::app::Plugin for BurstPlugin {
 
 #[cfg(test)]
 mod tests {
+
+    /// Perto escreve todos os frames; o espaçamento só cresce com a
+    /// distância e nunca passa de 4 frames antes do cull.
+    #[test]
+    fn write_interval_grows_with_distance() {
+        use super::{EMITTER_CULL_DISTANCE, write_interval};
+        assert_eq!(write_interval(5.0), 1);
+        let mut last = 1;
+        for d in 0..(EMITTER_CULL_DISTANCE as u32) {
+            let i = write_interval(d as f32);
+            assert!(i >= last && i <= 4, "{d} m → {i}");
+            last = i;
+        }
+    }
 
     /// O buffer do mesh vive em espaço LOCAL: a entidade já carrega a
     /// transform do emissor, e somar `emitter_pos` aos vértices desenhava
