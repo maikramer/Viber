@@ -8,7 +8,7 @@
 //! A réplica é uma linha de texto por mensagem (`pose x y z yaw` /
 //! `act nome`). Não há um segundo simulador: o cliente não corre o mundo.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -59,10 +59,15 @@ pub fn decode(line: &str) -> Option<NetMsg> {
     let mut parts = line.split_whitespace();
     match parts.next()? {
         "pose" => {
-            let x = parts.next()?.parse().ok()?;
-            let y = parts.next()?.parse().ok()?;
-            let z = parts.next()?.parse().ok()?;
-            let yaw = parts.next()?.parse().ok()?;
+            // `f32::from_str` aceita "nan"/"inf": um par (ou linha corrompida)
+            // não pode envenenar o Transform do fantasma.
+            let finite = |s: Option<&str>| -> Option<f32> {
+                s?.parse::<f32>().ok().filter(|v| v.is_finite())
+            };
+            let x = finite(parts.next())?;
+            let y = finite(parts.next())?;
+            let z = finite(parts.next())?;
+            let yaw = finite(parts.next())?;
             Some(NetMsg::Pose { x, y, z, yaw })
         }
         "act" => Some(NetMsg::Act(parts.next()?.to_string())),
@@ -87,21 +92,36 @@ pub struct NetGhost;
 fn pump(shared: Arc<Shared>, stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
     let mut writer = stream.try_clone().ok();
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if let Some(msg) = decode(&line) {
-            if let Ok(mut inbound) = shared.inbound.lock() {
-                inbound.push(msg);
-            }
-        }
-        if let Some(writer) = writer.as_mut()
-            && let Ok(mut outbound) = shared.outbound.lock()
-        {
-            for msg in outbound.drain(..) {
-                let _ = write!(writer, "{}", encode(&msg));
+    let mut reader = BufReader::new(stream);
+    loop {
+        // Escreve ANTES de ler. Com `lines()` + read timeout, o primeiro
+        // timeout era um `Err` que matava a thread antes de o primeiro pose
+        // sair — as duas pontas ficavam sem rede. Um stall > 50 ms também
+        // não pode ser fatal.
+        if let Some(writer) = writer.as_mut() {
+            if let Ok(mut outbound) = shared.outbound.lock() {
+                for msg in outbound.drain(..) {
+                    let _ = write!(writer, "{}", encode(&msg));
+                }
             }
             let _ = writer.flush();
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                if let Some(msg) = decode(&line) {
+                    if let Ok(mut inbound) = shared.inbound.lock() {
+                        inbound.push(msg);
+                    }
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
+            Err(_) => break,
         }
     }
 }
@@ -140,9 +160,13 @@ pub fn net_sync(
     mut acc: Local<f32>,
     players: Query<&GlobalTransform, With<crate::player::Player>>,
     mut ghosts: Query<&mut Transform, With<NetGhost>>,
-    actions: Option<Res<crate::input_map::ActionState>>,
+    mut actions: Option<ResMut<crate::input_map::ActionState>>,
 ) {
     let Some(link) = link else { return };
+    let (attack_just, interact_just) = actions
+        .as_deref()
+        .map(|a| (a.attack_just, a.interact_just))
+        .unwrap_or((false, false));
     *acc += time.delta_secs();
     if *acc >= 0.05
         && let Some(player) = players.iter().next()
@@ -157,10 +181,10 @@ pub fn net_sync(
             z: p.z,
             yaw,
         });
-        if actions.as_deref().is_some_and(|a| a.attack_just) {
+        if attack_just {
             out.push(NetMsg::Act("attack".into()));
         }
-        if actions.as_deref().is_some_and(|a| a.interact_just) {
+        if interact_just {
             out.push(NetMsg::Act("interact".into()));
         }
     }
@@ -170,19 +194,34 @@ pub fn net_sync(
         .lock()
         .map(|mut q| std::mem::take(&mut *q))
         .unwrap_or_default();
+    let is_host = matches!(link.role, NetRole::Host { .. });
     for msg in inbound {
-        if let NetMsg::Pose { x, y, z, yaw } = msg {
-            if let Some(mut ghost) = ghosts.iter_mut().next() {
-                ghost.translation = Vec3::new(x, y, z);
-                ghost.rotation = Quat::from_rotation_y(yaw);
-            } else {
-                commands.spawn((
-                    NetGhost,
-                    Transform::from_xyz(x, y, z).with_rotation(Quat::from_rotation_y(yaw)),
-                    Visibility::Inherited,
-                    Name::new("net-peer"),
-                ));
+        match msg {
+            NetMsg::Pose { x, y, z, yaw } => {
+                if let Some(mut ghost) = ghosts.iter_mut().next() {
+                    ghost.translation = Vec3::new(x, y, z);
+                    ghost.rotation = Quat::from_rotation_y(yaw);
+                } else {
+                    commands.spawn((
+                        NetGhost,
+                        Transform::from_xyz(x, y, z).with_rotation(Quat::from_rotation_y(yaw)),
+                        Visibility::Inherited,
+                        Name::new("net-peer"),
+                    ));
+                }
             }
+            // O anfitrião é a autoridade das ações: sem isto o `act` que o
+            // cliente enviava era descodificado e deitado fora.
+            NetMsg::Act(name) if is_host => {
+                if let Some(actions) = actions.as_deref_mut() {
+                    match name.as_str() {
+                        "attack" => actions.attack_just = true,
+                        "interact" => actions.interact_just = true,
+                        _ => {}
+                    }
+                }
+            }
+            NetMsg::Act(_) => {}
         }
     }
 }
