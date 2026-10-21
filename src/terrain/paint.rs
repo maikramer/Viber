@@ -117,8 +117,16 @@ impl PaintGrid {
 
     /// Janela que cobre o círculo `at`/`radius` (None se totalmente fora do mapa).
     pub fn window_around(&self, at: Vec2, radius: f32) -> Option<CellWindow> {
-        let (min_i, min_j) = self.cell_at(at.x - radius, at.y - radius)?;
-        let (max_i, max_j) = self.cell_at(at.x + radius, at.y + radius)?;
+        let half = self.world_size * 0.5;
+        let nearest = Vec2::new(at.x.clamp(-half, half), at.y.clamp(-half, half));
+        if nearest.distance(at) > radius {
+            return None;
+        }
+        // O círculo pode sair do mapa com o centro ainda dentro. `cell_at`
+        // recusa esse canto e a pintura falhava na borda.
+        let clamp = |v: f32| v.clamp(-half, half);
+        let (min_i, min_j) = self.cell_at(clamp(at.x - radius), clamp(at.y - radius))?;
+        let (max_i, max_j) = self.cell_at(clamp(at.x + radius), clamp(at.y + radius))?;
         Some(CellWindow {
             i0: min_i.min(max_i),
             j0: min_j.min(max_j),

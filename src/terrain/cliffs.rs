@@ -284,6 +284,9 @@ pub struct CliffMask {
     /// Authored talus aprons (rasterized from the carve registry) — painted
     /// as gravel by the splat, avoided by grass/spawners via `bits`.
     talus: Vec<u64>,
+    /// Footprint das bandas autoradas (`<Cliff>`, margens, cuts). O sharpen
+    /// não as terraça: o perfil já é o da banda.
+    authored: Vec<u64>,
     /// Wall space per texel of the public layer, `0..=255`: the height
     /// fraction inside the local drop window (0 = brow, 255 = toe, 128 =
     /// neutral). Baked into vertex color R by the mesh builder — the wall
@@ -395,6 +398,7 @@ impl CliffMask {
             core: vec![0; width.saturating_mul(depth).div_ceil(64)],
             bits: vec![0; width.saturating_mul(depth).div_ceil(64)],
             talus: vec![0; width.saturating_mul(depth).div_ceil(64)],
+            authored: vec![0; width.saturating_mul(depth).div_ceil(64)],
             wall: vec![WALL_NEUTRAL; width.saturating_mul(depth)],
             width,
             depth,
@@ -522,6 +526,7 @@ impl CliffMask {
                     let w = station_lerp(&band.width, &hit);
                     if d <= w {
                         set_bit(&mut self.core, width, x, z);
+                        set_bit(&mut self.authored, width, x, z);
                         // Wall space straight from the geometry: 0 at the
                         // brow, 255 at the toe. The 2.5D path had to estimate
                         // this from a +/-8 texel min/max window over the
@@ -633,6 +638,14 @@ impl CliffMask {
                 }
             }
         }
+    }
+
+    /// Célula de uma banda autoral (parede de `<Cliff>` / cut / margem).
+    pub fn is_authored(&self, x: usize, z: usize) -> bool {
+        if x >= self.width || z >= self.depth || self.authored.is_empty() {
+            return false;
+        }
+        get_bit(&self.authored, self.width, x, z)
     }
 
     /// Texel `(x, z)` is INSIDE an accepted cliff component (no margin).
@@ -832,9 +845,6 @@ pub fn sharpen_terrain(
     };
 
     let (width, depth) = (grid.width(), grid.depth());
-    // Authored cliff bands are already shaped by their own profile — the
-    // auto-terracer must not re-quantize them into stairs.
-    let carved = vec![0u64; width.saturating_mul(depth).div_ceil(64)];
     grid.begin_stroke("sharpen");
     for z in 0..depth {
         for x in 0..width {
@@ -844,7 +854,9 @@ pub fn sharpen_terrain(
             if !steep_x && !steep_z {
                 continue;
             }
-            if get_bit(&carved, width, x, z) {
+            // A máscara `carved` nascia a zero e nunca era preenchida, por
+            // isso o sharpen terraçava paredes autoradas que já têm perfil.
+            if mask.is_authored(x, z) {
                 continue;
             }
             let p = grid.cell_center(x, z);

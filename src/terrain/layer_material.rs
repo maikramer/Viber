@@ -1062,6 +1062,20 @@ mod tests {
         }
     }
 
+    /// A tabela bindless lê-se SEMPRE indexando o storage. Copiar uma entrada
+    /// para um valor (`let idx = material_indices[slot];`) e indexá-la com
+    /// um índice dinâmico força o naga a despejar 139 u32 numa variável local
+    /// por amostra: o driver NVIDIA levava ~90 s a compilar o pipeline e o
+    /// terreno ficava por desenhar (céu à vista) durante a cinemática.
+    #[test]
+    fn test_chunk_shader_never_copies_the_index_table() {
+        assert!(
+            !TERRAIN_CHUNK_WGSL.contains("= material_indices[slot];"),
+            "chunk.wesl copia a entrada da tabela bindless para um valor — indexa \
+             `material_indices[slot].e[b]` diretamente"
+        );
+    }
+
     /// O gate triplanar deriva do `cliff-angle`: 50° → slope 1−cos(50°) ≈
     /// 0.357; um cliff-angle de 90°+ desliga o caminho (slope ≥ 1).
     #[test]

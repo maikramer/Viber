@@ -6,11 +6,10 @@
 //! [`LAYER_COUNT`] ground textures from the shared pool. The blend weights
 //! live in four RGBA8 splat planes (4 weights each; the grass slot closes
 //! the remainder to 1.0) generated once per world at bootstrap from the
-//! carved heightfield — same inputs the old tint used (altitude, slope) plus
-//! the water and road registries:
+//! carved heightfield — slope, water and roads, plus the hand paint layer.
+//! Altitude does not pick a texture: `snow_peak` only appears where the
+//! `.paint` grid says so.
 //!
-//! * **Altitude** — `snow_peak` above `snow-height`, `dirt` patches on the
-//!   mid bands.
 //! * **Slope** — `mountain_stone` on cliffs, `gravel` on the band below.
 //! * **Water** (the shore contract) — lake/river floors go `sand` in the
 //!   shallows and `pebbles` on the deep bed, the shore fades
@@ -297,7 +296,8 @@ impl Biome {
 pub struct BiomeBlend {
     /// Mistura de solo normalizada (soma 1).
     pub ground: [f32; LAYER_COUNT],
-    /// Somado a `snow-height` (negativo = neve começa mais baixo).
+    /// Legado da linha de neve. A altitude já não escolhe textura; o campo
+    /// fica para os blends de bioma não mudarem de layout.
     pub snow_bias: f32,
     /// Somado às arestas da banda de rocha (negativo = rocha aparece antes).
     pub rock_bias: f32,
@@ -408,8 +408,8 @@ pub struct SplatParams {
     /// Shore band outside the waterline: sand fades to the terrain texture
     /// over this many meters (`shore-width`).
     pub shore_width: f32,
-    /// Normalized altitude where `snow_peak` takes over (the tint's
-    /// `snow-height`, reused so worlds keep one knob).
+    /// Ignorado. `snow-height` no XML ainda faz parse para mundos antigos;
+    /// a neve só entra pela pintura (`snow_peak`).
     pub snow_height: f32,
     /// Procedural seed of the terrain — perturbs the noise fields.
     pub seed: u64,
@@ -517,7 +517,11 @@ impl Bounds {
 fn water_bounds(body: &WaterBody, margin: f32) -> Bounds {
     match body.kind {
         WaterKind::Lake => {
-            let reach = body.radius * 1.28 + margin + 2.0;
+            // A linha de água real chega a `radius * CONTOUR_PEAK * mirror_reach`.
+            // 1.28 ficava curto nos lóbulos e a praia/o leito não eram pintados.
+            let reach = body.radius * super::water::CONTOUR_PEAK * body.mirror_reach.max(1.0)
+                + margin
+                + 2.0;
             Bounds {
                 min: body.at - Vec2::splat(reach),
                 max: body.at + Vec2::splat(reach),
@@ -644,7 +648,11 @@ fn bake_rows(map: &mut SplatMap, inputs: SplatInputs, x0: u32, x1: u32, z0: u32,
         .roads
         .iter()
         .filter(|r| !r.bridge)
-        .map(|r| (road_bounds(r, 4.0), r))
+        .map(|r| {
+            let half = r.half_width.iter().copied().fold(0.0_f32, f32::max);
+            // A fita do material vai até half_width + 2.4 m (`road_fringe`).
+            (road_bounds(r, half + 2.4), r)
+        })
         .collect();
     let rows = (z1 - z0) as usize;
     let width = (x1 - x0) as usize;
@@ -802,7 +810,8 @@ pub fn weights_at(
     ctx: &mut TexelCtx,
 ) -> [f32; LAYER_COUNT] {
     let p = ctx.params;
-    let h = (y / max_height.max(1.0)).clamp(0.0, 1.0);
+    // Altitude não escolhe camada. `y` continua a servir a margem e o leito.
+    let _ = max_height;
     let slope = 1.0 - normal_y.clamp(0.0, 1.0);
     let climate = p.biomes.sample(x, z, p.seed);
 
@@ -821,30 +830,15 @@ pub fn weights_at(
     let n_forest_region = value_noise(x / NOISE_FOREST_REGION, z / NOISE_FOREST_REGION, p.seed, 6);
 
     // ── Shore: sand on lake/river floors, fading out across the shore band.
-    // (Antes do bloco da neve: a supressão de neve submersa precisa das
-    // mesmas máscaras de profundidade que o leito.)
     let (sand_mask, mud_band, shallow, bed_floor) = shore_weights(x, z, y, ctx);
 
-    // ── Hard override layers first: cliffs and the snow line take budget
-    //    away from everything below them (rock beats snow on a cliff, the
-    //    same precedence the old vertex tint used).
+    // ── Cliffs take budget from the biome floor. Snow is not an override:
+    //    `snow_peak` is only whatever the paint grid writes afterwards.
     //
-    // As arestas seguem o bioma: nos picos a rocha nasce mais cedo e a neve
-    // muito mais baixo; no deserto a neve é empurrada para fora do mapa.
+    // As arestas seguem o bioma: nos picos a rocha nasce mais cedo.
     let rock0 = (0.30 + climate.rock_bias).clamp(0.05, 0.9);
     let stone = smoothstep(rock0, rock0 + 0.22, slope);
-    let snow_h = (p.snow_height + climate.snow_bias).clamp(0.0, 1.5);
-    let snow = smoothstep(snow_h - 0.06, snow_h + 0.10, h)
-        // A neve agarra-se ao plano; a parede fica rocha nua (BOTW).
-        * smoothstep(0.34, 0.16, slope)
-        * (1.0 - stone)
-        // Submersa a neve derrete: num piso de lago fundo acima da linha de
-        // neve o orçamento ficava NEGATIVO (`budget = 1−stone−snow−bed`) e
-        // `scale = budget/used` invertia os pesos restantes — neve/seixo
-        // sem areia nem lama. Os fatores de alagamento do leito
-        // (`bed_floor`, franja rasa `shallow`) suprimem-na como ao bed.
-        * (1.0 - bed_floor.max(shallow));
-    let budget = 1.0 - stone - snow;
+    let budget = 1.0 - stone;
     // O leito profundo entra em MANCHAS de noise — um tapete uniforme lê-se
     // como anel pintado; as manchas alternam seixo ↔ areia/cascalho como um
     // fundo de rio real. A franja húmida em seco ganha seixos salpicados
@@ -852,7 +846,7 @@ pub fn weights_at(
     let n_bed = fbm(x, z, NOISE_BED, p.seed, 7);
     let bed_patch = smoothstep(0.38, 0.62, n_bed);
     // (1−stone): numa margem íngreme submersa a rocha ganha — seixos não
-    // assentam em parede, e budget = 1−stone−snow−bed tem de ficar ≥ 0.
+    // assentam em parede, e budget = 1−stone−bed tem de ficar ≥ 0.
     let bed =
         (bed_floor + mud_band * 0.45 * smoothstep(0.55, 0.80, n_mud)).min(1.0) * (1.0 - stone);
     let bed_pebbles = bed * (0.30 + 0.70 * bed_patch);
@@ -883,9 +877,7 @@ pub fn weights_at(
     // é o colar DEBAIXO da pedra, não a encosta toda.) Largura ao vivo:
     // `tuning.gravel_shoulder`.
     let tuning = &ctx.params.tuning;
-    let gravel = smoothstep(rock0 - tuning.gravel_shoulder, rock0 - 0.005, slope)
-        * (1.0 - stone)
-        * (1.0 - snow);
+    let gravel = smoothstep(rock0 - tuning.gravel_shoulder, rock0 - 0.005, slope) * (1.0 - stone);
     let patch = climate.patchiness * tuning.patchiness;
     // Manchas mais RARAS (limiares subidos em r7): a 0.57–0.66 o fbm abria
     // borriões escuros em toda a colina; a faixa estreita deixa só os
@@ -893,17 +885,11 @@ pub fn weights_at(
     let forest = smoothstep(0.60, 0.70, n_forest)
         * smoothstep(0.55, 0.67, n_forest_region)
         * smoothstep(0.38, 0.28, slope)
-        * (1.0 - snow)
         * (1.0 - sand_mask)
         * patch
         * tuning.forest_density;
     let dirt = smoothstep(0.62, 0.72, n_dirt)
         * smoothstep(0.58, 0.68, n_dirt_region)
-        // Piso do vale fica relva; terra nasce em altitude média (laderas
-        // e transições) — em plano plano as fronteiras das regiões liam-se
-        // como linhas artificiais.
-        * smoothstep(0.10, 0.28, h)
-        * (1.0 - snow)
         * (1.0 - sand_mask)
         * patch
         * tuning.dirt_density;
@@ -965,7 +951,6 @@ pub fn weights_at(
     out[SLOT_MOUNTAIN_STONE] += stone;
     out[SLOT_SAND] += rest[0];
     out[SLOT_DESERT_SAND] += rest[1];
-    out[SLOT_SNOW_PEAK] += snow;
     out[SLOT_SWAMP_MUD] += rest[2];
     out[SLOT_DIRT_ROAD] += rest[7];
     out[SLOT_RIVERBED] += bed_pebbles;
@@ -1483,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snow_above_snow_height() {
+    fn test_altitude_does_not_assign_snow() {
         let boxes_w: Vec<(Bounds, &WaterBody)> = Vec::new();
         let boxes_r: Vec<(Bounds, &RoadPath)> = Vec::new();
         let mut ctx = TexelCtx {
@@ -1493,12 +1478,17 @@ mod tests {
             road_boxes: &boxes_r,
             cliff: None,
         };
-        // Above the 0.75 line, flat: snow dominates whatever patches want.
-        let w = weights_at(0.0, 0.0, 42.0, 1.0, 50.0, &mut ctx);
-        assert!(w[SLOT_SNOW_PEAK] > 0.9, "peak: {w:?}");
-        // Below it: none.
-        let w = weights_at(0.0, 0.0, 20.0, 1.0, 50.0, &mut ctx);
-        assert!(w[SLOT_SNOW_PEAK] < 1e-4, "low: {w:?}");
+        // Acima da antiga linha 0.75, plano: o chão continua o bioma, não neve.
+        let high = weights_at(0.0, 0.0, 42.0, 1.0, 50.0, &mut ctx);
+        let low = weights_at(0.0, 0.0, 8.0, 1.0, 50.0, &mut ctx);
+        assert!(high[SLOT_SNOW_PEAK] < 1e-4, "peak: {high:?}");
+        assert!(low[SLOT_SNOW_PEAK] < 1e-4, "low: {low:?}");
+        let sum: f32 = high.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-3, "weights close to 1: {sum}");
+        assert!(
+            high[SLOT_GRASS] + high[SLOT_VALE_GRASS] > 0.5,
+            "flat high ground stays biome floor: {high:?}"
+        );
     }
 
     /// Piso de lago FUNDO acima da linha de neve: a neve submersa derrete —

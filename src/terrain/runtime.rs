@@ -436,7 +436,7 @@ fn splat_cache_key(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "viber-splat-v2".hash(&mut hasher);
+    "viber-splat-v3".hash(&mut hasher);
     grid.raw().hash(&mut hasher);
     grid.world_size().to_bits().hash(&mut hasher);
     grid.max_height().to_bits().hash(&mut hasher);

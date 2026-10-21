@@ -105,14 +105,8 @@ impl From<&crate::terrain::spec::TerrainTint> for TintParams {
     }
 }
 
-const MID_BAND_CENTER: f32 = 0.35;
-const HIGH_BAND_CENTER: f32 = 0.7;
-/// Half-width of the smoothstep between two altitude bands (fraction of 0..1).
-const BAND_HALF_WIDTH: f32 = 0.25;
-/// Snow target color blended in above `snow_height`.
-const SNOW_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// Neutral the band colour is mixed against: white leaves the diffuse texture
-/// untouched at `height-blend-strength: 0`.
+/// Neutral the rock tint is mixed against: white leaves the diffuse texture
+/// untouched on flat ground and at `height-blend-strength: 0`.
 const NEUTRAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// `mix(white, band, height_blend_strength) * base_color`. That matters
 /// because the terrain also carries a diffuse texture, and the shader
@@ -123,40 +117,22 @@ const NEUTRAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// the surface is pushed towards the authored band colour — and `0` leaves
 /// the texture times `base-color`, i.e. no tint at all.
 pub fn tint_vertex_color(y: f32, normal_y: f32, max_height: f32, tint: &TintParams) -> [f32; 4] {
+    // Altitude não pinta. `y` / `max_height` ficam na assinatura porque o
+    // mesher voxel e o heightfield chamam os dois do mesmo modo.
+    let _ = (y, max_height);
     let strength = tint.height_blend_strength.clamp(0.0, 1.0);
     if strength <= 0.0 {
         return tint.base_color;
     }
-    let h = if max_height > 0.0 {
-        (y / max_height).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    // Slope: 0 flat, 1 vertical.
+    // Slope: 0 flat, 1 vertical. Rocha só na parede — o chão plano fica
+    // a textura, seja ela pintada ou a paleta do bioma.
     let slope = 1.0 - normal_y.clamp(0.0, 1.0);
-    let width = BAND_HALF_WIDTH;
-
-    // Three-band altitude blend: low → mid → high, softstepped at the knots.
-    let mid_band = smoothstep(MID_BAND_CENTER - width, MID_BAND_CENTER + width, h);
-    let high_band = smoothstep(HIGH_BAND_CENTER - width, HIGH_BAND_CENTER + width, h);
-    let mut color = mix4(tint.color_low, tint.color_mid, mid_band);
-    color = mix4(color, tint.color_high, high_band);
-
-    // Snow: above `snow_height` the high color fades to white.
-    let snow_band = smoothstep(tint.snow_height - width, tint.snow_height + width, h);
-    color = mix4(color, SNOW_COLOR, snow_band);
-
-    // Rock on steep faces wins over altitude and snow (a cliff at the snow
-    // line should not read as pure white).
     let rock_band = smoothstep(
         tint.slope_threshold - tint.slope_softness,
         tint.slope_threshold + tint.slope_softness,
         slope,
     );
-    color = mix4(color, tint.color_rock, rock_band);
-
-    // Modulate, then apply the authored base colour.
-    let color = mix4(NEUTRAL_COLOR, color, strength);
+    let color = mix4(NEUTRAL_COLOR, tint.color_rock, rock_band * strength);
     [
         color[0] * tint.base_color[0],
         color[1] * tint.base_color[1],
@@ -190,10 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tint_modulates_instead_of_replacing() {
-        // The whole point of the mix: at full strength the band colour lands
-        // as authored, but at the strengths worlds actually use it only
-        // *pushes* the texture, instead of multiplying it down to black.
+    fn test_tint_ignores_altitude() {
         let mut tint = TintParams {
             base_color: [1.0; 4],
             color_low: [0.04, 0.09, 0.02, 1.0],
@@ -203,48 +176,40 @@ mod tests {
             snow_height: 0.92,
             slope_threshold: 0.93,
             slope_softness: 0.05,
-            height_blend_strength: 0.22,
+            height_blend_strength: 1.0,
         };
-        // Valley floor, flat: the low band at 22% barely darkens the texture.
-        let low = tint_vertex_color(10.0, 1.0, 200.0, &tint);
-        assert!(
-            low[1] > 0.7,
-            "22% strength must not crush the texture: {low:?}"
-        );
-        assert!(
-            low[0] < low[1],
-            "and it still pushes towards green: {low:?}"
-        );
+        let valley = tint_vertex_color(10.0, 1.0, 200.0, &tint);
+        let peak = tint_vertex_color(199.0, 1.0, 200.0, &tint);
+        assert_eq!(valley, [1.0; 4], "flat ground keeps the texture: {valley:?}");
+        assert_eq!(peak, valley, "altitude must not recolor: {peak:?}");
 
-        // Same vertex at full strength: the authored band colour, as-is.
-        tint.height_blend_strength = 1.0;
-        let full = tint_vertex_color(10.0, 1.0, 200.0, &tint);
-        assert!((full[1] - tint.color_low[1]).abs() < 1e-5, "{full:?}");
-
-        // Zero strength is an exact no-op: just the base colour.
         tint.height_blend_strength = 0.0;
         tint.base_color = [0.58, 0.55, 0.49, 1.0];
-        assert_eq!(tint_vertex_color(10.0, 1.0, 200.0, &tint), tint.base_color);
+        assert_eq!(tint_vertex_color(180.0, 1.0, 200.0, &tint), tint.base_color);
     }
 
     #[test]
-    fn test_tint_snow_on_peaks_and_rock_on_cliffs() {
+    fn test_tint_rock_on_cliffs_not_snow_on_peaks() {
         let tint = TintParams {
             base_color: [1.0; 4],
             color_low: [0.04, 0.09, 0.02, 1.0],
             color_mid: [0.2, 0.3, 0.1, 1.0],
             color_high: [0.3, 0.3, 0.35, 1.0],
-            color_rock: [0.6, 0.1, 0.1, 1.0], // vivid, so the band is obvious
+            color_rock: [0.6, 0.1, 0.1, 1.0],
             snow_height: 0.8,
             slope_threshold: 0.5,
             slope_softness: 0.05,
             height_blend_strength: 1.0,
         };
-        // High and flat → snow white.
         let peak = tint_vertex_color(199.0, 1.0, 200.0, &tint);
-        assert!(peak.iter().take(3).all(|c| *c > 0.95), "snow: {peak:?}");
-        // Just as high but vertical → rock wins over snow.
+        assert!(
+            peak.iter().take(3).all(|c| (*c - 1.0).abs() < 1e-4),
+            "a flat peak is not snow: {peak:?}"
+        );
         let cliff = tint_vertex_color(199.0, 0.0, 200.0, &tint);
-        assert!(cliff[0] > cliff[1], "rock beats snow on a cliff: {cliff:?}");
+        assert!(
+            (cliff[0] - 0.6).abs() < 1e-4 && cliff[1] < 0.2,
+            "a vertical face takes the rock colour: {cliff:?}"
+        );
     }
 }

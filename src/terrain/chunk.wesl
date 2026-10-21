@@ -145,10 +145,13 @@ fn terrain_params(slot: u32) -> TerrainChunkParams {
 /// gradientes explícitos (legal no fluxo não-uniforme por camada).
 fn map_sample(slot: u32, b: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     @if(BINDLESS) {
-    let idx = material_indices[slot];
+    // Indexar o storage DIRETAMENTE. `let idx = material_indices[slot]`
+    // carregava a struct inteira (139 u32) para um valor e o índice dinâmico
+    // `idx.e[b]` obrigava o naga a despejá-la numa variável local — uma
+    // cópia de 556 B por amostra, ~40 amostras desenroladas.
     return textureSampleGrad(
-        bindless_textures_2d[idx.e[b - 1u]],
-        bindless_samplers_filtering[idx.e[b]],
+        bindless_textures_2d[material_indices[slot].e[b - 1u]],
+        bindless_samplers_filtering[material_indices[slot].e[b]],
         uv,
         dx,
         dy,
