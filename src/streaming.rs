@@ -42,11 +42,15 @@ pub struct Resident;
 #[derive(Clone, Debug)]
 pub struct ColdRecord {
     pub key: String,
+    /// Pose de MUNDO. A entidade pode ser um `<GltfScene>` filho de uma
+    /// `<Entity>`; guardar o `Transform` local acordava a cena na origem.
     pub transform: Transform,
     pub name: Option<String>,
     pub scene: Option<Handle<bevy::world_serialization::WorldAsset>>,
     pub script: Option<String>,
     pub state_json: Option<String>,
+    /// Proveniência do nó XML, para a entidade acordada poder voltar a dormir.
+    pub source: crate::scene::SceneSource,
 }
 
 #[derive(Resource, Default)]
@@ -82,11 +86,12 @@ pub fn stream_rings(
     query: Query<(
         Entity,
         &GlobalTransform,
-        &Transform,
         &crate::scene::SceneSource,
         Option<&Name>,
         Option<&bevy::world_serialization::WorldAssetRoot>,
         Option<&crate::luau::LuaScriptRef>,
+        Has<bevy::prelude::Mesh3d>,
+        Has<crate::recipes::spawn::GltfScenePending>,
         Has<Resident>,
         Has<Streamable>,
     )>,
@@ -121,6 +126,7 @@ pub fn stream_rings(
         if let Some(path) = record.script.clone() {
             spawned.insert(crate::luau::LuaScriptRef { path });
         }
+        spawned.insert(record.source.clone());
         let id = spawned.id();
         if let (Some(host), Some(json)) = (host.as_mut(), record.state_json.as_deref()) {
             let _ = host.restore_entity_state(id, json);
@@ -128,8 +134,16 @@ pub fn stream_rings(
         let _ = key;
     }
     let mut sleep = Vec::new();
-    for (entity, global, transform, source, name, scene, script, resident, streamable) in &query {
+    for (entity, global, source, name, scene, script, has_mesh, pending, resident, streamable) in
+        &query
+    {
         if !streamable {
+            continue;
+        }
+        // Só adormece o que sabe acordar: cena (WorldAssetRoot) ou entidade
+        // sem visual. Um `<GltfScene>` ainda a carregar ou uma primitiva
+        // (`Mesh3d`) não têm como ser reconstruídos e ficariam vazios.
+        if scene.is_none() && (has_mesh || pending) {
             continue;
         }
         let distance = global.translation().distance(hero);
@@ -145,11 +159,12 @@ pub fn stream_rings(
             entity,
             ColdRecord {
                 key: key.clone(),
-                transform: *transform,
+                transform: global.compute_transform(),
                 name: name.map(|n| n.as_str().to_string()),
                 scene: scene.map(|s| s.0.clone()),
                 script: script.map(|s| s.path.clone()),
                 state_json,
+                source: source.clone(),
             },
         ));
     }
