@@ -937,6 +937,14 @@ fn attach_postfx_to_cameras(
         if crate::water_ssr::water_ssr_requested() {
             commands.entity(camera).insert(crate::water_ssr::WaterSsr);
         }
+        // Oclusão GPU do Bevy. Fica opt-in: o material bindless do terreno
+        // pode não entrar no culling, e sem um boot com GPU não se liga
+        // por omissão. `VIBER_OCCLUSION=1`.
+        if std::env::var("VIBER_OCCLUSION").ok().as_deref() == Some("1") {
+            commands
+                .entity(camera)
+                .insert(bevy::render::occlusion_culling::OcclusionCulling);
+        }
         // Volumetrics (god-rays + volume de névoa que segue o herói):
         // LIGADOS por omissão — desligar com `VIBER_NO_VOLUMETRICS=1` (ver
         // `volumetrics_enabled`; apagavam o frame na bisseção r1, renderizam
@@ -1765,7 +1773,12 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Normalização à luminância: o split-tone nunca clareia/escurece o
     // frame — só desloca a temperatura por FAIXA (sombras↔highlights).
     let norm = max(dot(tint, LUMA), 1e-4);
-    return vec4<f32>(color * tint / norm, 1.0);
+    var graded = color * tint / norm;
+    // Deband: ruído de 1/255 no fim da cadeia (o split-tone é o último
+    // passe nosso). Mata as bandas do céu e do volumétrico sem um LUT 3D.
+    let noise = fract(sin(dot(in.uv, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    graded = graded + (noise - 0.5) / 255.0;
+    return vec4<f32>(graded, 1.0);
 }
 "#;
 
