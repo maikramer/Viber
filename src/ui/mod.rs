@@ -164,8 +164,6 @@ impl bevy::app::Plugin for UiPlugin {
                     // lê recursos do World e spawna diretamente).
                     script::apply_ui_creates,
                     script::apply_ui_script_binds,
-                    actions::apply_shop_actions,
-                    actions::apply_skill_actions,
                     // Ações → fila de eventos dos scripts (`viber.events()`).
                     actions::forward_ui_actions,
                 )

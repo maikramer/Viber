@@ -214,7 +214,7 @@ pub fn sense_ai(world: &mut World) {
     let enemies: Vec<Entity> = world
         .query_filtered::<Entity, (
             With<EnemyCreature>,
-            Without<crate::combat::Corpse>,
+            Without<crate::corpse::Corpse>,
             Without<crate::luau::LuaScriptRef>,
             Without<crate::player::Player>,
         )>()

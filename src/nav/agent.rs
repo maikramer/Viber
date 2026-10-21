@@ -50,12 +50,11 @@ pub struct NavArchipelago {
 
 /// The profile a character gets when the world did not state one.
 ///
-/// Hostility is a concept the engine already has — `combat::is_hostile_script`
-/// is what decides which scripted creatures get combat vitals — so it decides
-/// this too, instead of a second marker to author and keep in sync. A wolf
+/// Hostility é o marcador genérico `vitals::Hostile` (`hostile="true"` ou
+/// `<Creature role="enemy">`) — a engine não olha ao path do script. A wolf
 /// hunts across the ground; a merchant walks the street.
-pub fn default_profile(script: Option<&crate::luau::LuaScriptRef>, fsm: bool) -> NavProfile {
-    if fsm || script.is_some_and(|script| crate::combat::is_hostile_script(&script.path)) {
+pub fn default_profile(hostile: bool, fsm: bool) -> NavProfile {
+    if fsm || hostile {
         NavProfile::Wild
     } else {
         NavProfile::Civil
@@ -76,7 +75,7 @@ pub fn attach_nav_agents(
         (
             Entity,
             Option<&NavProfile>,
-            Option<&crate::luau::LuaScriptRef>,
+            Has<crate::vitals::Hostile>,
             Has<crate::ai::EnemyCreature>,
         ),
         (With<AiLocomotion>, Without<Agent3d>),
@@ -86,10 +85,10 @@ pub fn attach_nav_agents(
     let Some(archipelago) = archipelago else {
         return;
     };
-    for (entity, profile, script, fsm) in &fresh {
+    for (entity, profile, hostile, fsm) in &fresh {
         let profile = profile
             .copied()
-            .unwrap_or_else(|| default_profile(script, fsm));
+            .unwrap_or_else(|| default_profile(hostile, fsm));
         let mut overrides = AgentTypeIndexCostOverrides::default();
         if matches!(profile, NavProfile::Civil) {
             overrides.set_type_index_cost(GROUND_TYPE_INDEX, config.offroad_cost);

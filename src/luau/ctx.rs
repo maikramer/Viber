@@ -95,23 +95,8 @@ pub struct ScriptCtx {
     /// Nomes dos `<Prototype>` do mundo (validação à fila de
     /// `viber.spawn_prototype` — erro de script em vez de falha silenciosa).
     pub prototype_names: Vec<String>,
-    /// Definições de quest do mundo (`viber.quest_def`/`quest_defs`) — o
-    /// mesmo JSON lido do disco pela engine, exposto para um diálogo/quest
-    /// 100 % Lua reusar títulos, linhas e objetivos autorais.
-    pub quest_defs: Vec<QuestDefLite>,
     /// Ring of `viber.log` lines (capped) — also read by tests.
     pub logs: Vec<String>,
-    /// Snapshot dos estados de quest ("not_taken|active|ready|done") para
-    /// `viber.quest_state`, atualizado no início de cada frame.
-    pub quest_states: std::collections::HashMap<String, String>,
-    /// Snapshot do vault (recursos + itens) para `vault_get`/`item_count`.
-    pub vault: std::collections::HashMap<String, u32>,
-    /// Hostis vivos por banda do mundo (travel::REGIONS) —
-    /// `viber.alive_in_region(idx)`.
-    pub alive_regions: [u32; 5],
-    /// Biomas já revelados por atalaias (travel::RevealedBiomes) —
-    /// `viber.biome_revealed(bioma)`; snapshot do frame.
-    pub revealed: std::collections::HashSet<String>,
     /// Range de interação da entidade actual (`viber.set_interaction`) —
     /// `viber.interacted` respeita-o em vez de hardcodar 3,5 m.
     pub interaction_range: Option<f32>,
@@ -120,6 +105,18 @@ pub struct ScriptCtx {
     pub interaction_focus: std::collections::HashMap<KeyCode, Entity>,
     /// Snapshot do HP do herói `(current, max)` para `viber.player_hp`.
     pub player_hp: Option<(f32, f32)>,
+    /// Duração de cada clip do herói (`viber.clip_duration`), nomes
+    /// normalizados → segundos. O jogo agenda o fim do swing sem hardcodar
+    /// durações que mudam com o GLB.
+    pub clip_durations: std::collections::HashMap<String, f32>,
+    /// Tabela de idioma ativa (`locale/<lang>.json`) — `viber.localize`
+    /// resolve as chaves `@nome` fora do `say`/`toast`.
+    pub locale_table: Option<std::sync::Arc<std::collections::HashMap<String, String>>>,
+    /// Acessibilidade (`viber.a11y`): escala de legendas, shake, hit-stop e
+    /// [E] por hold.
+    pub a11y: A11ySnap,
+    /// Papel de netplay (`viber.net_role`): "off" | "host" | "join".
+    pub net_role: String,
     /// Handle de leitura partilhado do terreno (`viber.ground_below`) —
     /// dois `Arc` clones; o terreno não muda pós-bootstrap, portanto o
     /// snapshot É o terreno (não nasce segunda fonte de altura).
@@ -148,40 +145,49 @@ pub struct HostileSnap {
     pub pos: Vec3,
     pub hp: f32,
     pub max: f32,
+    /// Forward do modelo no plano (XZ, unitário) — o jogo usa-o para backstab.
+    pub forward: Vec2,
+}
+
+/// Snapshot de [`crate::a11y::A11y`] para `viber.a11y()`.
+#[derive(Debug, Clone, Copy)]
+pub struct A11ySnap {
+    pub subtitle_scale: f32,
+    pub shake: bool,
+    pub hitstop: bool,
+    pub interact_hold: bool,
+}
+
+impl Default for A11ySnap {
+    fn default() -> Self {
+        Self {
+            subtitle_scale: 1.0,
+            shake: true,
+            hitstop: true,
+            interact_hold: false,
+        }
+    }
 }
 
 /// Prop colhível perto do herói (`viber.destructibles`).
 #[derive(Debug, Clone)]
 pub struct DestructibleSnap {
     pub id: i64,
+    /// Golpes totais autorados (o script conta os que deu).
+    pub hits: u32,
     pub hits_left: u32,
     pub kind: String,
     pub amount: u32,
     pub pos: Vec3,
     pub range: f32,
+    /// Alcance EFETIVO (o autorado escalado por `interact::scaled_range`) —
+    /// o script compara a distância a este número, sem duplicar a escala.
+    pub effective_range: f32,
+    /// Nome de mundo do prop (vazio se o spawner não o nomeou).
+    pub name: String,
     /// `burst` | `fall` | `shatter`.
     pub style: String,
     pub popup: String,
-}
-
-/// Definição de quest achatada para Lua (`viber.quest_def`).
-#[derive(Debug, Clone, Default)]
-pub struct QuestDefLite {
-    pub id: String,
-    pub title: String,
-    pub npc: String,
-    pub biome: String,
-    /// `kill` | `collect` | `visit`.
-    pub kind: String,
-    pub target: String,
-    pub count: u32,
-    pub radius: f32,
-    pub gold: u32,
-    pub xp: u32,
-    pub items: Vec<String>,
-    pub lines_intro: Vec<String>,
-    pub lines_progress: Vec<String>,
-    pub lines_complete: Vec<String>,
 }
 
 /// Estradas e água, partilhadas com os scripts.

@@ -271,7 +271,7 @@ pub struct Player {
 impl Default for Player {
     fn default() -> Self {
         Self {
-            speed: 4.0,
+            speed: BASE_SPEED,
             sprint_multiplier: 1.5,
             jump_height: 2.3,
             rotation_speed: 10.0,
@@ -329,6 +329,9 @@ pub fn process_input(forward: f32, strafe: f32, yaw_deg: f32) -> Vec3 {
     }
 }
 
+/// Base walking speed of the hero (m/s).
+pub const BASE_SPEED: f32 = 4.0;
+
 /// Input magnitude — the reference re-applies `min(1, hypot(forward, strafe))`
 /// after normalizing, so A/D alone (strafe 0.6) nudges at 60 % speed.
 pub fn input_magnitude(forward: f32, strafe: f32) -> f32 {
@@ -338,6 +341,14 @@ pub fn input_magnitude(forward: f32, strafe: f32) -> f32 {
 /// Face a movement direction (models from the pipeline face +Z).
 pub fn facing_rotation(dir: Vec3) -> Quat {
     Quat::from_rotation_y(dir.x.atan2(dir.z))
+}
+
+/// Caminho para a frente do modelo no plano (XZ, unitário). O glTF da
+/// pipeline olha +Z, não o −Z do `GlobalTransform::forward()`.
+pub fn hero_forward(transform: &GlobalTransform) -> Vec3 {
+    (transform.rotation() * Vec3::Z)
+        .with_y(0.0)
+        .normalize_or_zero()
 }
 
 /// Slerp factor for facing: `rotation_speed · dt` converted to a 0..1 t,

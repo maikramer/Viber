@@ -366,17 +366,14 @@ fn shift_lake(lake: &LakeSpec, offset: Vec2) -> LakeSpec {
     }
 }
 
-/// Recolhe os catálogos RPG declaráveis (Fases B2/B3) da árvore de entidades:
-/// `<Landmark>` → [`crate::travel::LandmarkCatalog`] e `<SpawnPoint>` →
-/// [`crate::feedback::RespawnCatalog`]. Só substituem o fallback quando o
-/// mundo declara ALGUMA entrada (decidido no [`startup`]). Coordenadas `at`
-/// somam a translation dos grupos ancestrais (convenção `at` do XML).
+/// Recolhe os catálogos declaráveis (Fase B3): `<SpawnPoint>` →
+/// [`crate::feedback::RespawnCatalog`]. `<Landmark>` é só dado autoral
+/// (o jogo lê-o por Lua); não vira recurso de engine.
 fn collect_catalogs(specs: &[EntitySpec], out: &mut PendingCatalogs, offset: Vec2) {
     for spec in specs {
         let child_offset =
             offset + Vec2::new(spec.transform.translation[0], spec.transform.translation[2]);
         match &spec.kind {
-            EntityKind::Landmark { spec } => out.landmarks.push(spec.clone()),
             EntityKind::SpawnPoint { at, label } => out
                 .spawn_points
                 .push((Vec2::new(at[0] + offset.x, at[1] + offset.y), label.clone())),
@@ -389,7 +386,6 @@ fn collect_catalogs(specs: &[EntitySpec], out: &mut PendingCatalogs, offset: Vec
 /// Catálogos pendentes de um mundo ([`collect_catalogs`]).
 #[derive(Default)]
 struct PendingCatalogs {
-    landmarks: Vec<crate::travel::NotaLandmarkOwned>,
     spawn_points: Vec<(bevy::math::Vec2, String)>,
 }
 
@@ -559,9 +555,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     // a funcionar identicamente, com ou sem o landmarks.xml novo).
     let mut catalogs = PendingCatalogs::default();
     collect_catalogs(&parsed.entities, &mut catalogs, Vec2::ZERO);
-    if !catalogs.landmarks.is_empty() {
-        world.insert_resource(crate::travel::LandmarkCatalog(catalogs.landmarks));
-    }
     if !catalogs.spawn_points.is_empty() {
         world.insert_resource(crate::feedback::RespawnCatalog(catalogs.spawn_points));
     }
@@ -1108,6 +1101,8 @@ fn push_shore_rock_group(
         template_urls,
         template_lods,
         template_trigger: false,
+        template_hostile: false,
+        template_health: None,
         // Rochas de margem: coladas à água é o ponto — gates de água
         // desligados; estradas e ocupação partilhada continuam a valer.
         avoid_water: false,
@@ -1166,6 +1161,8 @@ fn push_shore_rock_group(
         // Rochas de margem: cenário, sob Props.
         editor_group: groups.props,
         template_script: None,
+        template_hostile: false,
+        template_health: None,
         activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
         template_destructible: None,
         collider_handle: None,
@@ -1300,6 +1297,8 @@ fn collect_spawn_groups(
                         groups.props
                     },
                     template_script: group.template_script.clone(),
+                    template_hostile: group.template_hostile,
+                    template_health: group.template_health,
                     activation_radius: group.activation_radius,
                     template_collider: group.template_collider.clone(),
                     template_trigger: group.template_trigger,
@@ -1348,6 +1347,8 @@ fn collect_spawn_groups(
                     lod_handles: Vec::new(),
                     editor_group: groups.vegetation,
                     template_script: spawner_spec.template_script.clone(),
+                    template_hostile: spawner_spec.template_hostile,
+                    template_health: spawner_spec.template_health,
                     activation_radius: spawner_spec.activation_radius,
                     template_collider: spawner_spec.template_collider.clone(),
                     template_trigger: spawner_spec.template_trigger,
@@ -1548,6 +1549,20 @@ fn spawn_entity(
         .any(|(key, value)| key == "__stream" && value == "cold")
     {
         entity.insert(crate::streaming::Streamable);
+    }
+    // Hostilidade e HP são DADOS do mundo; a engine não olha ao path do
+    // script. `hostile="true"` + `health="400"` no XML.
+    if spec.props.iter().any(|(key, _)| key == "__hostile") {
+        entity.insert(crate::vitals::Hostile);
+    }
+    if let Some((_, hp)) = spec.props.iter().find(|(key, _)| key == "__health")
+        && let Ok(hp) = hp.parse::<f32>()
+        && hp > 0.0
+    {
+        entity.insert(crate::vitals::Health {
+            current: hp,
+            max: hp,
+        });
     }
     if let Some(path) = &spec.script {
         entity.insert(crate::luau::LuaScriptRef { path: path.clone() });

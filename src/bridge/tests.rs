@@ -549,12 +549,11 @@ fn test_bridge_lua_features_round2() {
     let warnings = response["warnings"].as_array().expect("warnings é lista");
     assert_eq!(warnings.len(), 2, "câmara e relógio avisam: {warnings:?}");
 
-    // Leituras: distance, vault (nil), quests (vazio), prof/fps.
+    // Leituras: distance + prof/fps. Vault/quests vivem no jogo (Lua) e já
+    // não são superfície de debug da engine.
     let response = settle(
         &mut app,
-        lua(
-            "return { d = viber.debug.distance('player', 'goblin'), tem_vault = viber.debug.vault() ~= nil, quests = #viber.debug.quests() }",
-        ),
+        lua("return { d = viber.debug.distance('player', 'goblin') }"),
     );
     assert_eq!(response["ok"], serde_json::json!(true));
     let result = &response["result"];
@@ -562,16 +561,6 @@ fn test_bridge_lua_features_round2() {
     assert!(
         (result["d"].as_f64().unwrap() - expected).abs() < 1e-3,
         "distance"
-    );
-    assert_eq!(
-        result["tem_vault"],
-        serde_json::json!(false),
-        "vault ausente"
-    );
-    assert_eq!(
-        result["quests"],
-        serde_json::json!(0),
-        "sem QuestLog → vazio"
     );
 
     let response = settle(
@@ -981,40 +970,24 @@ fn test_bridge_lua_introspection_round3() {
     assert_eq!(r["result"][2].as_f64(), Some(2.5));
     assert_eq!(r["result"][3].as_i64(), Some(0));
 
-    // Quest funda: defs embutidos + título + objetivo.
+    // Quests/skills são do JOGO (Lua): a engine já não tem QuestLog nem
+    // árvore de talentos para introspecção.
     let r = lua_call(
         &mut app,
         LUA5_TEST_PORT,
-        "local q = viber.debug.quest('forest_survey') return { q.title ~= nil, q.objective.kind, q.status }",
+        "return viber.debug.quest == nil and viber.debug.quest_defs == nil",
     );
-    assert_eq!(r["result"][0], serde_json::json!(true));
-    assert_eq!(r["result"][1], serde_json::json!("visit"));
-    assert_eq!(r["result"][2], serde_json::json!("not_taken"));
+    assert_eq!(r["result"], serde_json::json!(true));
+    let r = lua_call(&mut app, LUA5_TEST_PORT, "return viber.debug.skills()");
+    assert_eq!(r["result"], serde_json::Value::Null);
 
-    // quest_defs() cobre os JSONs embutidos (25 quests).
-    let r = lua_call(&mut app, LUA5_TEST_PORT, "return #viber.debug.quest_defs()");
-    assert!(
-        r["result"].as_i64().unwrap_or(0) >= 20,
-        "defs embutidos: {}",
-        r["result"]
-    );
-
-    // skills() com árvore vazia.
-    let r = lua_call(
-        &mut app,
-        LUA5_TEST_PORT,
-        "local s = viber.debug.skills() return { #s.learned, s.points }",
-    );
-    assert_eq!(r["result"][0], serde_json::json!(0));
-    assert_eq!(r["result"][1], serde_json::json!(0));
-
-    // waypoints() — catálogo estático dos 12 marcos.
+    // waypoints() — sem catálogo RPG na engine (o jogo usa viber.markers).
     let r = lua_call(
         &mut app,
         LUA5_TEST_PORT,
         "return #viber.debug.waypoints().landmarks",
     );
-    assert_eq!(r["result"], serde_json::json!(12));
+    assert_eq!(r["result"], serde_json::json!(0));
 
     // save_info() — path não vazio (exists depende da máquina).
     let r = lua_call(
@@ -1148,94 +1121,23 @@ fn test_bridge_lua_control_round4() {
         .unwrap();
     assert_eq!((health.max, health.current), (10.0, 5.0));
 
-    // Quests: force active → progress → done → reset. Escritas e leituras
-    // em chamadas SEPARADAS (o snapshot é do início da chamada — semântica
-    // documentada da REPL).
+    // Quests/vault/skills são do JOGO (Lua). As ops de debug da engine já
+    // não os conhecem: respondem false com warning, em vez de mexer em estado.
     let r = lua(
         "viber.debug.quest_force('forest_survey', 'active')
-         viber.debug.quest_progress('forest_survey', 2)
+         viber.debug.vault_set('gold', 500)
+         viber.debug.skill_points(5)
          return true",
         &mut app,
     );
-    assert_eq!(r["applied"], serde_json::json!(2));
-    let r = lua(
-        "local q = viber.debug.quest('forest_survey')
-         return { q.status, q.objective.progress_text, #q.visited }",
-        &mut app,
-    );
-    assert_eq!(r["result"][0], serde_json::json!("active"));
-    let expected = format!(
-        "2/{}",
-        r["result"]
-            .pointer("/2")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-    );
-    // progress_text = "2/<count do def>" — o count exato vem dos JSONs
+    assert_eq!(r["applied"], serde_json::json!(0));
     assert!(
-        r["result"][1].as_str().unwrap_or("").starts_with("2/"),
-        "progress_text: {}",
-        r["result"][1]
+        r["warnings"]
+            .as_array()
+            .is_some_and(|w| w.len() >= 3),
+        "as três ops avisam: {}",
+        r["warnings"]
     );
-    let _ = expected;
-    assert_eq!(r["result"][2], serde_json::json!(2));
-    let r = lua(
-        "viber.debug.quest_force('forest_survey', 'done') return true",
-        &mut app,
-    );
-    assert_eq!(r["applied"], serde_json::json!(1));
-    let r = lua("return viber.debug.quest('forest_survey').status", &mut app);
-    assert_eq!(r["result"], serde_json::json!("done"));
-    let r = lua(
-        "viber.debug.quest_force('forest_survey', 'reset') return true",
-        &mut app,
-    );
-    let r = lua("return viber.debug.quest('forest_survey').status", &mut app);
-    assert_eq!(r["result"], serde_json::json!("not_taken"));
-
-    // Vault: valor absoluto + take (escritas e leitura em chamadas separadas).
-    let r = lua(
-        "viber.debug.vault_set('gold', 500)
-         viber.debug.vault_set('potion', 3)
-         viber.debug.take('potion', 1)
-         return true",
-        &mut app,
-    );
-    assert_eq!(r["applied"], serde_json::json!(3));
-    let r = lua(
-        "local v = viber.debug.vault()
-         return { v.gold, v.items.potion }",
-        &mut app,
-    );
-    assert_eq!(r["result"][0], serde_json::json!(500));
-    assert_eq!(r["result"][1], serde_json::json!(2));
-
-    // Skills: pontos → aprender → herói ganha max_hp → reset devolve.
-    let r = lua(
-        "viber.debug.skill_points(5)
-         viber.debug.skill_learn('vitality1')
-         return true",
-        &mut app,
-    );
-    assert_eq!(r["applied"], serde_json::json!(2));
-    let r = lua(
-        "local s = viber.debug.skills()
-         local p = viber.debug.player()
-         return { #s.learned, s.points, p.max_hp }",
-        &mut app,
-    );
-    assert_eq!(r["result"][0], serde_json::json!(1));
-    assert_eq!(r["result"][1], serde_json::json!(4));
-    assert_eq!(r["result"][2].as_f64(), Some(120.0));
-    let r = lua("viber.debug.skill_reset() return true", &mut app);
-    let r = lua(
-        "local s = viber.debug.skills()
-         return { #s.learned, s.points, viber.debug.player().max_hp }",
-        &mut app,
-    );
-    assert_eq!(r["result"][0], serde_json::json!(0));
-    assert_eq!(r["result"][1], serde_json::json!(5));
-    assert_eq!(r["result"][2].as_f64(), Some(100.0));
 
     // IA: aggro persiste; state valida input.
     let r = lua("viber.debug.ai_aggro('mob', 42) return true", &mut app);

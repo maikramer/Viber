@@ -19,7 +19,7 @@ pub struct ScriptFx<'w> {
     pub kick: Option<ResMut<'w, crate::camera::CameraKick>>,
     pub fov: Option<ResMut<'w, crate::camera::CameraFx>>,
     pub postfx: Option<ResMut<'w, crate::postfx::PostFxState>>,
-    pub hit_stop: Option<ResMut<'w, crate::combat::HitStop>>,
+    pub hit_stop: Option<ResMut<'w, crate::time_fx::HitStop>>,
     pub numbers: Option<bevy::ecs::message::MessageWriter<'w, DamageNumberEvent>>,
     pub meshes: Option<ResMut<'w, Assets<Mesh>>>,
     pub materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
@@ -52,7 +52,7 @@ impl ScriptFx<'_> {
 
     pub fn hit_stop(&mut self, secs: f32) {
         if let Some(stop) = self.hit_stop.as_deref_mut() {
-            crate::combat::request_hit_stop(stop, secs);
+            crate::time_fx::request_hit_stop(stop, secs);
         }
     }
 
@@ -74,7 +74,7 @@ impl ScriptFx<'_> {
     /// biblioteca porque a spec traz tamanho/vida colonados para o golpe.
     pub fn burst(&mut self, commands: &mut Commands, preset: &str, pos: Vec3, count: usize) {
         if preset == "sparks" {
-            let spec = crate::combat::hit_sparks_spec();
+            let spec = crate::fx_specs::hit_sparks_spec();
             crate::particles::spawn_burst(commands, &spec, pos, count);
             return;
         }

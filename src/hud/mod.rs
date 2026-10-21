@@ -31,8 +31,8 @@ pub use compass::{
 };
 pub use elements::{spawn_hud, spawn_resource_chip};
 pub use interact::{
-    BALLOON_DURATION, BALLOON_RANGE_M, HudBalloon, HudPrompt, HudToggle, balloon_tick,
-    hud_balloon_update, hud_prompt_update, hud_toggle,
+    BALLOON_DURATION, BALLOON_RANGE_M, HudBalloon, HudPrompt, HudToggle, apply_subtitle_scale,
+    balloon_tick, hud_balloon_update, hud_prompt_update, hud_toggle,
 };
 pub use markers::HudMarkers;
 pub use minimap::{

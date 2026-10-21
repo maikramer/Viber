@@ -1079,9 +1079,6 @@ fn enemy_registry_system(
         .map(|(t, _)| (t.translation().x, t.translation().z))
         .collect();
     registry.counts = EnemyRegistry::count_positions(&positions);
-    if let Some(mut ctx) = host.lua.app_data_mut::<crate::luau::ScriptCtx>() {
-        ctx.alive_regions = registry.counts;
-    }
 }
 
 // ── QA: F11 teleport ao próximo marco por assinar ───────────────────────

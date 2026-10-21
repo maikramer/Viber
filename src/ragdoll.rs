@@ -3,7 +3,7 @@
 //! Só corre em quem tem [`RagdollDeath`] (attr XML `ragdoll="true"`). Uma
 //! cadeia reduzida — pélvis, tronco, cabeça e quatro membros — vira corpos
 //! dinâmicos com juntas esféricas durante [`RAGDOLL_SECS`], e depois o fade
-//! de [`crate::combat::Corpse`] segue sozinho. Sem os ossos, o clip de morte
+//! de [`crate::corpse::Corpse`] segue sozinho. Sem os ossos, o clip de morte
 //! mantém-se.
 
 use bevy::prelude::*;
@@ -12,7 +12,7 @@ use bevy_rapier3d::prelude::{
 };
 
 use crate::animation::{CharacterAnimator, FrozenAnimation};
-use crate::combat::Corpse;
+use crate::corpse::Corpse;
 
 pub const RAGDOLL_SECS: f32 = 2.5;
 

@@ -369,7 +369,7 @@ foldarms/lean/idle`.
 | Função | Notas |
 |--------|-------|
 | `viber.gesture(name)` | gesto one-shot no rig da entidade; **alternativas** separadas por `,` são tentadas por ordem — `viber.gesture("salute,yes")` toca `salute` se o rig tiver, senão `yes` |
-| `viber.sound(clip)` | SFX curto na posição da entidade (`assets/audio/sfx`, volume cai com a distância). Registry completo (case-insensitive; desconhecido = erro de script, warn 1×): `hit whoosh harvest ui chop_hit chop_break mine_hit mine_break levelup quest_complete travel loot chest_open footstep footstep_water hurt heal game_over quest_accept notification coin buy error save load shop_open enemy_hurt enemy_death wolf_growl/growl slime_squish boss_roar/roar shield_block/block door_open door_close bomb_drop jump dash`. Os OGGs vivem no pool partilhado (`../Vael/assets/manifests/audio-sfx-*.yaml` — regenerar com `regen_audio.py`), servido diretamente pela engine via fallback de asset roots — nunca copiados para o exemplo |
+| `viber.sound(clip [, {x, y, z}])` | SFX curto; sem posição toca na origem da entidade, com `{x,y,z}` no ponto do mundo (golpe num prop). Registry completo (case-insensitive; desconhecido = erro de script, warn 1×): `hit whoosh harvest ui chop_hit chop_break mine_hit mine_break levelup quest_complete travel loot chest_open footstep footstep_water hurt heal game_over quest_accept notification coin buy error save load shop_open enemy_hurt enemy_death wolf_growl/growl slime_squish boss_roar/roar shield_block/block door_open door_close bomb_drop jump dash`. Os OGGs vivem no pool partilhado (`../Vael/assets/manifests/audio-sfx-*.yaml` — regenerar com `regen_audio.py`), servido diretamente pela engine via fallback de asset roots — nunca copiados para o exemplo |
 
 ## Combate & progressão
 
@@ -489,6 +489,26 @@ aplica pós-frame.
 | `viber.set_scale(s, id?)` | escala uniforme 0.05..20 (ex.: elites maiores) |
 | `viber.entity_damage(amount, id?)` | dano direto (sem i-frames — esses são do path do player). HP ≤ 0 EMITE `{type="kill"}` e NÃO corre o caminho nativo (cadáver/XP/quests são do melee) — o script decide |
 | `viber.entity_heal(amount, id?)` | cura, clampe ao max |
+| `viber.corpse(id?)` | marca a morte (componente `Corpse`): se a entidade tiver `ragdoll="true"`, o ragdoll começa; NÃO despawna nem paga XP/loot — isso é do jogo |
+| `viber.hit_flash(id?, segundos?)` | acende o flash branco de impacto (feedback visual, default 0,16 s) |
+| `viber.entity_knockback(id, dx, dz, força)` | impulso físico horizontal (força em m/s, ex. `0.45 * 6.0`); direção normalizada |
+| `viber.player_stats()` | `{bonus_damage, crit_bonus, speed_mult, max_hp_bonus}` das passivas — para o jogo compor o dano |
+| `viber.set_player_speed(mult)` | multiplicador da velocidade base do herói (0.1..5); o jogo soma as passivas |
+| `viber.clip_duration(nome)` | duração (s) do clip do herói, fuzzy pelo nome normalizado (`nil` se o rig não o tem) |
+| `viber.prompt(key, label)` | publica o prompt de mundo (o controller decide o alvo); `label` vazio limpa |
+| `viber.localize(texto)` | resolve `@chave` do locale ativo (linha a linha) |
+
+## Acessibilidade, idioma e rede
+
+| Função | Efeito |
+|--------|--------|
+| `viber.a11y()` | `{subtitle_scale, shake, hitstop, interact_hold}` do recurso `A11y` |
+| `viber.a11y_set{t}` | altera os campos presentes (`subtitle_scale` 0.5..3.0, `shake`/`hitstop`/`interact_hold` bool). O jogo desenha o menu; a engine aplica |
+| `viber.net_role()` | `"off"` \| `"host"` \| `"join"` (do `VIBER_NET` no arranque) |
+
+O idioma vem de `locale/<VIBER_LANG>.json` (default `pt`). Textos `@chave` em
+grafos de diálogo, `viber.say`/`viber.toast` e nas linhas de quest são
+resolvidos contra essa tabela; sem entrada, fica a string original.
 
 ## Procura por nome
 
@@ -548,7 +568,7 @@ que só dependem de componentes/mensagens sempre registados.
 | `viber.entity_position(id?)` | `ok, x, y, z` do snapshot do frame (`ok == false` sem entrada; sem `id` = a própria) |
 | `viber.entity_name(id?)` | nome de MUNDO da entidade (`nil` se não nomeada — spawns de spawner podem não ter; sem `id` = a própria). É o que deixa um script partilhado por várias entidades descobrir QUEM é (ex.: `portal.<room>[.sufixo]`) |
 | `viber.nearby(raio [, limite])` | lista `{id, name, x, y, z, distance}` de entidades NOMEADAS à volta da própria, mais perto 1.º (cap 64; default 16) |
-| `viber.destructibles([raio])` | props `destructible` a ≤ `raio` (default 4) do herói: `id`, `hits_left`, `kind`, `amount`, `x/y/z`, `range`, `style` (`burst`/`fall`/`shatter`), `popup`, `distance`. A engine não minera. `viber.topple([id])` tomba o prop (sem id, a própria entidade) |
+| `viber.destructibles([raio])` | props `destructible` a ≤ `raio` (default 4) do herói: `id`, `hits` (total autorado), `hits_left`, `kind`, `amount`, `x/y/z`, `range`, `effective_range` (já escalado), `name`, `style` (`burst`/`fall`/`shatter`), `popup`, `distance`. Só DADOS: a engine não golpeia, não conta golpes nem dá loot — a regra é do script (ver `../Vael/scripts/game/harvest.lua`). `viber.topple([id])` tomba o prop (física genérica) |
 | `viber.markers({blips, beacons, waypoint})` | substitui as marcas do HUD. `blips` = `{{x,y,z,tower},…}` (bússola/minimapa, máx. 32); `beacons` = faróis (máx. 16); `waypoint` = `{x,y,z,label}` ou ausente (seta de rumo) |
 | `viber.hostiles([raio])` | lista `{id, kind, x, y, z, hp, max, distance}` de criaturas vivas (`enemies/`/`bosses/`) à volta do herói (cap 128; default 2.4 m). Os spawners não lhes dão nome — `find_all("wolf")` não as vê |
 | `viber.player_forward()` | `dx, dz` — forward do herói no plano (modelo olha +Z), para dash/mira |
@@ -603,6 +623,8 @@ Um NPC/dador pode conduzir o seu PRÓPRIO diálogo em Lua:
 | Função | Efeito |
 |--------|--------|
 | `viber.say(texto [, segundos])` | escreve no **balão nativo** do HUD (o mesmo do diálogo de quests); sem `<DialogueBalloon>` no mundo = no-op com warn 1×; `\n` faz multi-linha; default 4 s |
+| `viber.localize(texto)` | resolve as chaves `@nome` do locale ativo (`locale/<lang>.json`). `say`/`toast` já o fazem por linha; isto serve quem compõe (`Falante: @chave`) |
+| `viber.prompt(key, label)` | publica um prompt de interação de MUNDO (um controller mostra o verbo de um prop que não é a sua entidade). `label` vazio/nil limpa. UI genérica: o jogo decide quando |
 | `viber.quest_def(id)` | tabela da definição autoral (`id/title/npc/biome/kind/target/count/radius/gold/xp/items/lines_intro/lines_progress/lines_complete`) ou `nil` — lê o MESMO `<mundo>/quests/*.json` da engine |
 | `viber.quest_defs()` | lista com todas as definições do mundo |
 | `viber.own_system(nome)` | **reclama um sistema nativo** para Lua: o handler da engine cala e a lógica passa a ser do script. Nomes: `dialogue` (o `[E]` dos `<DialogueNPC>` **com script** — os NPCs sem script continuam no diálogo nativo; era global e um único NPC em Lua emudecia todos os dadores do mundo), `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J), `locomotion` (o corpo do herói). Sem posse, o comportamento nativo é o de sempre |
@@ -749,16 +771,20 @@ snapshot publicado pela engine, ações por fila aplicada pós-frame.
 
 | Função | Devolve | Notas |
 |--------|---------|-------|
-| `viber.profiler()` | table ou nil | Snapshot completo (`tabs.systems/world/physics/audio` + `extras` + `state`); **nil com o modal fechado** — o driver nem acorda. Publicado a ~4 Hz pela engine. |
-| `viber.profiler_cmd(cmd)` | — | Enfileira ação: `"freeze"`, `"reset"`, `"export"` (ficheiro), `"copy"` (JSON completo → clipboard), `"tab:systems\|world\|physics\|audio\|extras"`, `"radius:±N"` (raio das próximas), `"extra:<id>"` (toggle: `colliders`, `grass`, `physics-pause`). |
+| `viber.profiler()` | table ou nil | Snapshot completo (`tabs.systems/world/physics/audio/frames` + `extras` + `hitches` + `memory` + `trace` + `state`); **nil com o modal fechado** — o driver nem acorda. Publicado a ~4 Hz pela engine. |
+| `viber.profiler_cmd(cmd)` | — | Enfileira ação: `"freeze"`, `"reset"`, `"export"` (ficheiro), `"copy"` (JSON completo → clipboard), `"tab:systems\|world\|physics\|audio\|extras\|frames"`, `"radius:±N"` (raio das próximas), `"extra:<id>"` (toggle: `colliders`, `grass`, `dir-shadows`, `point-shadows`, `physics-pause`), `"hitch:<ms>"` (limiar do detector), `"trace:start[:segundos]"`, `"trace:stop"`, `"trace:export"`. |
 
 Teclas: **P** abre/fecha o modal (declarativo, `key="p"`); abas por clique
 ou teclado nativo do modal (**`]`/`.`** próxima, **`[`/`,`** anterior,
-**1–5** saltam); **F12**/**Pause** congela a aquisição, **`** exporta,
+**1–6** saltam); **F12**/**Pause** congela a aquisição, **`** exporta,
 **PgUp/PgDn** raio. A UI é a fonte da verdade das abas — o driver espelha
 para a engine. A bridge lê o MESMO JSON: `viber debug prof --tab tudo` (ou o método
 `viber.profiler.tab {"tab": "all"}`) devolve exactamente o payload do
-COPIAR/ficheiro.
+COPIAR/ficheiro. A aba **FRAMES** publica `frame_ms`
+(avg/min/max/p95), a série `history`, o `top` de sistemas, os `hitches`
+recentes (com o topo que os causou), `memory` (RSS/pico/threads) e `trace`;
+o CLI expõe o mesmo em `viber debug prof --tab frames`, `--hitches` e
+`--record`.
 
 ## `viber.debug.*` (bridge/REPL)
 

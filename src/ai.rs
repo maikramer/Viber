@@ -8,7 +8,7 @@
 //! and facing reuses the player's
 //! +Z-forward convention via [`crate::player::facing_rotation`].
 //!
-//! Deaths enter as [`crate::combat::Corpse`] (the single source is
+//! Deaths enter as [`crate::corpse::Corpse`] (the single source is
 //! `skills::kill_creature`); [`queue_creature_respawns`] watches FSM corpses
 //! and pushes [`RespawnEntry`] items that [`respawn_spawners`] brings back
 //! after [`RESPAWN_DELAY_SECS`] at the creature's home. Scripted creatures
@@ -350,7 +350,7 @@ pub fn apply_ai_locomotion(
             &mut AiLocomotion,
             Option<&crate::animation::LocomotionProfile>,
         ),
-        Without<crate::combat::Corpse>,
+        Without<crate::corpse::Corpse>,
     >,
 ) {
     let dt = time.delta_secs();
@@ -466,7 +466,7 @@ pub fn queue_creature_respawns(
             Option<&crate::animation::AnimatedScene>,
         ),
         (
-            Added<crate::combat::Corpse>,
+            Added<crate::corpse::Corpse>,
             Without<crate::luau::LuaScriptRef>,
         ),
     >,
@@ -1343,7 +1343,7 @@ mod tests {
 
         app.world_mut()
             .entity_mut(entity)
-            .insert(crate::combat::Corpse { timer: 1.4 });
+            .insert(crate::corpse::Corpse { timer: 1.4 });
         app.update(); // Added<Corpse> → queue
 
         let queue = &app.world().resource::<RespawnQueue>().0;
@@ -1383,7 +1383,7 @@ mod tests {
         );
         let world = app.world_mut();
         let mut enemies =
-            world.query::<(&EnemyCreature, &Transform, Option<&crate::combat::Corpse>)>();
+            world.query::<(&EnemyCreature, &Transform, Option<&crate::corpse::Corpse>)>();
         let mut respawned = None;
         let mut fsm_total = 0;
         for (_enemy, transform, corpse) in enemies.iter(world) {
@@ -1412,7 +1412,7 @@ mod tests {
             crate::luau::LuaScriptRef {
                 path: "enemies/wolf.lua".into(),
             },
-            crate::combat::Corpse { timer: 1.4 },
+            crate::corpse::Corpse { timer: 1.4 },
         ));
         app.update();
         app.update();

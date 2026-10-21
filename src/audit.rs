@@ -141,7 +141,6 @@ pub fn audit(
     // Conflitos entre features de terreno — ver [`FeatureIndex`].
     let mut features = FeatureIndex::default();
     collect_features(&world.entities, [0.0, 0.0], &mut features);
-    audit_quests(world, &config.quests_dir_on(world_dir), &mut report);
     report.issues.extend(audit_feature_conflicts(&features));
 
     // SFX carregados por path HARDCODED na engine — ver
@@ -224,98 +223,7 @@ pub fn audit(
 /// Quest × mundo montado: conteúdo morto é bug de conteúdo.
 ///
 /// Duas ligações do `simple-rpg` só existem por NOME, e ambas falham em
-/// silêncio — a quest fica no diário e nunca pode ser aceita (`<DialogueNPC
-/// dialogue-id="X">` sem par) ou nunca pode ser cumprida (um marco de
-/// `visit` que não existe no mundo). O `analyze` era cego às duas: os JSONs
-/// vivem no disco do jogo (`game.quests_dir`) e o mundo é XML, e nada os
-/// cruzava.
-///
-/// `notice_board` é a exceção documentada (a quest aceita-se pelo quadro).
-fn audit_quests(world: &ParsedWorld, quests_dir: &Path, report: &mut AuditReport) {
-    use std::collections::HashSet;
-
-    fn walk(
-        specs: &[EntitySpec],
-        names: &mut HashSet<String>,
-        givers: &mut HashSet<String>,
-        kinds: &mut HashSet<String>,
-    ) {
-        for spec in specs {
-            if let Some(name) = &spec.name {
-                names.insert(name.clone());
-            }
-            if let EntityKind::DialogueNpc { dialogue_id, .. } = &spec.kind {
-                givers.insert(dialogue_id.clone());
-            }
-            // Tipo de criatura abatível: o MESMO `script_kind` que o combate
-            // reporta à quest (`bosses/bog-warden.lua` → `bog-warden`).
-            if let Some(script) = &spec.script {
-                kinds.insert(crate::combat::script_kind(script));
-            }
-            if let EntityKind::DynamicSpawner { spec: group }
-            | EntityKind::StaticSpawner { spec: group } = &spec.kind
-                && let Some(script) = &group.template_script
-            {
-                kinds.insert(crate::combat::script_kind(script));
-            }
-            walk(&spec.children, names, givers, kinds);
-        }
-    }
-    let mut names = HashSet::new();
-    let mut givers = HashSet::new();
-    let mut kinds = HashSet::new();
-    walk(&world.entities, &mut names, &mut givers, &mut kinds);
-
-    // Um mundo SEM nenhum `<DialogueNPC>` não tem sistema de quests para
-    // auditar: as definições vivem no DISCO do jogo (`game.quests_dir`) e
-    // são próprias de cada mundo, portanto num QA mínimo ou num mundo antigo
-    // isto acusaria as quests de não terem dador. O gate é o mundo ter
-    // optado pelo sistema (≥1 NPC de diálogo).
-    if givers.is_empty() && !names.contains("notice_board") {
-        return;
-    }
-
-    for def in crate::quests::load_quests_from_dir(quests_dir) {
-        // O NPC da quest tem de existir E ter um `<DialogueNPC dialogue-id>`
-        // igual ao id da quest — é assim que o [E] encontra a definição.
-        if !givers.contains(&def.id) && def.npc != "notice_board" {
-            report.issues.push(AuditIssue {
-                severity: Severity::Warning,
-                message: format!(
-                    "quest `{}`: nenhum `<DialogueNPC dialogue-id=\"{}\">` no mundo — a quest fica no diário sem poder ser aceita",
-                    def.id, def.id
-                ),
-            });
-        }
-        // `kill` casa pelo nome do script da criatura — um alvo que nenhum
-        // script produz nunca avança (era o caso do `boss_bogwarden`, cujo
-        // script reporta `bog-warden`).
-        if def.objective.kind == "kill" && !kinds.contains(&def.objective.target) {
-            report.issues.push(AuditIssue {
-                severity: Severity::Warning,
-                message: format!(
-                    "quest `{}`: alvo de `kill` sem criatura no mundo: `{}` — o alvo é o nome do script (`enemies/wolf.lua` → `wolf`)",
-                    def.id, def.objective.target
-                ),
-            });
-        }
-        if def.objective.kind == "visit" {
-            for marco in def.objective.target.split_whitespace() {
-                if !names.contains(marco) {
-                    report.issues.push(AuditIssue {
-                        severity: Severity::Warning,
-                        message: format!(
-                            "quest `{}`: marco de `visit` inexistente no mundo: `{marco}` — objetivo impossível",
-                            def.id
-                        ),
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Recursão pela árvore de entidades recolhendo refs + GLBs sem collider.
+ /// Recursão pela árvore de entidades recolhendo refs + GLBs sem collider.
 fn collect_entities(
     entities: &[EntitySpec],
     world_dir: &Path,

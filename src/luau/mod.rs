@@ -109,6 +109,8 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         app.add_message::<crate::feedback::DamageNumberEvent>();
         app.add_message::<bevy_rapier3d::prelude::CollisionEvent>();
         app.init_resource::<ScriptEventQueue>();
+        // Prompt de UI genérico publicado por scripts (`viber.prompt`).
+        app.init_resource::<crate::ui::UiPrompt>();
         // Posse de sistemas nativos por scripts (`viber.own_system`).
         app.init_resource::<ScriptSystemOwners>();
         // Fila de spawns de prototypes (viber.spawn_prototype) — consumida

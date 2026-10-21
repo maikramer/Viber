@@ -890,7 +890,7 @@ mod tests {
         // A `bind` the engine does not know leaves the element frozen at its
         // authored placeholder — silent, and easy to miss by eye.
         let data = crate::ui::bind::UiData::default();
-        let lists = ["quests", "bag", "skills", "shop", "controls", "system"];
+        let lists = ["quests", "bag", "skills", "shop", "controls", "system", "a11y"];
         // Binds de SCRIPT: os nomes que os `.lua` do mundo alimentam com
         // `viber.ui.set("nome", …)` literal (barra de chefe, cooldowns das
         // habilidades Lua). Um nome que nenhum script escreve continua a

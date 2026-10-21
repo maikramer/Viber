@@ -115,7 +115,7 @@ fn knockback_system(
             &mut Knockback,
             Option<&crate::player::Player>,
         ),
-        Without<crate::combat::Corpse>,
+        Without<crate::corpse::Corpse>,
     >,
     mut commands: Commands,
 ) {
@@ -274,8 +274,8 @@ mod tests {
                 Knockback {
                     velocity: Vec3::X * 2.0,
                 },
-                crate::combat::Corpse {
-                    timer: crate::combat::CORPSE_LIFETIME,
+                crate::corpse::Corpse {
+                    timer: crate::corpse::CORPSE_LIFETIME,
                 },
             ))
             .id();

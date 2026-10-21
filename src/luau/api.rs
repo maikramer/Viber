@@ -576,6 +576,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 entity,
                 name,
                 speed: 1.0,
+                lock: false,
             });
             Ok(())
         })?,
@@ -585,7 +586,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // com a distância à câmara). Nome inválido = erro de script (warn 1×).
     api.set(
         "sound",
-        lua.create_function(|lua, name: String| {
+        lua.create_function(|lua, (name, opts): (String, Option<mlua::Table>)| {
             let clip = sfx_clip_from_str(&name).ok_or_else(|| {
                 let names: Vec<&str> = SFX_NAME_REGISTRY.iter().map(|(n, _)| *n).collect();
                 mlua::Error::runtime(format!(
@@ -596,7 +597,25 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut ctx = lua
                 .app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new");
-            let position = Some(ctx.origin);
+            // `{x=, y=, z=}` posiciona o SFX no mundo (golpe num prop); sem
+            // overrides toca na origem da entidade que corre o script.
+            let position = match opts {
+                Some(opts) => {
+                    let x = opts.raw_get::<Option<f32>>("x")?;
+                    let y = opts.raw_get::<Option<f32>>("y")?;
+                    let z = opts.raw_get::<Option<f32>>("z")?;
+                    if x.is_none() && y.is_none() && z.is_none() {
+                        Some(ctx.origin)
+                    } else {
+                        Some(Vec3::new(
+                            x.unwrap_or(ctx.origin.x),
+                            y.unwrap_or(ctx.origin.y),
+                            z.unwrap_or(ctx.origin.z),
+                        ))
+                    }
+                }
+                None => Some(ctx.origin),
+            };
             ctx.commands.push(ScriptCommand::PlaySfx { clip, position });
             Ok(())
         })?,
@@ -826,6 +845,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 row.raw_set("z", h.pos.z)?;
                 row.raw_set("hp", h.hp)?;
                 row.raw_set("max", h.max)?;
+                row.raw_set("forward_x", h.forward.x)?;
+                row.raw_set("forward_z", h.forward.y)?;
                 row.raw_set("distance", h.pos.distance(player))?;
                 out.raw_set(i + 1, row)?;
             }
@@ -859,6 +880,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             for (i, row) in rows.into_iter().take(16).enumerate() {
                 let t = lua.create_table()?;
                 t.raw_set("id", row.id)?;
+                t.raw_set("hits", row.hits)?;
                 t.raw_set("hits_left", row.hits_left)?;
                 t.raw_set("kind", row.kind.clone())?;
                 t.raw_set("amount", row.amount)?;
@@ -866,6 +888,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 t.raw_set("y", row.pos.y)?;
                 t.raw_set("z", row.pos.z)?;
                 t.raw_set("range", row.range)?;
+                t.raw_set("effective_range", row.effective_range)?;
+                t.raw_set("name", row.name.clone())?;
                 t.raw_set("style", row.style.clone())?;
                 t.raw_set("popup", row.popup.clone())?;
                 t.raw_set("distance", row.pos.distance(hero))?;
@@ -1138,12 +1162,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     api.set(
         "play_clip",
         lua.create_function(|lua, (name, opts): (String, Option<Table>)| {
-            let (speed, id) = match opts {
+            let (speed, id, lock) = match opts {
                 Some(t) => (
                     t.raw_get::<f32>("speed").ok().unwrap_or(1.0),
                     t.raw_get::<i64>("id").ok(),
+                    t.raw_get::<bool>("lock").ok().unwrap_or(false),
                 ),
-                None => (1.0, None),
+                None => (1.0, None, false),
             };
             if !speed.is_finite() || speed <= 0.0 {
                 return Err(mlua::Error::runtime(
@@ -1163,6 +1188,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 entity,
                 name,
                 speed,
+                lock,
             });
             Ok(())
         })?,
@@ -1211,19 +1237,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
                 .push(ScriptCommand::OwnSystem(name));
-            Ok(())
-        })?,
-    )?;
-    // viber.sync_skills({ids}) — a lista é a fonte da verdade das passivas.
-    // O jogo cobra os pontos; aqui só se aplica o delta (HP, velocidade,
-    // dano, crítico). A mesma lista não mexe no herói.
-    api.set(
-        "sync_skills",
-        lua.create_function(|lua, ids: Vec<String>| {
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
-                .commands
-                .push(ScriptCommand::SyncSkills(ids));
             Ok(())
         })?,
     )?;
@@ -1450,6 +1463,147 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.set_player_speed(mult) — multiplicador da velocidade base.
+    api.set(
+        "set_player_speed",
+        lua.create_function(|lua, mult: f32| {
+            if !mult.is_finite() || mult <= 0.0 {
+                return Err(mlua::Error::runtime(
+                    "viber.set_player_speed: multiplicador finito e > 0",
+                ));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::SetPlayerSpeed(mult.clamp(0.1, 5.0)));
+            Ok(())
+        })?,
+    )?;
+    // viber.clip_duration(nome) — duração do clip do herói (s), fuzzy pelo
+    // nome normalizado. O jogo agenda swings/one-shots sem hardcodar o GLB.
+    api.set(
+        "clip_duration",
+        lua.create_function(|lua, name: String| {
+            let key = crate::animation::normalize_clip_name(&name);
+            let ctx = lua.app_data_ref::<ScriptCtx>();
+            Ok(ctx
+                .as_ref()
+                .and_then(|ctx| ctx.clip_durations.get(&key).copied()))
+        })?,
+    )?;
+    // viber.entity_knockback(id, dx, dz, força) — impulso físico na entidade.
+    // O jogo decide quando e quanto; a engine não conhece golpes.
+    api.set(
+        "entity_knockback",
+        lua.create_function(
+            |lua, (id, dx, dz, strength): (i64, f32, f32, f32)| {
+                if !(dx.is_finite() && dz.is_finite() && strength.is_finite()) {
+                    return Err(mlua::Error::runtime(
+                        "viber.entity_knockback: valores não finitos (NaN/inf)",
+                    ));
+                }
+                let dir = Vec3::new(dx, 0.0, dz).normalize_or_zero();
+                let entity = super::entity::entity_from_id(id)?;
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::EntityKnockback {
+                        entity,
+                        dir,
+                        strength: strength.max(0.0),
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    // viber.hit_flash(id[, segundos]) — acende o flash branco de impacto.
+    // Feedback visual genérico; não toca HP nem regras.
+    api.set(
+        "hit_flash",
+        lua.create_function(|lua, (id, secs): (i64, Option<f32>)| {
+            let secs = secs.unwrap_or(crate::feedback::HIT_FLASH_SECS);
+            if !secs.is_finite() || secs <= 0.0 {
+                return Err(mlua::Error::runtime(
+                    "viber.hit_flash: segundos têm de ser finitos e > 0",
+                ));
+            }
+            let entity = super::entity::entity_from_id(id)?;
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::HitFlash {
+                    entity,
+                    secs: secs.min(2.0),
+                });
+            Ok(())
+        })?,
+    )?;
+
+    // viber.corpse(id) — marca a morte. A engine não agenda despawn nem XP:
+    // o jogo chama isto, deixa o `ragdoll="true"` fazer o resto e decide
+    // quando remover o corpo.
+    api.set(
+        "corpse",
+        lua.create_function(|lua, id: i64| {
+            let entity = super::entity::entity_from_id(id)?;
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::Corpse { entity });
+            Ok(())
+        })?,
+    )?;
+
+    // viber.a11y() -> {subtitle_scale, shake, hitstop, interact_hold}
+    // viber.a11y_set{t} — o jogo desenha a acessibilidade; a engine só aplica.
+    api.set(
+        "a11y",
+        lua.create_function(|lua, ()| {
+            let a11y = lua
+                .app_data_ref::<ScriptCtx>()
+                .map(|ctx| ctx.a11y)
+                .unwrap_or_default();
+            let out = lua.create_table()?;
+            out.raw_set("subtitle_scale", a11y.subtitle_scale)?;
+            out.raw_set("shake", a11y.shake)?;
+            out.raw_set("hitstop", a11y.hitstop)?;
+            out.raw_set("interact_hold", a11y.interact_hold)?;
+            Ok(out)
+        })?,
+    )?;
+    api.set(
+        "a11y_set",
+        lua.create_function(|lua, opts: Table| {
+            let subtitle_scale = opts.raw_get::<f32>("subtitle_scale").ok();
+            if subtitle_scale.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                return Err(mlua::Error::runtime(
+                    "viber.a11y_set: subtitle_scale tem de ser finito e > 0",
+                ));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::A11ySet {
+                    subtitle_scale,
+                    shake: opts.raw_get::<bool>("shake").ok(),
+                    hitstop: opts.raw_get::<bool>("hitstop").ok(),
+                    interact_hold: opts.raw_get::<bool>("interact_hold").ok(),
+                });
+            Ok(())
+        })?,
+    )?;
+
+    // viber.net_role() -> "off" | "host" | "join" (VIBER_NET no arranque).
+    api.set(
+        "net_role",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<ScriptCtx>()
+                .map(|ctx| ctx.net_role.clone())
+                .unwrap_or_else(|| "off".to_string()))
+        })?,
+    )?;
+
     // ── UI / interação ──────────────────────────────────────────────
     api.set(
         "markers",
@@ -1551,6 +1705,38 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 range,
             });
             Ok(())
+        })?,
+    )?;
+    // viber.prompt(key, label) — prompt de interação de MUNDO. Um controller
+    // publica o verbo do alvo atual (um prop que não é a própria entidade);
+    // sem `label` (ou nil) limpa. É UI genérica: o JOGO decide quando.
+    api.set(
+        "prompt",
+        lua.create_function(|lua, (key, label): (Option<String>, Option<String>)| {
+            let (key, label) = match (key, label) {
+                (Some(key), Some(label)) if !label.trim().is_empty() => (key, label),
+                _ => (String::new(), String::new()),
+            };
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::Prompt { key, label });
+            Ok(())
+        })?,
+    )?;
+    // viber.localize(texto) — resolve as chaves `@nome` do locale ativo.
+    // `say`/`toast` já o fazem por linha inteira; isto serve quem compõe
+    // (ex.: `Falante: @chave` num grafo de diálogo em Lua).
+    api.set(
+        "localize",
+        lua.create_function(|lua, text: String| {
+            let table = lua
+                .app_data_ref::<ScriptCtx>()
+                .and_then(|ctx| ctx.locale_table.clone());
+            Ok(crate::dialogue::localized_lines(
+                &text,
+                table.as_deref(),
+            ))
         })?,
     )?;
     // viber.interacted(key) -> bool — tecla pressionada NESTE frame E

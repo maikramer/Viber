@@ -705,7 +705,23 @@ fn quest_dialogue_system(
     .iter()
     .position(|key| keys.just_pressed(*key))
     .map(|index| index + 1);
-    if !keys.just_pressed(KeyCode::KeyE) && choice.is_none() {
+    // Acessibilidade: `interact_hold` troca o toque por 0,35 s de [E].
+    let dt = dialogue.time.as_deref().map(|time| time.delta_secs()).unwrap_or(0.0);
+    let hold_mode = dialogue
+        .a11y
+        .as_deref()
+        .is_some_and(|a11y| a11y.interact_hold);
+    if keys.pressed(KeyCode::KeyE) {
+        *dialogue.hold += dt;
+    } else {
+        *dialogue.hold = 0.0;
+    }
+    let e_pressed = if hold_mode {
+        crate::a11y::interact_ready(true, *dialogue.hold, keys.just_pressed(KeyCode::KeyE))
+    } else {
+        keys.just_pressed(KeyCode::KeyE)
+    };
+    if !e_pressed && choice.is_none() {
         return;
     }
     let dialogue_owned = owners
@@ -745,7 +761,9 @@ fn quest_dialogue_system(
     if let (Some(book), Some(sessions)) = (dialogue.book.as_deref(), dialogue.sessions.as_deref_mut())
         && let Some(graph) = book.graphs.get(&id)
     {
-        if let Some(shown) = crate::dialogue::advance(graph, sessions, &id, choice) {
+        if let Some(shown) =
+            crate::dialogue::advance(graph, sessions, &id, choice, dialogue.locale.as_deref())
+        {
             let body = shown.text.clone();
             if shown.accept {
                 let _ = log.accept(&id);
@@ -772,7 +790,7 @@ fn quest_dialogue_system(
             return;
         }
     }
-    if choice.is_some() && !keys.just_pressed(KeyCode::KeyE) {
+    if choice.is_some() && !e_pressed {
         return;
     }
     let vault_ref = vault.as_deref();
@@ -873,6 +891,12 @@ fn quest_dialogue_system(
                 .unwrap_or_default(),
         ),
     };
+    // Linhas de quest também aceitam `@chave` (o locale é o mesmo dos grafos).
+    let body = dialogue
+        .locale
+        .as_deref()
+        .map(|locale| crate::dialogue::localized_lines(&body, Some(&locale.table)))
+        .unwrap_or(body);
     show_balloon(
         &mut balloons,
         &mut texts,

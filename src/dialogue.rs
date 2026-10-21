@@ -123,7 +123,9 @@ pub fn advance(
     sessions: &mut DialogueSessions,
     id: &str,
     digit: Option<usize>,
+    locale: Option<&crate::locale::Locale>,
 ) -> Option<ShownLine> {
+    let table = locale.map(|locale| &locale.table);
     let current = sessions
         .node
         .get(id)
@@ -141,8 +143,8 @@ pub fn advance(
         }
         let shown = graph.nodes.get(sessions.node.get(id).unwrap_or(&next));
         let text = shown
-            .map(|n| render_node(n))
-            .unwrap_or_else(|| choice.text.clone());
+            .map(|n| render_node(n, table))
+            .unwrap_or_else(|| localized(&choice.text, table));
         return Some(ShownLine {
             text,
             voice: shown.and_then(|n| n.voice.clone()).or(None),
@@ -154,7 +156,7 @@ pub fn advance(
     }
     sessions.node.insert(id.to_string(), current);
     Some(ShownLine {
-        text: render_node(node),
+        text: render_node(node, table),
         voice: node.voice.clone(),
         portrait: node.portrait.clone(),
         accept: false,
@@ -163,14 +165,16 @@ pub fn advance(
     })
 }
 
-fn render_node(node: &DialogueNode) -> String {
-    let mut body = if node.speaker.is_empty() {
-        node.text.clone()
+fn render_node(node: &DialogueNode, table: Option<&HashMap<String, String>>) -> String {
+    let speaker = localized(&node.speaker, table);
+    let text = localized(&node.text, table);
+    let mut body = if speaker.is_empty() {
+        text
     } else {
-        format!("{}: {}", node.speaker, node.text)
+        format!("{speaker}: {text}")
     };
     for (i, choice) in node.choices.iter().enumerate() {
-        body.push_str(&format!("\n{}. {}", i + 1, choice.text));
+        body.push_str(&format!("\n{}. {}", i + 1, localized(&choice.text, table)));
     }
     body
 }
@@ -185,10 +189,21 @@ pub fn localized<'a>(text: &'a str, table: Option<&HashMap<String, String>>) -> 
         .unwrap_or_else(|| text.to_string())
 }
 
+/// Resolve `@chave` linha a linha (balões multi-linha e `viber.say`).
+pub fn localized_lines(text: &str, table: Option<&HashMap<String, String>>) -> String {
+    text.split('\n')
+        .map(|line| localized(line, table))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct DialogueAccess<'w, 's> {
     pub book: Option<Res<'w, DialogueBook>>,
     pub sessions: Option<ResMut<'w, DialogueSessions>>,
+    pub locale: Option<Res<'w, crate::locale::Locale>>,
+    pub time: Option<Res<'w, Time>>,
+    pub a11y: Option<Res<'w, crate::a11y::A11y>>,
     pub hold: Local<'s, f32>,
 }
 
@@ -216,6 +231,105 @@ fn play_pending_voices(
     }
 }
 
+/// Balão do HUD (mesma escrita de `viber.say`).
+pub fn show_balloon(
+    balloons: &mut Query<(&mut Visibility, &mut crate::hud::HudBalloon, &Children)>,
+    texts: &mut Query<&mut Text>,
+    body: &str,
+    secs: f32,
+) -> bool {
+    let mut found = false;
+    for (mut visibility, mut balloon, children) in balloons.iter_mut() {
+        found = true;
+        balloon.timer = secs;
+        *visibility = Visibility::Visible;
+        if let Some(child) = children.first()
+            && let Ok(mut text) = texts.get_mut(*child)
+        {
+            text.0 = body.into();
+        }
+    }
+    found
+}
+
+/// Diálogo de GRAFO nativo, sem quests: [E] abre/avança e `1`..`9` escolhem.
+/// NPCs com script que reclamaram `dialogue` conduzem a conversa em Lua.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn dialogue_graph_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    players: Query<&GlobalTransform, With<crate::player::Player>>,
+    npcs: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            &crate::recipes::spawn::DialogueNpc,
+        ),
+        Without<crate::player::Player>,
+    >,
+    focus: Option<Res<crate::interact::InteractionFocus>>,
+    mut dialogue: DialogueAccess,
+    mut balloons: Query<(&mut Visibility, &mut crate::hud::HudBalloon, &Children)>,
+    mut texts: Query<&mut Text>,
+) {
+    let choice = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ]
+    .iter()
+    .position(|key| keys.just_pressed(*key))
+    .map(|index| index + 1);
+    if !keys.just_pressed(KeyCode::KeyE) && choice.is_none() {
+        return;
+    }
+    let Some(player) = players.iter().next() else {
+        return;
+    };
+    let player_pos = player.translation();
+    let range = crate::interact::default_range();
+    let Some((npc_entity, _, npc)) = npcs
+        .iter()
+        .filter(|(_, t, _)| t.translation().distance(player_pos) < range)
+        .min_by(|(_, a, _), (_, b, _)| {
+            a.translation()
+                .distance_squared(player_pos)
+                .total_cmp(&b.translation().distance_squared(player_pos))
+        })
+    else {
+        return;
+    };
+    if let Some(focus) = focus.as_deref()
+        && let Some(winner) = focus.winner(KeyCode::KeyE)
+        && winner != npc_entity
+    {
+        return;
+    }
+    let id = npc.dialogue_id.clone();
+    let (Some(book), Some(sessions)) = (dialogue.book.as_deref(), dialogue.sessions.as_deref_mut())
+    else {
+        return;
+    };
+    let Some(graph) = book.graphs.get(&id) else {
+        return;
+    };
+    // Um grafo explícito manda: o NPC pode ter script (townsfolk) e o [E]
+    // continua a ser do grafo; o script só precisa de não reclamar o [E].
+    if let Some(shown) = advance(graph, sessions, &id, choice, dialogue.locale.as_deref()) {
+        show_balloon(
+            &mut balloons,
+            &mut texts,
+            &shown.text,
+            crate::hud::BALLOON_DURATION,
+        );
+    }
+}
+
 pub struct DialoguePlugin {
     pub dir: std::path::PathBuf,
 }
@@ -224,7 +338,7 @@ impl Plugin for DialoguePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DialogueBook::load_dir(&self.dir))
             .init_resource::<DialogueSessions>()
-            .add_systems(Update, play_pending_voices);
+            .add_systems(Update, (play_pending_voices, dialogue_graph_system));
     }
 }
 
@@ -259,16 +373,16 @@ mod tests {
     fn choices_branch_and_the_refusal_does_not_turn_the_quest_in() {
         let graph = sample();
         let mut sessions = DialogueSessions::default();
-        let open = advance(&graph, &mut sessions, "carta", None).unwrap();
+        let open = advance(&graph, &mut sessions, "carta", None, None).unwrap();
         assert!(open.text.contains("Trazes a carta"));
         assert!(open.text.contains("1. Sim"));
         assert!(!open.turn_in);
-        let yes = advance(&graph, &mut sessions, "carta", Some(1)).unwrap();
+        let yes = advance(&graph, &mut sessions, "carta", Some(1), None).unwrap();
         assert!(yes.turn_in);
         assert!(yes.text.contains("Obrigada"));
         let mut sessions = DialogueSessions::default();
-        advance(&graph, &mut sessions, "carta", None).unwrap();
-        let no = advance(&graph, &mut sessions, "carta", Some(2)).unwrap();
+        advance(&graph, &mut sessions, "carta", None, None).unwrap();
+        let no = advance(&graph, &mut sessions, "carta", Some(2), None).unwrap();
         assert!(!no.turn_in);
         assert!(no.text.contains("Volta"));
     }

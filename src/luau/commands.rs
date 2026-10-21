@@ -51,7 +51,6 @@ pub enum ScriptCommand {
         velocity: Vec3,
         iframes: f32,
     },
-    AddXp(u32),
     DamagePlayer {
         amount: f32,
         from: Option<Vec3>,
@@ -70,46 +69,15 @@ pub enum ScriptCommand {
         kind: String,
         secs: f32,
     },
-    /// Quests: aceitar / entregar / reportar progresso (hooks para scripts,
-    /// aplicados pelo [`crate::quests::QuestLog`]).
-    QuestAccept(String),
-    QuestTurnIn(String),
-    /// kill/collect: alvo + quantidade.
-    QuestReport {
-        target: String,
-        amount: u32,
-    },
-    /// Visita a um marco nomeado.
-    QuestVisit(String),
-    /// Destrutível com queda (`break-style: fall`) — tomba na direção
+     /// Destrutível com queda (`break-style: fall`) — tomba na direção
     /// herói→entidade e despawna no fim.
     Topple {
         entity: Entity,
     },
-    /// Consome do vault (`viber.vault_take`): recurso OU item, `false`-sem-
-    /// stock vira no-op com warn 1× (o script guarda-se com `vault_get`).
-    VaultTake {
-        kind: String,
-        amount: u32,
-    },
-    /// Reclama uma ação da UI (`viber.own_action("buy")`) — o handler nativo
+     /// Reclama uma ação da UI (`viber.own_action("buy")`) — o handler nativo
     /// correspondente cala e a ação chega a Lua via `viber.events()`.
     OwnUiAction(String),
-    /// Deposita recurso no vault (`gold`/`wood`/`stone`) — economia loop 4.
-    /// `from_collect` marca `viber.report_collect`, que aceita também itens de
-    /// objetivo (fallback `item_add`); a chamada explícita `viber.vault_add`
-    /// não — recurso desconhecido é erro diagnosticável, não item silencioso.
-    VaultAdd {
-        kind: String,
-        amount: u32,
-        from_collect: bool,
-    },
-    /// Adiciona item ao inventário (`potion`, `antidote`, `bomb`…).
-    ItemAdd {
-        id: String,
-        amount: u32,
-    },
-    /// Mensagem de UI (balão/toast) — consumida via [`ScriptToast`].
+     /// Mensagem de UI (balão/toast) — consumida via [`ScriptToast`].
     Toast(String),
     /// Registra alvo de interação ("[J] Minerar") na entidade.
     SetInteraction {
@@ -127,6 +95,9 @@ pub enum ScriptCommand {
         entity: Entity,
         name: String,
         speed: f32,
+        /// `viber.play_clip(..., { lock = true })`: segura a última pose
+        /// (morte/cadáver). Sem lock, o driver retoma a locomoção no fim.
+        lock: bool,
     },
     /// SFX curto (`viber.sound`) tocado na posição da entidade — consumido
     /// pelo `sfx_player_system` do [`crate::ambient`].
@@ -221,6 +192,39 @@ pub enum ScriptCommand {
         entity: Entity,
         amount: f32,
     },
+    /// Empurrão curto numa entidade (`viber.entity_knockback`) — o jogo
+    /// decide o golpe; a engine só aplica o impulso físico.
+    EntityKnockback {
+        entity: Entity,
+        dir: Vec3,
+        strength: f32,
+    },
+    /// Acende o flash de impacto na entidade (`viber.hit_flash`) — leitura
+    /// visual do golpe, sem dano nem regra de combate.
+    HitFlash {
+        entity: Entity,
+        secs: f32,
+    },
+    /// Multiplicador de velocidade do herói (`viber.set_player_speed`).
+    SetPlayerSpeed(f32),
+    /// Marca a entidade como cadáver (`viber.corpse`): o jogo decide a morte;
+    /// a engine só deixa de a animar e, se tiver `RagdollDeath`
+    /// (`ragdoll="true"`), começa o ragdoll. Não despawna — isso é do jogo.
+    Corpse { entity: Entity },
+    /// Prompt de interação de MUNDO (`viber.prompt(key, label)`): um
+    /// controller publica o verbo do alvo atual sem ser ele a entidade
+    /// interagida. `label` vazio limpa. É UI genérica — o jogo decide quando.
+    Prompt {
+        key: String,
+        label: String,
+    },
+    /// Alteração de acessibilidade (`viber.a11y_set`): campos `None` ficam.
+    A11ySet {
+        subtitle_scale: Option<f32>,
+        shake: Option<bool>,
+        hitstop: Option<bool>,
+        interact_hold: Option<bool>,
+    },
     /// Edição VIVA do terreno (`viber.terrain.lower/raise/flatten/crater`):
     /// vai para a [`crate::terrain::delta::TerrainEditQueue`], aplicada pelo
     /// `apply_terrain_edits` no máximo `EDITS_PER_FRAME` por frame; o
@@ -240,19 +244,7 @@ pub enum ScriptCommand {
         on_spawned: Option<Function>,
         caller_path: Option<String>,
     },
-    /// Revela um bioma (`viber.reveal_biome`) — a atalaia de agrimensura
-    /// ativada acende os marcos do bioma na bússola/minimapa e abre o [F]/[G]
-    /// deles. Persistido no save (`revealed_biomes`).
-    RevealBiome(String),
-    /// Pontos de talento (`viber.add_skill_points`) — a recompensa
-    /// incremental dos colecionáveis; aplica em `SkillTree.points` +
-    /// `LevelState.points` quando os recursos existem (preset rpg).
-    AddSkillPoints(u32),
-    /// Passivas aprendidas (`viber.sync_skills`). A lista é a fonte da
-    /// verdade: aplica o delta de HP/velocidade e actualiza o bónus de
-    /// dano/crítico. Não gasta pontos.
-    SyncSkills(Vec<String>),
-    /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
+     /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
     /// A escala fica. Com `own_system("locomotion")` o `player_movement` não
     /// disputa esta escrita no herói.
     SetPose {

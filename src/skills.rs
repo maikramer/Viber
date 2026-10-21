@@ -412,7 +412,7 @@ impl Plugin for SkillsPlugin {
             .init_resource::<crate::camera::CameraFx>()
             // FX de impacto ([R]/[B] somam hit-stop/trauma/kick/punch): nasce
             // aqui também para apps mínimas (idempotente com os plugins donos).
-            .init_resource::<crate::combat::HitStop>()
+            .init_resource::<crate::time_fx::HitStop>()
             .init_resource::<crate::camera::CameraShake>()
             .init_resource::<crate::camera::CameraKick>()
             .init_resource::<crate::postfx::PostFxState>()
@@ -509,8 +509,8 @@ pub(crate) fn kill_creature(
     commands
         .entity(target)
         .remove::<LuaScriptRef>()
-        .insert(crate::combat::Corpse {
-            timer: crate::combat::CORPSE_LIFETIME,
+        .insert(crate::corpse::Corpse {
+            timer: crate::corpse::CORPSE_LIFETIME,
         });
     // Evento engine→Lua: lógica de jogo (contadores, spawns de vingança,
     // quests em Lua) reage ao abate sem tocar no Rust. `name` = kind do
@@ -519,7 +519,7 @@ pub(crate) fn kill_creature(
     if let Some(events) = events.as_deref_mut() {
         events.push(crate::luau::ScriptGameEvent::Kill {
             name: script
-                .map(|s| crate::combat::script_kind(&s.path))
+                .map(|s| crate::script_kind::script_kind(&s.path))
                 .unwrap_or_else(|| "creature".to_string()),
             entity: target.to_bits() as i64,
         });
@@ -528,10 +528,10 @@ pub(crate) fn kill_creature(
         clip: crate::ambient::SfxClip::EnemyDeath,
         position: Some(position),
     });
-    let kind = script.map(|s| crate::combat::script_kind(&s.path));
+    let kind = script.map(|s| crate::script_kind::script_kind(&s.path));
     let reward = kind
         .as_deref()
-        .map_or(crate::combat::KILL_XP, crate::combat::kill_xp);
+        .map_or(crate::script_kind::KILL_XP, crate::script_kind::kill_xp);
     if let Ok(mut xp) = hero_xp.single_mut() {
         gain_xp(&mut xp, reward);
     }
@@ -547,7 +547,7 @@ pub(crate) fn kill_creature(
         format!("Inimigo derrotado (+{reward} XP)")
     }));
     if let (Some(script), Some(quests)) = (script, quests.as_deref_mut()) {
-        let kind = crate::combat::script_kind(&script.path);
+        let kind = crate::script_kind::script_kind(&script.path);
         for ready in quests.report_kill(&kind) {
             if let Some(def) = quests.def(&ready) {
                 toasts.write(ScriptToast(format!(
@@ -572,7 +572,7 @@ pub struct AbilityFx<'w> {
     time: Res<'w, Time>,
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
-    hit_stop: ResMut<'w, crate::combat::HitStop>,
+    hit_stop: ResMut<'w, crate::time_fx::HitStop>,
     shake: ResMut<'w, crate::camera::CameraShake>,
     kick: ResMut<'w, crate::camera::CameraKick>,
     postfx: ResMut<'w, crate::postfx::PostFxState>,
@@ -611,7 +611,7 @@ pub fn abilities_system(
             Option<&LuaScriptRef>,
             Option<&crate::impact::HitRecoil>,
         ),
-        (Without<Player>, Without<crate::combat::Corpse>),
+        (Without<Player>, Without<crate::corpse::Corpse>),
     >,
     mut hero_xp: Query<&mut Xp, With<Player>>,
     mut numbers: MessageWriter<DamageNumberEvent>,
@@ -651,7 +651,7 @@ pub fn abilities_system(
         // dashava PARA TRÁS (mesma correção do melee, `combat::hero_forward`).
         // Pelo character controller (knockback): colide com muros e casas —
         // o teleporte antigo atravessava a muralha da cidade e paredes.
-        let forward = crate::combat::hero_forward(global) * DASH_DISTANCE;
+        let forward = crate::player::hero_forward(global) * DASH_DISTANCE;
         commands
             .entity(entity)
             .insert(crate::physics_fx::Knockback {
@@ -753,7 +753,7 @@ pub fn abilities_system(
             }
             crate::particles::spawn_burst(
                 &mut commands,
-                &crate::combat::hit_sparks_spec(),
+                &crate::fx_specs::hit_sparks_spec(),
                 t.translation() + Vec3::Y * 1.0,
                 STRIKE_SPARK_COUNT,
             );
@@ -790,7 +790,7 @@ pub fn abilities_system(
                 clip: crate::ambient::SfxClip::Hit,
                 position: Some(pos),
             });
-            crate::combat::request_hit_stop(&mut fx.hit_stop, crate::combat::HIT_STOP_HEAVY);
+            crate::time_fx::request_hit_stop(&mut fx.hit_stop, crate::time_fx::HIT_STOP_HEAVY);
             crate::camera::add_camera_shake(&mut fx.shake, STRIKE_SHAKE);
             crate::camera::add_camera_kick(&mut fx.kick, Vec3::Y * STRIKE_KICK_UP);
             crate::postfx::punch_impact(&mut fx.postfx, STRIKE_PUNCH_STOPS, STRIKE_PUNCH_BLOOM);
@@ -808,12 +808,12 @@ pub fn abilities_system(
         );
         crate::particles::spawn_burst(
             &mut commands,
-            &crate::combat::impact_spec("ground-dust", (0.28, 0.55), (0.35, 0.7), (1.2, 2.4), None),
+            &crate::fx_specs::impact_spec("ground-dust", (0.28, 0.55), (0.35, 0.7), (1.2, 2.4), None),
             pos.with_y(pos.y + 0.15),
             5,
         );
         if let Some(dir) = face_dir {
-            crate::combat::snap_facing(&mut transform, dir, STRIKE_FACE_SNAP);
+            crate::fx_specs::snap_facing(&mut transform, dir, STRIKE_FACE_SNAP);
         }
     }
 }
@@ -864,7 +864,7 @@ fn bomb_throw_system(
     }
     let origin = global.translation() + Vec3::Y * 1.2;
     // O modelo olha +Z — o `forward()` (−Z) lançava a bomba para trás.
-    let dir = crate::combat::hero_forward(global);
+    let dir = crate::player::hero_forward(global);
     sfx.write(crate::ambient::SfxEvent {
         clip: crate::ambient::SfxClip::BombDrop,
         position: Some(origin),
@@ -898,7 +898,7 @@ fn bomb_step_system(
             Option<&LuaScriptRef>,
             Option<&crate::impact::HitRecoil>,
         ),
-        (Without<Player>, Without<crate::combat::Corpse>),
+        (Without<Player>, Without<crate::corpse::Corpse>),
     >,
     mut hero_xp: Query<&mut Xp, With<Player>>,
     mut commands: Commands,
@@ -964,7 +964,7 @@ fn bomb_step_system(
                 }
                 crate::particles::spawn_burst(
                     &mut commands,
-                    &crate::combat::hit_sparks_spec(),
+                    &crate::fx_specs::hit_sparks_spec(),
                     t.translation() + Vec3::Y * 1.0,
                     BOMB_SPARK_COUNT,
                 );
@@ -1004,7 +1004,7 @@ fn bomb_step_system(
         });
         // Peso de explosão: hit-stop + shake + solavanco vertical + punch +
         // anel de choque (sempre — uma bomba detona, acerte ou não).
-        crate::combat::request_hit_stop(&mut fx.hit_stop, crate::combat::HIT_STOP_HEAVY);
+        crate::time_fx::request_hit_stop(&mut fx.hit_stop, crate::time_fx::HIT_STOP_HEAVY);
         crate::camera::add_camera_shake(&mut fx.shake, BOMB_SHAKE);
         crate::camera::add_camera_kick(&mut fx.kick, Vec3::Y * BOMB_KICK_UP);
         crate::postfx::punch_impact(&mut fx.postfx, BOMB_PUNCH_STOPS, BOMB_PUNCH_BLOOM);

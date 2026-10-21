@@ -27,11 +27,10 @@ use crate::profiler::{Group, timed};
 use crate::recipes::ParsedWorld;
 use crate::recipes::spawn::{self, PendingWorld};
 use crate::{
-    a11y, ai, ambient, animation, audio_space, camera, combat, dialogue, editor_camera, foliage,
-    grass, hud, ik, impact, input_map, locale, lockon, luau, menus, meshopt, music, nav, netplay,
-    particles, physics, physics_fx, player, postfx, profiler, prop_tint, quests, ragdoll, recipes,
-    render_lod, save, senses, skills, sky, spawner, streaming, terrain, textures, trail, ui,
-    worldsys, xml,
+    a11y, ambient, animation, audio_space, camera, dialogue, editor_camera, foliage, grass, hud,
+    ik, impact, input_map, locale, lockon, luau, menus, meshopt, music, nav, netplay, particles,
+    physics, physics_fx, player, postfx, profiler, prop_tint, ragdoll, recipes, render_lod, save,
+    sky, spawner, streaming, terrain, textures, time_fx, trail, ui, weapon, worldsys, xml,
 };
 
 /// Para quê a App é montada.
@@ -293,10 +292,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Quests do MUNDO, lidas do DISCO (dir do config, default `quests/` ao
     // lado do world.xml) — o conteúdo deixou de vir embutido na engine. O
     // insert é ANTES dos plugins: o `init_resource` do QuestsPlugin não
-    // substitui o que já existe.
-    app.insert_resource(quests::QuestLog::with_dir(
-        &config.quests_dir_on(&world_dir),
-    ));
     // O modelo do céu também viaja como resource — o IBL (`ibl.rs`) pinta o
     // cubemap com a MESMA radiância que o domo desenha e os probes regionais
     // (`probes.rs`) usam os mesmos coeficientes. Sem ele os dois lêem `None` e
@@ -591,15 +586,13 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // exemplo — vivem em Lua, não entram no App.
     app.init_resource::<camera::CameraFx>();
     app.add_systems(bevy::app::Update, camera::fov_kick_system);
-    app.init_resource::<combat::HitStop>();
-    app.init_resource::<combat::BaseTimeScale>();
-    app.add_systems(bevy::app::Update, combat::hit_stop_system);
-    // Mão do herói. O CombatPlugin ficou de fora (regras em Lua), mas a
-    // espada no osso `hand_r` e o ciclo [V] (espada → machado → lança)
-    // são da engine. Sem isto a mão nasce vazia e o [V] não faz nada.
-    app.init_resource::<combat::HeldWeapon>();
-    app.init_resource::<crate::harvest::HarvestContext>();
-    app.add_systems(bevy::app::Update, combat::cycle_weapon);
+    app.init_resource::<time_fx::HitStop>();
+    app.init_resource::<time_fx::BaseTimeScale>();
+    app.add_systems(bevy::app::Update, time_fx::hit_stop_system);
+    // Mão do herói. O melee vive em Lua, mas a espada no osso `hand_r` é
+    // apresentação da engine. O [V] é do lock-on (Lua) — o ciclo de armas
+    // nativo foi removido para não haver dois donos do mesmo press.
+    app.init_resource::<weapon::HeldWeapon>();
 
     // Mundo vivo (loop 9): fog/tint por BiomeRegion, orçamento de luzes,
     // gestos idle de NPC, SFX.
@@ -630,8 +623,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // IA (FSM Rust + respawn): criaturas de <DynamicSpawner> SEM script caem
     // aqui — sem este plugin nasciam estátuas eternas e a RespawnQueue
     // nunca drenava.
-    app.add_plugins(ai::AiPlugin);
-    app.add_plugins(senses::SensesPlugin);
     // Navegação: navmesh Recast num tile que segue o herói, A* + evitamento
     // RVO (bevy_landmass) e preferência por estradas via custo por tipo de
     // polígono. Sem isto a IA volta à linha recta de sempre — o que é
@@ -650,38 +641,15 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // UI declarativa (XML + folha de estilo + `viber.ui` no Luau): o HUD do
     // mundo é autoria, não código.
     app.add_plugins(ui::UiPlugin);
-    // Combate, colheita, veneno e respawn saíram com o preset RPG, mas o
-    // Vael ainda depende deles: sem isto o [J] não fere, a árvore não parte,
-    // o veneno não dói e a morte não renasce. Abilities [C]/[E]/[R]/[B] e a
-    // hotbar continuam em Lua — não voltar a registar SkillsPlugin/EconomyPlugin
-    // (disparavam por cima dos scripts).
-    app.init_resource::<crate::economy::Vault>();
-    app.init_resource::<crate::skills::PlayerStatsResource>();
-    app.init_resource::<crate::skills::SkillTree>();
-    app.init_resource::<crate::skills::ComboState>();
-    app.init_resource::<combat::SwingClock>();
-    app.init_resource::<combat::AttackChain>();
-    app.init_resource::<combat::AttackBuffer>();
-    app.init_resource::<combat::PendingSwing>();
+    // Combate é do JOGO: o melee/chain/dano vivem em `scripts/game/combat.lua`
+    // (Vael). A engine só dá os serviços genéricos — vitais, vault, skills,
+    // feedback de impacto e a mão armada (apresentação). NÃO voltar a
+    // registar `player_melee_attack`/`swing_track_system`/`cycle_weapon`.
     app.add_plugins(crate::feedback::FeedbackPlugin);
-    app.add_plugins(crate::harvest::HarvestPlugin);
-    app.add_systems(
-        bevy::app::Update,
-        (combat::ensure_player_vitals, combat::ensure_creature_vitals).before(luau::luau_update),
-    );
-    app.add_systems(
-        bevy::app::Update,
-        (
-            combat::player_melee_attack.after(crate::harvest::HarvestSet),
-            combat::swing_track_system
-                .after(player::player_movement)
-                .before(camera::third_person_camera),
-            combat::play_death_animation,
-            combat::tick_corpses,
-            combat::corpse_fade_setup,
-            combat::corpse_fade_tick,
-        ),
-    );
+    // Colheita/destrutíveis são DADOS autorais + regras em Lua. Nenhum
+    // plugin de colheita: `viber.destructibles` só lê o que o spawner criou.
+    // A espada no osso `hand_r` é apresentação; quem decide o golpe é o Lua.
+    app.add_systems(bevy::app::Update, weapon::ensure_held_weapon);
     // A instalação de `viber.ui` tem de ganhar ao runtime Luau: sem ordem,
     // um script activado no frame 1 via `luau_on_add` podia ver `viber.ui`
     // nil (morria — `Added` dispara 1×) ou queimar o warn-once.
@@ -732,11 +700,11 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.add_systems(
         bevy::app::Update,
         (
-            timed(Group::Hud, hud::hud_health_sync),
-            hud::hud_xp_sync,
             // Balão de diálogo: única via que decrementa o timer e volta a
             // esconder — sem registo, o balão ficava no ecrã para sempre.
             timed(Group::Hud, hud::hud_balloon_update),
+            // Acessibilidade: escala das legendas do balão (A11y).
+            hud::apply_subtitle_scale,
             // Modal [Q]: sincroniza abas/conteúdos e trata cliques.
             timed(Group::Hud, hud::menu::hud_menu_system),
         ),
@@ -790,13 +758,9 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.add_systems(
         bevy::app::Update,
         (
-            // Clamp da borda DEPOIS do movimento/dash do player (mesmo frame) —
-            // sem ordem, o clamp viajava um frame atrás do WASD. A aresta para
-            // `abilities_system` é no-op no preset `gameplay: none` (alvo
-            // ausente do schedule é tolerado) e mantém a semântica no RPG.
-            worldsys::world_border_clamp
-                .after(player::player_movement)
-                .after(skills::abilities_system),
+            // Clamp da borda DEPOIS do movimento do player (mesmo frame):
+            // sem ordem, o clamp viajava um frame atrás do WASD.
+            worldsys::world_border_clamp.after(player::player_movement),
             sky::sky_follow_camera,
             hud::hud_toggle,
             // Lifecycle de FX ambiente por proximidade (`src/particles.rs`):

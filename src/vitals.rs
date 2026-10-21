@@ -55,6 +55,39 @@ impl Default for Health {
     }
 }
 
+/// Alvo hostil genérico. O mundo autora `hostile="true"`; o spawner de
+/// criaturas (`<Creature role="enemy">`) também a insere. A engine NÃO infere
+/// hostilidade pelo path do script.
+#[derive(Debug, Clone, Copy, Default, Component)]
+pub struct Hostile;
+
+/// Garante vitals no herói (o HUD e o dano dos scripts dependem disto).
+#[allow(clippy::type_complexity)]
+pub fn ensure_player_vitals(
+    players: Query<(Entity, Option<&Health>, Option<&Xp>), With<Player>>,
+    mut commands: Commands,
+) {
+    for (entity, health, xp) in &players {
+        let mut entity = commands.entity(entity);
+        if health.is_none() {
+            entity.insert(Health::default());
+        }
+        if xp.is_none() {
+            entity.insert(Xp::default());
+        }
+    }
+}
+
+/// Rede de segurança para um hostil autorado sem `health="…"`.
+pub fn ensure_creature_vitals(
+    creatures: Query<Entity, (With<Hostile>, Without<Health>, Without<Player>)>,
+    mut commands: Commands,
+) {
+    for entity in &creatures {
+        commands.entity(entity).insert(Health::default());
+    }
+}
+
 /// XP progress toward the next tier; on level-up the remainder carries over
 /// and `next` grows by [`xp_ramp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Component)]
@@ -556,4 +589,14 @@ mod tests {
         assert_eq!(levels_between(100, 999), 0);
         assert_eq!(levels_between(0, 0), 0);
     }
+}
+
+/// Dano em área com falloff linear: cheio no centro → metade na borda.
+/// `None` fora do raio. Primitiva genérica usada por `viber.radial_damage`;
+/// a política (quem, quanto, knockback) é do script.
+pub fn radial_damage(distance: f32, radius: f32, max_damage: f32) -> Option<f32> {
+    if distance > radius {
+        return None;
+    }
+    Some(max_damage * (1.0 - 0.5 * (distance / radius)))
 }

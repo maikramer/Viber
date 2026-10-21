@@ -24,7 +24,6 @@ use bevy::prelude::*;
 
 use crate::luau::ScriptToast;
 use crate::player::Player;
-use crate::skills::{GUARD_REDUCTION, Guarding};
 use crate::vitals::{Health, apply_damage};
 
 /// Janela de invulnerabilidade após cada golpe sofrido (s) — 0,35.
@@ -516,42 +515,21 @@ fn player_hurt_system(
             &mut Health,
             Option<&mut Invulnerable>,
             Option<&Dying>,
-            Option<&Guarding>,
         ),
         With<Player>,
     >,
     mut commands: Commands,
     mut numbers: MessageWriter<DamageNumberEvent>,
     mut flash: ResMut<HurtFlash>,
-    mut toasts: MessageWriter<ScriptToast>,
     mut sfx: MessageWriter<crate::ambient::SfxEvent>,
     mut knockbacks: Query<&mut crate::physics_fx::Knockback>,
     mut events: Option<ResMut<crate::luau::ScriptEventQueue>>,
 ) {
-    let Ok((entity, transform, mut health, mut invuln, dying, guard)) = players.single_mut() else {
+    let Ok((entity, transform, mut health, mut invuln, dying)) = players.single_mut() else {
         return;
     };
     for hurt in hurts.read() {
-        // guard [L]: parry total na janela inicial, senão −75 %
-        let mut amount = hurt.amount;
-        if !hurt.status
-            && let Some(g) = guard
-        {
-            if g.timer <= crate::skills::PARRY_WINDOW {
-                amount = 0.0;
-                toasts.write(ScriptToast("PARRY!".into()));
-                sfx.write(crate::ambient::SfxEvent {
-                    clip: crate::ambient::SfxClip::ShieldBlock,
-                    position: Some(transform.translation()),
-                });
-            } else {
-                amount *= GUARD_REDUCTION;
-                sfx.write(crate::ambient::SfxEvent {
-                    clip: crate::ambient::SfxClip::ShieldBlock,
-                    position: Some(transform.translation()),
-                });
-            }
-        }
+        let amount = hurt.amount;
         if amount <= 0.0 {
             continue;
         }

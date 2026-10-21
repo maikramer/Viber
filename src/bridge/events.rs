@@ -102,13 +102,6 @@ pub fn event_json(event: &BridgeEvent) -> Json {
     out
 }
 
-/// Último mapa de estados de quest emitido (`Local` do coletor) — emite o
-/// evento "quest" só quando o MAPA muda, não a cada progresso interno.
-/// `pub(crate)`: o tipo aparece na assinatura do sistema, que o plugin
-/// (módulo pai) regista.
-#[derive(Default)]
-pub struct QuestLogFingerprint(pub Option<String>);
-
 /// Coleta os eventos do frame para o ring. Corre no PostUpdate — DEPOIS de
 /// tudo o que escreveu eventos no Update; os `MessageReader` com `Local`
 /// deduplicam entre frames.
@@ -119,10 +112,7 @@ pub fn collect_bridge_events(
     mut damage_numbers: MessageReader<crate::feedback::DamageNumberEvent>,
     mut level_ups: MessageReader<crate::vitals::LevelUpEvent>,
     mut ui_actions: MessageReader<crate::ui::actions::UiAction>,
-    mut travel_pings: MessageReader<crate::travel::TravelPing>,
     mut toasts: MessageReader<crate::luau::ScriptToast>,
-    quest_log: Option<Res<crate::quests::QuestLog>>,
-    mut quest_fingerprint: Local<QuestLogFingerprint>,
     deaths: Query<(Entity, Option<&Name>, &crate::vitals::Health), Changed<crate::vitals::Health>>,
 ) {
     for event in hurt.read() {
@@ -160,9 +150,6 @@ pub fn collect_bridge_events(
             json!({ "name": event.name.clone(), "arg": event.arg.clone() }),
         );
     }
-    for event in travel_pings.read() {
-        log.push("travel", json!({ "label": event.label }));
-    }
     for toast in toasts.read() {
         log.push("toast", json!({ "message": toast.0.clone() }));
     }
@@ -174,22 +161,6 @@ pub fn collect_bridge_events(
                 data["name"] = json!(name.to_string());
             }
             log.push("death", data);
-        }
-    }
-    // QuestLog mudou? Um evento com o MAPA de estados (a transição que o
-    // agente quer ver; o progresso fino lê-se com quest()/quests()).
-    if let Some(log_resource) = quest_log
-        && log_resource.is_changed()
-    {
-        let mut states = serde_json::Map::new();
-        for def in &log_resource.defs {
-            let status = crate::quests::status_name(log_resource.status(&def.id, None));
-            states.insert(def.id.clone(), json!(status));
-        }
-        let states_key = Json::Object(states.clone()).to_string();
-        if quest_fingerprint.0.as_deref() != Some(states_key.as_str()) {
-            quest_fingerprint.0 = Some(states_key);
-            log.push("quest", json!({ "states": Json::Object(states) }));
         }
     }
 }

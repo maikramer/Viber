@@ -294,6 +294,18 @@ pub enum UiStyleSource {
     File(String),
 }
 
+/// Dados autorais de um `<Landmark>`. A engine não os interpreta: o jogo
+/// (Lua) decide o que fazer com o bioma/raio/quest de agrimensura.
+#[derive(Debug, Clone, Default)]
+pub struct LandmarkSpec {
+    pub name: String,
+    pub biome_id: String,
+    pub label: String,
+    pub survey_quest: String,
+    pub mark_radius: f32,
+    pub tower_reveals: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum EntityKind {
     /// Transform-only container (the `entity` and `group` tags).
@@ -589,13 +601,10 @@ pub enum EntityKind {
         attrs: Vec<(String, String)>,
     },
     /// `<Landmark name biome label [survey-quest] [mark-radius]>` (Fase B2) —
-    /// marco de traçado da Nota declarável. Recolhido no arranque num
-    /// [`crate::travel::LandmarkCatalog`]; sem nenhum no mundo, o catálogo
-    /// fica com o fallback hardcoded das 12 entradas. Nunca spawna entidade —
-    /// o marco físico é a entidade com aquele `name`, algures no mundo.
-    Landmark {
-        spec: crate::travel::NotaLandmarkOwned,
-    },
+    /// marco de traçado declarável. A engine só guarda os dados autorais; o
+    /// HUD/viagem do jogo lê-os por Lua (`viber.markers`). Nunca spawna
+    /// entidade: o marco físico é a entidade com aquele `name`.
+    Landmark { spec: LandmarkSpec },
     /// `<SpawnPoint at="x z" [label="praça"]>` (Fase B3) — ponto de respawn
     /// declarável. Recolhido num [`crate::feedback::RespawnCatalog`]; sem
     /// nenhum, fallback dos 5 pontos do const. Nunca spawna entidade.
@@ -852,6 +861,10 @@ pub struct StaticSpawnerSpec {
     pub template_props: Vec<(String, String)>,
     /// Grupos/conexões do mesmo nó do template (todas as instâncias).
     pub template_links: NodeLinks,
+    /// Template é criatura hostil (`role="enemy"` ou `hostile="true"`).
+    pub template_hostile: bool,
+    /// HP autoral do template (`health="…"`).
+    pub template_health: Option<f32>,
     /// Raio de ativação (congelamento) das instâncias — `activation-radius`.
     pub activation_radius: f32,
     /// Collider declarado no template (`<GameObject collider="…">`) — cada
@@ -983,6 +996,8 @@ impl VegetationSpec {
             template_script: None,
             template_props: Vec::new(),
             template_links: Default::default(),
+            template_hostile: false,
+            template_health: None,
             activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
             template_collider: None,
             template_trigger: false,
@@ -1671,6 +1686,19 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
                     common.props.push(("__ragdoll".into(), "1".into()));
                 }
             }
+            // Alvo hostil + HP autoral: o jogo declara, a engine não infere
+            // por path de script (`enemies/`, `bosses/`).
+            "hostile" => {
+                if values::parse_bool(value, &ctx_tag).unwrap_or(false) {
+                    common.props.push(("__hostile".into(), "1".into()));
+                }
+            }
+            "health" | "max-hp" => {
+                let hp = values::parse_f32(value, &ctx_tag)?;
+                if hp > 0.0 {
+                    common.props.push(("__health".into(), hp.to_string()));
+                }
+            }
             "stream" if value.trim() == "resident" => {
                 common.props.push(("__resident".into(), "1".into()));
             }
@@ -2309,6 +2337,37 @@ fn collect_template_script(node: &XmlNode) -> Option<TemplateScript> {
     None
 }
 
+/// `(hostile, health)` do template: `role="enemy"`/`hostile="true"` marca
+/// criatura; `health`/`max-hp` é o HP autoral. A engine não olha ao path do
+/// script para decidir isto.
+fn collect_template_traits(node: &XmlNode) -> (bool, Option<f32>) {
+    let mut hostile = false;
+    let mut health = None;
+    fn walk(node: &XmlNode, hostile: &mut bool, health: &mut Option<f32>) {
+        let role_enemy = node
+            .attr("role")
+            .is_some_and(|role| role.trim().eq_ignore_ascii_case("enemy"));
+        let flag = node
+            .attr("hostile")
+            .is_some_and(|value| matches!(value.trim(), "true" | "1" | "yes"));
+        if role_enemy || flag {
+            *hostile = true;
+        }
+        if health.is_none() {
+            *health = node
+                .attr("health")
+                .or_else(|| node.attr("max-hp"))
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|value| *value > 0.0);
+        }
+        for child in &node.children {
+            walk(child, hostile, health);
+        }
+    }
+    walk(node, &mut hostile, &mut health);
+    (hostile, health)
+}
+
 /// Primeiro attr `destructible=` na subárvore do template
 /// (`<GameObject destructible="…">`) — o props nascem colhíveis.
 fn collect_template_destructible(node: &XmlNode) -> Option<DestructibleSpec> {
@@ -2389,6 +2448,8 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
         template_script: None,
         template_props: Vec::new(),
         template_links: Default::default(),
+        template_hostile: false,
+        template_health: None,
         activation_radius: crate::luau::DEFAULT_ACTIVATION_RADIUS,
         template_collider: None,
         template_trigger: false,
@@ -2410,6 +2471,9 @@ fn finish_static_spawner(node: &XmlNode, dynamic: bool, ctx: &mut ParseCtx) -> R
         spec.template_props = props;
         spec.template_links = links;
     }
+    let (template_hostile, template_health) = collect_template_traits(node);
+    spec.template_hostile = template_hostile;
+    spec.template_health = template_health;
     // Destrutível do template: o attr `destructible` + o loot do
     // `<ResourceNode kind yield>` filho (árvores→wood, rochas→stone).
     spec.template_destructible = collect_template_destructible(node);
@@ -3345,28 +3409,14 @@ fn finish_landmark(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
     let biome_id = biome_id.ok_or_else(|| anyhow!("{ctx_tag}: `biome` é obrigatório"))?;
     let label =
         label.ok_or_else(|| anyhow!("{ctx_tag}: `label` (rótulo legível) é obrigatório"))?;
-    // Defaults por bioma; id desconhecido NÃO derruba o parse — o marco fica
-    // no catálogo com o id cru (o toast mostra o id, o resto funciona).
-    let biome = crate::travel::Biome::from_id(&biome_id);
-    if biome.is_none() {
-        ctx.warnings.push(format!(
-            "{ctx_tag}: bioma `{biome_id}` desconhecido (esperado dark_forest/desert/swamp/frozen_peaks/tower) — defaults do arco de raio aplicados"
-        ));
-    }
-    let spec = crate::travel::NotaLandmarkOwned {
+    // Defaults neutros: o jogo (Lua) aplica os seus por bioma. A engine só
+    // transporta o que o mundo autorou.
+    let spec = LandmarkSpec {
         name,
         biome_id,
         label,
-        survey_quest: survey_quest.unwrap_or_else(|| {
-            biome
-                .map(|b| b.survey_quest().to_string())
-                .unwrap_or_default()
-        }),
-        mark_radius: mark_radius.unwrap_or_else(|| {
-            biome
-                .map(|b| b.mark_radius())
-                .unwrap_or(crate::travel::NOTA_RANGE_DEFAULT_M)
-        }),
+        survey_quest: survey_quest.unwrap_or_default(),
+        mark_radius: mark_radius.unwrap_or(10.0),
         tower_reveals,
     };
     Ok(EntitySpec {
@@ -5440,12 +5490,12 @@ mod tests {
         assert_eq!(spec.label, "Torre do Posto Avançado");
         assert_eq!(spec.survey_quest, "forest_survey");
         assert_eq!(spec.mark_radius, 10.0);
-        assert_eq!(spec.biome(), Some(crate::travel::Biome::DarkForest));
     }
 
     #[test]
-    fn test_landmark_defaults_come_from_biome() {
-        // Fase B2: sem survey-quest/mark-radius, os defaults são do bioma.
+    fn test_landmark_defaults_are_neutral() {
+        // A engine só transporta o que o mundo autorou; os defaults por
+        // bioma são do JOGO (Lua).
         let (spec, w) = parse_one(&node(
             "Landmark",
             &[
@@ -5459,13 +5509,12 @@ mod tests {
         let EntityKind::Landmark { spec } = spec.kind else {
             panic!("não é um Landmark: {:?}", spec.kind);
         };
-        assert_eq!(spec.survey_quest, "desert_survey");
-        assert_eq!(spec.mark_radius, 12.0);
+        assert_eq!(spec.survey_quest, "");
+        assert_eq!(spec.mark_radius, 10.0);
     }
 
     #[test]
-    fn test_landmark_unknown_biome_warns_but_parses() {
-        // Bioma desconhecido: warning + o marco fica no catálogo com o id cru.
+    fn test_landmark_unknown_biome_parses_without_engine_policy() {
         let (spec, w) = parse_one(&node(
             "Landmark",
             &[
@@ -5475,13 +5524,12 @@ mod tests {
             ],
         ))
         .unwrap();
-        assert!(w.iter().any(|x| x.contains("vale")), "{w:?}");
+        assert!(w.is_empty(), "{w:?}");
         let EntityKind::Landmark { spec } = spec.kind else {
             panic!("não é um Landmark: {:?}", spec.kind);
         };
         assert_eq!(spec.biome_id, "vale");
-        assert_eq!(spec.biome(), None);
-        assert_eq!(spec.mark_radius, crate::travel::NOTA_RANGE_DEFAULT_M);
+        assert_eq!(spec.mark_radius, 10.0);
     }
 
     #[test]

@@ -669,6 +669,11 @@ pub struct SpawnGroupState {
     /// Script do template (criaturas): cada instância spawna com
     /// [`LuaScriptRef`] e o comportamento vive no Luau.
     pub template_script: Option<String>,
+    /// `<Creature role="enemy">` / `hostile="true"`: cada instância nasce
+    /// como alvo hostil (`vitals::Hostile`). A engine não infere pelo path.
+    pub template_hostile: bool,
+    /// HP autoral do template (`health="…"`); `None` = `Health::default()`.
+    pub template_health: Option<f32>,
     /// Raio de ativação (congelamento) replicado às instâncias.
     pub activation_radius: f32,
     /// Collider do template: cada instância nasce com colisão.
@@ -1137,16 +1142,17 @@ fn spawn_instance(
                         .clone(),
                 },
             ));
-            // Vitals só para hostis e com o HP AUTORAL (mesma regra do
-            // `combat::ensure_creature_vitals`): o `Health::default()` de
-            // sempre tornava townsfolk dinâmicos mortáveis e punha os chefes
-            // spawnados a 100 HP (o ensure não corrige quem já tem Health).
-            if crate::combat::is_hostile_script(script) {
-                let hp = crate::combat::authored_max_hp(script);
-                entity.insert(crate::vitals::Health {
-                    current: hp,
-                    max: hp,
-                });
+            // Hostilidade e HP vêm do TEMPLATE (`role="enemy"`/`hostile`,
+            // `health`), não do path do script.
+            if group.template_hostile {
+                let hp = group.template_health.unwrap_or(crate::vitals::DEFAULT_HEALTH);
+                entity.insert((
+                    crate::vitals::Hostile,
+                    crate::vitals::Health {
+                        current: hp,
+                        max: hp,
+                    },
+                ));
             }
         }
         (true, None) => {
@@ -1157,6 +1163,16 @@ fn spawn_instance(
                         .clone(),
                 },
             ));
+            if group.template_hostile {
+                let hp = group.template_health.unwrap_or(crate::vitals::DEFAULT_HEALTH);
+                entity.insert((
+                    crate::vitals::Hostile,
+                    crate::vitals::Health {
+                        current: hp,
+                        max: hp,
+                    },
+                ));
+            }
         }
         // Estático com script (ex.: árvores/rochas colhíveis).
         (false, Some(script)) => {
@@ -1240,6 +1256,8 @@ mod tests {
             template_script: None,
             template_props: Vec::new(),
             template_links: Default::default(),
+            template_hostile: false,
+            template_health: None,
             template_collider: None,
             template_trigger: false,
             template_destructible: None,

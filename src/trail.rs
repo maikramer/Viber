@@ -26,9 +26,9 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
 
-use crate::combat::HeldWeapon;
+use crate::weapon::HeldWeapon;
 #[cfg(test)]
-use crate::combat::WEAPON_TABLE;
+use crate::weapon::WEAPON_TABLE;
 
 /// Amostras máximas (cada uma é um par base/tip em world space).
 pub const TRAIL_SAMPLES: usize = 16;

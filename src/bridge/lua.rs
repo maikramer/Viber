@@ -248,25 +248,6 @@ pub struct NavInfo {
     pub census: Vec<(&'static str, usize)>,
 }
 
-/// Uma quest com definição + estado (`viber.debug.quest`).
-pub struct QuestInfo {
-    pub id: String,
-    pub title: String,
-    pub npc: String,
-    pub biome: String,
-    /// "not_taken" | "active" | "ready" | "done".
-    pub status: String,
-    pub objective_kind: String,
-    pub objective_target: String,
-    pub objective_count: u32,
-    /// Texto "x/y" do objetivo (collect lê o vault).
-    pub progress_text: String,
-    /// Marcos de visita já alcançados (objetivo visit).
-    pub visited: Vec<String>,
-    pub rewards_gold: u32,
-    pub rewards_xp: u32,
-    pub rewards_items: Vec<String>,
-}
 
 /// Uma `<BiomeRegion>` no snapshot (`viber.debug.regions`/`biome_at`).
 pub struct RegionInfo {
@@ -392,14 +373,6 @@ pub struct ClockInfo {
     pub minutes_per_real_second: f32,
 }
 
-/// Vault no snapshot (`viber.debug.vault`).
-pub struct VaultInfo {
-    pub gold: u32,
-    pub wood: u32,
-    pub stone: u32,
-    pub items: Vec<(String, u32)>,
-}
-
 /// Snapshot de leitura passado às closures como app data — fresco por cada
 /// chamada (escritas NÃO são visíveis dentro do mesmo chunk, só no mundo).
 #[derive(Default)]
@@ -411,9 +384,6 @@ pub struct DebugView {
     pub time_scale: f32,
     pub camera: Option<CameraInfo>,
     pub clock: Option<ClockInfo>,
-    pub vault: Option<VaultInfo>,
-    /// `{id → estado}` das quests (snapshot).
-    pub quests: Vec<(String, String)>,
     /// Snapshot do profiler no início da chamada (`viber.debug.prof`/`fps`).
     pub prof: Json,
     /// Tempos do último step de física (Rapier) ou None sem física.
@@ -425,8 +395,6 @@ pub struct DebugView {
     pub ground: Option<GroundInfo>,
     /// Pilha de navegação (`viber.debug.nav`).
     pub nav: Option<NavInfo>,
-    /// Quests com definição + estado (`viber.debug.quest`/`quest_defs`).
-    pub quests_deep: Vec<QuestInfo>,
     /// `<BiomeRegion>` do mundo (`viber.debug.regions`/`biome_at`).
     pub regions: Vec<RegionInfo>,
     /// Atmosfera/névoa vivos (`viber.debug.atmosphere`).
@@ -1181,7 +1149,7 @@ fn build_view(world: &mut World) -> DebugView {
     let origin = player.as_ref().map(|p| p.position);
     // A base (não o valor composto com o hit-stop) é o que o QA configura.
     let time_scale = world
-        .get_resource::<crate::combat::BaseTimeScale>()
+        .get_resource::<crate::time_fx::BaseTimeScale>()
         .map(|b| b.0)
         .unwrap_or_else(|| world.resource::<Time<Virtual>>().relative_speed());
     let prof = crate::profiler::snapshot(world);
@@ -1242,40 +1210,6 @@ fn build_view(world: &mut World) -> DebugView {
             dusk: c.dusk_minute,
             minutes_per_real_second: c.minutes_per_real_second,
         });
-    let vault = world
-        .get_resource::<crate::economy::Vault>()
-        .map(|v| VaultInfo {
-            gold: v.gold,
-            wood: v.wood,
-            stone: v.stone,
-            items: {
-                let mut items: Vec<(String, u32)> =
-                    v.items.iter().map(|(k, n)| (k.clone(), *n)).collect();
-                items.sort();
-                items
-            },
-        });
-    let quests = {
-        let vault_ref = world.get_resource::<crate::economy::Vault>();
-        world
-            .get_resource::<crate::quests::QuestLog>()
-            .map(|log| {
-                let mut list: Vec<(String, String)> = log
-                    .defs
-                    .iter()
-                    .map(|d| {
-                        (
-                            d.id.clone(),
-                            crate::quests::status_name(log.status(&d.id, vault_ref)).to_string(),
-                        )
-                    })
-                    .collect();
-                list.sort();
-                list
-            })
-            .unwrap_or_default()
-    };
-
     let mut infos: Vec<EntityInfo> = Vec::new();
     let mut by_name = HashMap::new();
     let mut stats = WorldStats::default();
@@ -1531,14 +1465,11 @@ fn build_view(world: &mut World) -> DebugView {
         time_scale,
         camera,
         clock,
-        vault,
-        quests,
         prof,
         physics,
         stats,
         ground,
         nav: build_nav(world),
-        quests_deep: build_quests_deep(world),
         regions: build_regions(world),
         atmosphere: build_atmosphere(world),
         weather: build_weather(world),
@@ -1642,41 +1573,7 @@ fn build_nav(world: &mut World) -> Option<NavInfo> {
     })
 }
 
-/// Quests com definição + estado vivo (o `quests()` simples é só o mapa de
-/// estados — este traz título/objetivo/progresso para o agente decidir).
-fn build_quests_deep(world: &World) -> Vec<QuestInfo> {
-    let Some(log) = world.get_resource::<crate::quests::QuestLog>() else {
-        return Vec::new();
-    };
-    let vault = world.get_resource::<crate::economy::Vault>();
-    let mut out: Vec<QuestInfo> = log
-        .defs
-        .iter()
-        .map(|def| QuestInfo {
-            id: def.id.clone(),
-            title: def.title.clone(),
-            npc: def.npc.clone(),
-            biome: def.biome.clone(),
-            status: crate::quests::status_name(log.status(&def.id, vault)).to_string(),
-            objective_kind: def.objective.kind.clone(),
-            objective_target: def.objective.target.clone(),
-            objective_count: def.objective.count,
-            progress_text: log.progress_text(&def.id, vault),
-            visited: log
-                .states
-                .get(&def.id)
-                .map(|a| a.visited.clone())
-                .unwrap_or_default(),
-            rewards_gold: def.rewards.gold,
-            rewards_xp: def.rewards.xp,
-            rewards_items: def.rewards.items.clone(),
-        })
-        .collect();
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
-}
-
-/// `<BiomeRegion>` do mundo — polígonos são pequenos (dezenas de pontos).
+ /// `<BiomeRegion>` do mundo — polígonos são pequenos (dezenas de pontos).
 fn build_regions(world: &World) -> Vec<RegionInfo> {
     world
         .get_resource::<crate::worldsys::BiomeRegions>()
@@ -1840,27 +1737,10 @@ fn build_ui(world: &World) -> Vec<UiNodeInfo> {
     out
 }
 
-fn build_skills(world: &World) -> Option<SkillsInfo> {
-    let tree = world.get_resource::<crate::skills::SkillTree>()?;
-    let cooldowns = world
-        .get_resource::<crate::skills::AbilityCooldowns>()
-        .map(|c| [c.dash, c.heal, c.strike]);
-    let stats = world.get_resource::<crate::skills::PlayerStatsResource>();
-    let level = world.iter_entities().find_map(|e| {
-        e.get::<crate::skills::LevelState>()
-            .map(|l| (l.level, l.points))
-    });
-    Some(SkillsInfo {
-        learned: tree.learned.clone(),
-        points: tree.points,
-        level: level.map(|l| l.0),
-        level_points: level.map(|l| l.1),
-        cooldowns,
-        bonus_damage: stats.map(|s| s.0.bonus_damage),
-        speed_mult: stats.map(|s| s.0.speed_mult),
-        max_hp_bonus: stats.map(|s| s.0.max_hp_bonus),
-        crit_bonus: stats.map(|s| s.0.crit_bonus),
-    })
+fn build_skills(_world: &World) -> Option<SkillsInfo> {
+    // Talentos/passivas são regra do JOGO (Lua). A engine não tem árvore
+    // nem stats de RPG para publicar.
+    None
 }
 
 fn build_seeds(world: &World) -> SeedInfo {
@@ -1875,25 +1755,13 @@ fn build_seeds(world: &World) -> SeedInfo {
     }
 }
 
-fn build_waypoints(world: &World) -> WaypointInfo {
-    let marked = world
-        .get_resource::<crate::travel::NotaLog>()
-        .map(|log| {
-            let mut marked: Vec<String> = log.marked.iter().cloned().collect();
-            marked.sort();
-            marked
-        })
-        .unwrap_or_default();
-    let waypoint = world.get_resource::<crate::travel::Waypoint>();
+fn build_waypoints(_world: &World) -> WaypointInfo {
+    // A Nota/waypoint é regra do JOGO (Lua, `viber.markers`).
     WaypointInfo {
-        marked,
-        // Fase B2: o label é String (catálogo declarável) — clone, não borrow.
-        label: waypoint.and_then(|w| w.label.clone()),
-        position: waypoint.and_then(|w| w.position).map(|p| p.to_array()),
-        landmarks: crate::travel::LANDMARKS
-            .iter()
-            .map(|l| (l.name, l.biome.label()))
-            .collect(),
+        marked: Vec::new(),
+        label: None,
+        position: None,
+        landmarks: Vec::new(),
     }
 }
 
@@ -2228,18 +2096,6 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
         "clock",
         "clock()",
         "{minute,dawn,dusk,minutes_per_real_second}",
-    ),
-    ("vault", "vault()", "{gold,wood,stone,items{}}"),
-    ("quests", "quests()", "{id = estado}"),
-    (
-        "quest",
-        "quest(id)",
-        "quest FUNDA: título, objetivo com progresso, rewards",
-    ),
-    (
-        "quest_defs",
-        "quest_defs()",
-        "[{id,title,status,kind,npc}] das quests embutidas",
     ),
     (
         "regions",
@@ -3401,58 +3257,6 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     api.set(
-        "quest",
-        lua.create_function(|lua, id: String| {
-            let view = lua
-                .app_data_ref::<DebugView>()
-                .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
-            let Some(quest) = view.quests_deep.iter().find(|q| q.id == id) else {
-                return Ok(Value::Nil);
-            };
-            json_to_lua(
-                lua,
-                &json!({
-                    "id": quest.id,
-                    "title": quest.title,
-                    "npc": quest.npc,
-                    "biome": quest.biome,
-                    "status": quest.status,
-                    "objective": {
-                        "kind": quest.objective_kind,
-                        "target": quest.objective_target,
-                        "count": quest.objective_count,
-                        "progress_text": quest.progress_text,
-                    },
-                    "visited": quest.visited,
-                    "rewards": {
-                        "gold": quest.rewards_gold,
-                        "xp": quest.rewards_xp,
-                        "items": quest.rewards_items,
-                    },
-                }),
-            )
-        })?,
-    )?;
-
-    api.set(
-        "quest_defs",
-        lua.create_function(|lua, ()| {
-            let view = lua
-                .app_data_ref::<DebugView>()
-                .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
-            let list: Vec<Json> = view
-                .quests_deep
-                .iter()
-                .map(|q| {
-                    json!({ "id": q.id, "title": q.title, "status": q.status,
-                            "kind": q.objective_kind, "npc": q.npc })
-                })
-                .collect();
-            json_to_lua(lua, &Json::Array(list))
-        })?,
-    )?;
-
-    api.set(
         "regions",
         lua.create_function(|lua, ()| {
             let view = lua
@@ -4227,40 +4031,6 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     api.set(
-        "vault",
-        lua.create_function(|lua, ()| {
-            let view = lua
-                .app_data_ref::<DebugView>()
-                .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
-            let Some(vault) = view.vault.as_ref() else {
-                return Ok(Value::Nil);
-            };
-            let table = lua.create_table()?;
-            table.raw_set("gold", vault.gold)?;
-            table.raw_set("wood", vault.wood)?;
-            table.raw_set("stone", vault.stone)?;
-            let items = lua.create_table()?;
-            for (id, n) in &vault.items {
-                items.raw_set(id.as_str(), *n)?;
-            }
-            table.raw_set("items", items)?;
-            Ok(Value::Table(table))
-        })?,
-    )?;
-    api.set(
-        "quests",
-        lua.create_function(|lua, ()| {
-            let view = lua
-                .app_data_ref::<DebugView>()
-                .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
-            let table = lua.create_table()?;
-            for (id, state) in &view.quests {
-                table.raw_set(id.as_str(), state.as_str())?;
-            }
-            Ok(table)
-        })?,
-    )?;
-    api.set(
         "prof",
         lua.create_function(|lua, ()| {
             let view = lua
@@ -4587,18 +4357,10 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 false
             }
         },
-        DebugOp::Give(kind, amount) => match world.get_resource_mut::<crate::economy::Vault>() {
-            Some(mut vault) => {
-                if !vault.add_resource(&kind, amount) {
-                    vault.item_add(&kind, amount);
-                }
-                true
-            }
-            None => {
-                warnings.push(format!("vault indisponível — '{kind}' perdido"));
-                false
-            }
-        },
+        DebugOp::Give(kind, amount) => {
+            warnings.push(format!("give: '{kind}'x{amount} — o cofre e do JOGO (viber.game()), a engine nao o conhece"));
+            false
+        }
         DebugOp::SetSpeed(entity, speed) => {
             let applied = with_entity(world, entity, warnings, |e| {
                 e.get_mut::<Player>()
@@ -4619,7 +4381,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             let scale = scale.max(0.0);
             // Base para o hit-stop compor (senão o hit_stop_system com timer
             // inativo deixava o slow-mo morto no frame seguinte).
-            if let Some(mut base) = world.get_resource_mut::<crate::combat::BaseTimeScale>() {
+            if let Some(mut base) = world.get_resource_mut::<crate::time_fx::BaseTimeScale>() {
                 base.0 = scale;
             }
             world
@@ -5019,191 +4781,33 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
         DebugOp::SetMaxHp(entity, max) => {
             set_entity_health(world, entity, None, Some(max), warnings)
         }
-        DebugOp::QuestForce(id, state) => {
-            let Some(mut log) = world.get_resource_mut::<crate::quests::QuestLog>() else {
-                warnings.push("sem QuestLog — quest_force ignorado".into());
-                return false;
-            };
-            let Some(def) = log.def(&id).cloned() else {
-                warnings.push(format!("quest '{id}' não existe (quest_defs() lista)"));
-                return false;
-            };
-            match state.as_str() {
-                "active" => {
-                    if !log.accept(&id) {
-                        warnings.push(format!("quest '{id}': só se aceita de not_taken"));
-                        return false;
-                    }
-                }
-                "ready" => match def.objective.kind.as_str() {
-                    "collect" => {
-                        // O vault é a autoridade do collect — aceita e avisa
-                        // que o READY vem do inventário.
-                        log.accept(&id);
-                        warnings.push(
-                            "collect é vault-driven: ready = encher o vault                              (viber.debug.vault_set)"
-                                .into(),
-                        );
-                    }
-                    kind => {
-                        let count = def.objective.count;
-                        let mut active = crate::quests::ActiveQuest::default();
-                        if kind == "visit" {
-                            active.visited = def
-                                .objective
-                                .target
-                                .split_whitespace()
-                                .take(count as usize)
-                                .map(crate::quests::normalize_target)
-                                .collect();
-                        } else {
-                            active.progress = count;
-                        }
-                        log.accept(&id);
-                        if let Some(entry) = log.states.get_mut(&id) {
-                            *entry = active;
-                        }
-                    }
-                },
-                "done" => {
-                    log.states.remove(&id);
-                    if !log.done.iter().any(|d| d == &id) {
-                        log.done.push(id.clone());
-                    }
-                }
-                "not_taken" | "reset" => {
-                    log.states.remove(&id);
-                    log.done.retain(|d| d != &id);
-                }
-                other => {
-                    warnings.push(format!(
-                        "quest_force: estado '{other}' inválido (active|ready|done|not_taken)"
-                    ));
-                    return false;
-                }
-            }
-            true
+        DebugOp::QuestForce(id, _state) => {
+            warnings.push(format!("quest_force '{id}': as quests sao do JOGO (Lua)"));
+            false
         }
-        DebugOp::QuestProgress(id, n) => {
-            let Some(mut log) = world.get_resource_mut::<crate::quests::QuestLog>() else {
-                warnings.push("sem QuestLog — quest_progress ignorado".into());
-                return false;
-            };
-            let Some(def) = log.def(&id).cloned() else {
-                warnings.push(format!("quest '{id}' não existe"));
-                return false;
-            };
-            let Some(active) = log.states.get_mut(&id) else {
-                warnings.push(format!(
-                    "quest '{id}' não está ativa (quest_force '{id}', 'active')"
-                ));
-                return false;
-            };
-            match def.objective.kind.as_str() {
-                "kill" => active.progress = n,
-                "visit" => {
-                    active.visited = def
-                        .objective
-                        .target
-                        .split_whitespace()
-                        .take(n as usize)
-                        .map(crate::quests::normalize_target)
-                        .collect();
-                }
-                _ => {
-                    warnings.push("collect é vault-driven: usa viber.debug.vault_set".into());
-                    return false;
-                }
-            }
-            true
+        DebugOp::QuestProgress(id, _n) => {
+            warnings.push(format!("quest_progress '{id}': as quests sao do JOGO (Lua)"));
+            false
         }
-        DebugOp::VaultSet(what, n) => match world.get_resource_mut::<crate::economy::Vault>() {
-            Some(mut vault) => {
-                match what.as_str() {
-                    "gold" => vault.gold = n,
-                    "wood" => vault.wood = n,
-                    "stone" => vault.stone = n,
-                    _ => {
-                        vault.items.insert(what, n.min(99));
-                    }
-                }
-                true
-            }
-            None => {
-                warnings.push("vault indisponível — vault_set ignorado".into());
-                false
-            }
-        },
-        DebugOp::Take(what, n) => match world.get_resource_mut::<crate::economy::Vault>() {
-            Some(mut vault) => {
-                if vault.take(&what, n) {
-                    true
-                } else {
-                    warnings.push(format!("take: '{what}'×{n} — stock insuficiente"));
-                    false
-                }
-            }
-            None => {
-                warnings.push("vault indisponível — take ignorado".into());
-                false
-            }
-        },
+        DebugOp::VaultSet(what, _n) => {
+            warnings.push(format!("vault_set '{what}': o cofre e do JOGO (Lua)"));
+            false
+        }
+        DebugOp::Take(what, _n) => {
+            warnings.push(format!("take '{what}': o cofre e do JOGO (Lua)"));
+            false
+        }
         DebugOp::SkillLearn(id) => {
-            // Delta derivado da ÁRVORE (fonte da verdade) — o resource
-            // PlayerStatsResource pode nem existir numa app mínima.
-            let (old_stats, learned) = {
-                let Some(mut tree) = world.get_resource_mut::<crate::skills::SkillTree>() else {
-                    warnings.push("sem SkillTree — skill_learn ignorado".into());
-                    return false;
-                };
-                let old_stats = crate::skills::stats_from_learned(&tree.learned);
-                (old_stats, tree.learn(&id))
-            };
-            match learned {
-                Some(new_stats) => {
-                    apply_stats_delta(world, &old_stats, &new_stats, warnings);
-                    if let Some(mut res) =
-                        world.get_resource_mut::<crate::skills::PlayerStatsResource>()
-                    {
-                        res.0 = new_stats;
-                    }
-                    true
-                }
-                None => {
-                    warnings.push(format!(
-                        "skill '{id}': id desconhecido, sem pontos ou sem pré-requisitos"
-                    ));
-                    false
-                }
-            }
+            warnings.push(format!("skill_learn '{id}': os talentos sao do JOGO (Lua)"));
+            false
         }
-        DebugOp::SkillPoints(n) => match world.get_resource_mut::<crate::skills::SkillTree>() {
-            Some(mut tree) => {
-                tree.points = n;
-                true
-            }
-            None => {
-                warnings.push("sem SkillTree — skill_points ignorado".into());
-                false
-            }
-        },
+        DebugOp::SkillPoints(_n) => {
+            warnings.push("skill_points: os talentos sao do JOGO (Lua)".into());
+            false
+        }
         DebugOp::SkillReset => {
-            let (old_stats, new_stats) = {
-                let Some(mut tree) = world.get_resource_mut::<crate::skills::SkillTree>() else {
-                    warnings.push("sem SkillTree — skill_reset ignorado".into());
-                    return false;
-                };
-                let old_stats = crate::skills::stats_from_learned(&tree.learned);
-                let forgotten = tree.learned.len() as u32;
-                tree.learned.clear();
-                tree.points += forgotten;
-                (old_stats, crate::skills::PlayerStats::default())
-            };
-            apply_stats_delta(world, &old_stats, &new_stats, warnings);
-            if let Some(mut res) = world.get_resource_mut::<crate::skills::PlayerStatsResource>() {
-                res.0 = new_stats;
-            }
-            true
+            warnings.push("skill_reset: os talentos sao do JOGO (Lua)".into());
+            false
         }
         DebugOp::AiState(entity, state) => {
             let Some(state) = crate::ai::EnemyState::parse(&state) else {
@@ -5344,7 +4948,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             // mundo voltava a correr e as medições/hash deixavam de ser
             // determinísticos a seguir ao step.)
             let current = world
-                .get_resource::<crate::combat::BaseTimeScale>()
+                .get_resource::<crate::time_fx::BaseTimeScale>()
                 .map(|b| b.0)
                 .unwrap_or_else(|| world.resource::<Time<Virtual>>().relative_speed());
             // A speed a restaurar é a da PRIMEIRA chamada da cadeia — um
@@ -5591,7 +5195,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
 
 /// Speed base do jogo (o mesmo par Time/BaseTimeScale do `set_time_scale`).
 fn set_time_scale_value(world: &mut World, scale: f32) {
-    if let Some(mut base) = world.get_resource_mut::<crate::combat::BaseTimeScale>() {
+    if let Some(mut base) = world.get_resource_mut::<crate::time_fx::BaseTimeScale>() {
         base.0 = scale;
     }
     world
@@ -5641,44 +5245,6 @@ fn set_entity_health(
     .unwrap_or(false);
     if !applied {
         warnings.push(format!("{entity}: sem Health"));
-    }
-    applied
-}
-
-/// Delta de passivas ao herói (aprender/esquecer) — o mesmo caminho da
-/// compra na UI, para o speed/max_hp não ficarem órfãos do reset.
-fn apply_stats_delta(
-    world: &mut World,
-    old: &crate::skills::PlayerStats,
-    new: &crate::skills::PlayerStats,
-    warnings: &mut Vec<String>,
-) -> bool {
-    let Some(player) = find_player(world).map(|p| p.entity) else {
-        warnings.push("sem player — delta de skills ignorado".into());
-        return false;
-    };
-    // `apply_passive_delta` pede &mut Health E &mut Player — um EntityWorldMut
-    // não empresta os dois ao mesmo tempo; o delta espelha-se aqui por campo.
-    let applied = with_entity(world, player, warnings, |e| {
-        let hp_delta = new.max_hp_bonus - old.max_hp_bonus;
-        if hp_delta != 0.0
-            && let Some(mut health) = e.get_mut::<Health>()
-        {
-            health.max += hp_delta;
-            health.current = (health.current + hp_delta).clamp(0.0, health.max);
-        }
-        let ratio = new.speed_mult / old.speed_mult.max(f32::EPSILON);
-        if ratio != 1.0
-            && ratio.is_finite()
-            && let Some(mut player) = e.get_mut::<crate::player::Player>()
-        {
-            player.speed *= ratio;
-        }
-        true
-    })
-    .unwrap_or(false);
-    if !applied {
-        warnings.push("sem player — delta de skills ignorado".into());
     }
     applied
 }

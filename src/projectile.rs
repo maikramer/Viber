@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::combat::Corpse;
+use crate::corpse::Corpse;
 use crate::player::Player;
 use crate::vitals::Health;
 use crate::worldsys::EngineConfigs;
@@ -364,7 +364,7 @@ fn push_hit(out: &mut ImpactOut, entity: Entity, amount: f32, faction: &str, at:
 
 fn impact_burst(commands: &mut Commands, at: Vec3) {
     commands.spawn(crate::senses::NoisePing(at));
-    crate::particles::spawn_burst(commands, &crate::combat::hit_sparks_spec(), at, 8);
+    crate::particles::spawn_burst(commands, &crate::fx_specs::hit_sparks_spec(), at, 8);
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]

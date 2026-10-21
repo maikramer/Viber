@@ -105,6 +105,27 @@ pub fn hud_balloon_update(
     }
 }
 
+/// Escala do texto do balão pela acessibilidade (`A11y.subtitle_scale`).
+/// O tamanho base é o do spawn (`15 px`); sem o recurso (apps mínimas) não
+/// mexe.
+pub fn apply_subtitle_scale(
+    a11y: Option<Res<crate::a11y::A11y>>,
+    balloons: Query<&Children, With<HudBalloon>>,
+    mut fonts: Query<&mut TextFont>,
+) {
+    let Some(a11y) = a11y else {
+        return;
+    };
+    let px = crate::a11y::subtitle_px(15.0, &a11y);
+    for children in &balloons {
+        for child in children.iter() {
+            if let Ok(mut font) = fonts.get_mut(child) {
+                font.font_size = px.into();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

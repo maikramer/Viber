@@ -942,10 +942,8 @@ pub fn compile(lua: &mlua::Lua, source: &str, name: &str) -> Result<(), String> 
         .map_err(|error| error.to_string())
 }
 
-/// Quests: cada `*.json` do `quests_dir` PARSEIA contra `[QuestDef]` (o
-/// runtime faz warn+skip um ficheiro que não parseia — o jogo perde as
-/// quests em silêncio). As referências (`def.id` ↔ `dialogue-id`, alvos
-/// `kill`) são do [`crate::audit`], não daqui.
+/// Quests: cada `*.json` do `quests_dir` PARSEIA como array JSON. O esquema
+/// das quests é do JOGO (Vael); a engine só valida a sintaxe do ficheiro.
 fn check_quests(world_dir: &Path, config: &crate::config::GameConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
     let quests_dir = config.quests_dir_on(world_dir);
@@ -966,12 +964,11 @@ fn check_quests(world_dir: &Path, config: &crate::config::GameConfig) -> Vec<Fin
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        // O MESMO contrato do runtime (`load_quests_from_dir`): um ficheiro é
-        // um ARRAY de defs — o que o runtime ignora com warn aqui é ERRO.
-        let Ok(defs) = serde_json::from_str::<Vec<crate::quests::QuestDef>>(&text) else {
+        // O formato é do jogo; aqui só se exige um ARRAY JSON válido.
+        let Ok(defs) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
             findings.push(Finding::error(
                 "quest-parse",
-                format!("quests/{name}: JSON não parseia contra [QuestDef] (array de quests)"),
+                format!("quests/{name}: JSON não parseia como array de quests"),
             ));
             continue;
         };
