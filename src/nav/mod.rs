@@ -43,7 +43,7 @@ use bevy_landmass::prelude::*;
 use bevy_rerecast::prelude::*;
 
 pub use agent::{NavArchipelago, NavProfile};
-pub use tile::NavTile;
+pub use tile::{NavDirty, NavTile};
 
 /// Default agent radius (m) — the fattest creature in the example plus a
 /// little, so one navmesh serves every rig instead of one per species.
@@ -199,6 +199,7 @@ impl Plugin for NavPlugin {
         }
         app.insert_resource(config)
             .init_resource::<NavTile>()
+            .init_resource::<tile::NavDirty>()
             // The tag lands with the world, in `spawn::startup` — PreStartup
             // would run before any world exists and never see it.
             .add_systems(

@@ -32,6 +32,11 @@ pub const ROAD_BAND_BELOW: f32 = 3.0;
 /// take the road's price.
 pub const ROAD_BAND_ABOVE: f32 = 1.5;
 
+/// Sobe quando um prop estático parte. O tile volta a assar mesmo que a
+/// contagem de colisores não mude.
+#[derive(Resource, Default)]
+pub struct NavDirty(pub u64);
+
 /// State of the single navmesh tile.
 #[derive(Resource, Default)]
 pub struct NavTile {
@@ -43,6 +48,8 @@ pub struct NavTile {
     pub generating: bool,
     /// Tiles generated so far — the counter the tests and the profiler read.
     pub generations: u32,
+    /// Geração de [`NavDirty`] com que este tile foi assado.
+    pub baked_dirty: u64,
     /// How many static obstacles the live tile was baked with.
     ///
     /// The world does not exist all at once: colliders bake from glTF on a
@@ -91,6 +98,7 @@ pub fn retile_navmesh(
             super::backend::ObstacleFilter,
         ),
     >,
+    world_dirty: Res<NavDirty>,
 ) {
     if !config.enabled || terrain.is_none() {
         return;
@@ -110,10 +118,12 @@ pub fn retile_navmesh(
     };
     let here = player.translation().xz();
     let obstacle_count = obstacles.iter().count();
+    let dirty = world_dirty.0;
     let moved = tile
         .center
         .is_none_or(|center| here.distance(center) >= config.retile_margin);
-    let geometry_changed = tile.baked_obstacles != Some(obstacle_count);
+    let geometry_changed =
+        tile.baked_obstacles != Some(obstacle_count) || tile.baked_dirty != dirty;
     if !moved && !geometry_changed {
         return;
     }
@@ -145,6 +155,7 @@ pub fn retile_navmesh(
     tile.probe_cooldown = NAV_FAILURE_PROBE_SECS;
     tile.generations += 1;
     tile.baked_obstacles = Some(obstacle_count);
+    tile.baked_dirty = dirty;
     info!(
         "nav: tile #{} pedido em ({:.0}, {:.0}) — {} m de lado, {} obstáculos",
         tile.generations, here.x, here.y, config.tile_size, obstacle_count

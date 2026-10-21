@@ -440,6 +440,9 @@ pub fn remember_broken(world: &mut World, entity: Entity) {
         harvested.0.insert(name);
     }
     world.entity_mut(entity).remove::<Destructible>();
+    if let Some(mut dirty) = world.get_resource_mut::<crate::nav::NavDirty>() {
+        dirty.0 = dirty.0.wrapping_add(1);
+    }
 }
 
 /// Conjunto dos sistemas de colheita — permite ordenar OUTROS sistemas contra
