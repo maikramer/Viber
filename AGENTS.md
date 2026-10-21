@@ -499,6 +499,18 @@ viber debug prof --export [ficheiro.json]  # JSON completo para ficheiro
 viber debug prof --samples 10              # média/pior/melhor de N amostras — o
                                            #   `fps` de UMA amostra é instantâneo
                                            #   e oscila (12 vs 60 no mesmo mundo)
+viber debug prof --tab frames              # janela/p95, sparkline, hitches com
+                                           #   atribuição, memória e estado do trace
+viber debug prof --hitches [--hitch-ms 33] # picos recentes + topo do frame
+viber debug prof --record 10 --hz 2 -o perf.jsonl
+                                           # série temporal (JSONL) + resumo;
+                                           #   sem -o imprime as linhas
+viber debug trace [--seconds 10] [-o trace.json] [--format chrome|json]
+                                           # grava e exporta um trace; `chrome`
+                                           #   abre em ui.perfetto.dev
+viber debug trace --status                 # gravação actual / resumo do último
+viber debug trace --stop -o trace.json     # fecha uma gravação manual (--seconds 0)
+viber debug mark "checkpoint"              # marca no trace em curso
 viber debug click 400 300 [--button right]
 viber debug drag 289 300 380 300 [--steps 8]   # press → cursor em passos → release
                                            #   (splitters, sliders, gizmos, handles);
@@ -523,6 +535,20 @@ viber debug hash                           # hash do conteúdo do mundo (determi
 viber debug burst -o f.png --stats         # + veredicto numérico de flicker (luma/frame)
 viber debug logs [--level warn] [--grep nav]               # filtros client-side
 ```
+
+**Perfilar sem screenshots (2026-10-21):** o CLI cobre o ciclo completo.
+`prof --tab frames --json` dá a janela de frame-times, p95, a série, o topo do
+frame e os hitches com atribuição (nome/ms/% por sistema); `prof --hitches`
+imprime-os legíveis; `prof --record N -o perf.jsonl` grava a série e devolve
+um resumo (frame médio/pior, hitches novos, RSS, sistemas mais caros) — é o
+caminho para "o frame piora ao entrar na vila?" sem UI. `trace N -o t.json`
+grava spans por sistema/script/âncora + contadores por frame e exporta
+Chrome Trace Format (Perfetto); o `trace_status`/CLI imprime o resumo
+analítico (avg/p50/p95/p99/max, frames acima de 16.7/33.3/50 ms, top total e
+top max, hitches, contadores first→last) que a IA lê diretamente. `--seconds
+0` inicia uma gravação manual, `viber debug mark "…"` correlaciona eventos e
+`trace --stop` fecha/exporta. O limiar de hitch é `VIBER_HITCH_MS` (default
+50 ms) ou `--hitch-ms`.
 
 **Quatro capacidades (2026-09-14):** VER — `viber.debug.*` lê TUDO (vitals de
 qualquer entidade, FSM/IA, nav census, quest funda, terreno ao vivo, UI com
