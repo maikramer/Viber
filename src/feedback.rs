@@ -1503,7 +1503,7 @@ mod tests {
                 .get(&handle)
                 .unwrap();
             assert!(
-                clone.emissive.red > 4.0,
+                clone.emissive.red > HIT_FLASH_EMISSIVE * 0.9,
                 "flash aceso no clone: {:#?}",
                 clone.emissive
             );
