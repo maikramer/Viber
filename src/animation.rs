@@ -88,6 +88,11 @@ pub const LANDING_AIR_TIME: f32 = 0.25;
 /// Cooldown do hit-react por entidade (s): rajadas de dano no mesmo pack de
 /// frames fazem UMA reação de flinch, não um loop de tremores.
 pub const HIT_REACT_COOLDOWN: f32 = 0.4;
+/// Piso do peso de cada clip do blend de locomoção. O Bevy 0.20 acumula os
+/// clips com `interpolate(acc, novo, w / (w_acc + w))`: com idle e walk a
+/// peso 0 (corrida pura) o segundo passo é `0 / 0` e o NaN chega a todos os
+/// ossos — o herói e os NPCs desapareciam ou ficavam brancos a andar.
+pub const LOCOMOTION_MIN_WEIGHT: f32 = 1e-4;
 /// Clips de hit-react por ordem de preferência, em nomes NORMALIZADOS
 /// ([`normalize_clip_name`]). `Animator3D_Hit` (rigs retargetados) também
 /// normaliza para `hit`, logo as duas entradas cobrem os três spellings
@@ -842,12 +847,24 @@ fn drive_locomotion_blend(
     ];
     for (node, weight, _) in specs {
         if let Some(n) = graph.get_mut(node) {
-            n.weight = weight.max(0.0);
+            n.weight = weight.max(LOCOMOTION_MIN_WEIGHT);
         }
     }
-    let Ok((mut player, _)) = players.get_mut(animator.player) else {
+    let Ok((mut player, mut transitions)) = players.get_mut(animator.player) else {
         return;
     };
+    // O blend TEM de ser a `main_animation` do `AnimationTransitions`.
+    //
+    // Um one-shot (ataque, gesto, `hit`) entra por `transitions.play`, que
+    // passa a forçar o peso da main a 1 em cada frame (`advance_transitions`).
+    // Se o driver depois voltasse a tocar o blend por fora, a main antiga
+    // continuava a 1 para sempre: o rig ficava metade ataque/metade
+    // locomoção — o herói a deslizar em pose de combate, com as pernas
+    // paradas. Assumir a main aqui faz o fade-out do one-shot e o
+    // `expire_completed_transitions` pára o nó quando o fade acaba.
+    if transitions.get_main_animation() != Some(loco.blend) {
+        transitions.play(&mut player, loco.blend, CLIP_BLEND);
+    }
     for (node, _, scale) in specs {
         player.play(node).repeat().set_speed(scale).set_weight(1.0);
     }
@@ -1446,11 +1463,20 @@ pub struct AnimationPlugin;
 
 impl bevy::app::Plugin for AnimationPlugin {
     fn build(&self, app: &mut bevy::app::App) {
+        // O bind corre em `SpawnScene`, DEPOIS de o `WorldAssetRoot` virar a
+        // subárvore em entidades. No `Update` a cena nova ainda não existia e
+        // o `AnimationPlayer` fresco só era encontrado no frame seguinte — a
+        // troca de LOD renderizava um frame em T-pose (o "pisca" dos NPCs e
+        // criaturas ao cruzar 18/45 m). O `rearm_after_scene_swap` fica no
+        // `Update` (só insere `AnimatedScene`), por isso o bind daqui já o vê.
+        app.add_systems(
+            bevy::app::SpawnScene,
+            bind_animations.after(bevy::app::SceneSpawnerSystems::WorldInstanceSpawn),
+        );
         app.add_systems(
             bevy::app::Update,
             (
                 rearm_after_scene_swap,
-                bind_animations,
                 tick_animator_actions,
                 // O flinch corre antes dos drivers: um one-shot que ele toca
                 // bloqueia o `play_state` do driver no mesmo frame (`is_busy`).
@@ -1470,6 +1496,23 @@ impl bevy::app::Plugin for AnimationPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O acumulador do Bevy (`w / (w_acc + w)`, idle → walk → run) nunca
+    /// divide por zero com os pesos que o driver escreve, a qualquer
+    /// velocidade — corrida pura (idle = walk = 0) era um NaN por osso.
+    #[test]
+    fn locomotion_weights_never_zero_the_bevy_accumulator() {
+        let speeds = MotionSpeeds::HERO;
+        for i in 0..=400 {
+            let speed = i as f32 * 0.025;
+            let (idle, walk, run) = locomotion_weights(speed, MotionGates::HERO, speeds);
+            let mut acc = 0.0_f32;
+            for w in [idle, walk, run].map(|w| w.max(LOCOMOTION_MIN_WEIGHT)) {
+                acc += w;
+                assert!(acc > 0.0 && (w / acc).is_finite(), "speed {speed}: acc {acc}");
+            }
+        }
+    }
 
     #[test]
     fn locomotion_blend_is_continuous_between_idle_and_run() {
@@ -2162,6 +2205,114 @@ mod tests {
         assert_eq!(
             world.get::<CharacterAnimator>(owner).unwrap().current,
             Some(walk)
+        );
+    }
+
+    #[test]
+    fn test_locomotion_blend_claims_the_main_animation() {
+        // Regressão: um one-shot terminado continuava a ser a `main_animation`
+        // do `AnimationTransitions`, que lhe forçava peso 1 em cada frame. O
+        // driver de locomoção tocava o blend por fora e o rig ficava metade
+        // ataque/metade marcha para sempre (o herói a deslizar em pose de
+        // combate). O blend tem de assumir a main e o one-shot tem de sair no
+        // fim do fade.
+        use bevy::animation::graph::AnimationGraph;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<AnimationGraph>::default());
+        let mut graph = AnimationGraph::new();
+        let blend = graph.add_blend(1.0, graph.root);
+        let idle = graph.add_clip(Handle::default(), 1.0, blend);
+        let walk = graph.add_clip(Handle::default(), 0.0, blend);
+        let run = graph.add_clip(Handle::default(), 0.0, blend);
+        let attack = graph.add_clip(Handle::default(), 1.0, graph.root);
+        let handle = world.resource_mut::<Assets<AnimationGraph>>().add(graph);
+
+        let player = world
+            .spawn((
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimationGraphHandle(handle),
+            ))
+            .id();
+        let mut animator = animator(&["idle", "walk", "run", "attack"]);
+        animator.player = player;
+        animator.nodes = vec![idle, walk, run, attack];
+        animator.locomotion = Some(LocomotionBlendNodes {
+            blend,
+            idle,
+            walk,
+            run,
+        });
+        let owner = world.spawn(animator).id();
+
+        // O ataque entra pela transição (main = ataque).
+        with_animator(&mut world, owner, |a, p| {
+            assert!(play_action(a, p, attack, ACTION_BLEND, false));
+        });
+        assert_eq!(
+            world
+                .get::<AnimationTransitions>(player)
+                .unwrap()
+                .get_main_animation(),
+            Some(attack)
+        );
+
+        // O ataque acaba (`tick_animator_actions` limpa o `current`) e o
+        // driver volta a ligar o blend.
+        world
+            .get_mut::<CharacterAnimator>(owner)
+            .unwrap()
+            .action_time = 0.0;
+        world.get_mut::<CharacterAnimator>(owner).unwrap().current = None;
+        let mut state: SystemState<(
+            ResMut<Assets<AnimationGraph>>,
+            Query<&AnimationGraphHandle>,
+            Query<&mut CharacterAnimator>,
+            PlayerQuery,
+        )> = SystemState::new(&mut world);
+        {
+            let (mut graphs, handles, mut animators, mut players) =
+                state.get_mut(&mut world).expect("system state");
+            let mut anim = animators.get_mut(owner).unwrap();
+            let handle = handles.get(anim.player).unwrap().clone();
+            drive_locomotion_blend(
+                &mut anim,
+                &mut players,
+                &mut graphs,
+                &handle,
+                (1.0, 0.0, 0.0),
+                MotionSpeeds::HERO,
+                true,
+            );
+        }
+        state.apply(&mut world);
+        assert_eq!(
+            world
+                .get::<AnimationTransitions>(player)
+                .unwrap()
+                .get_main_animation(),
+            Some(blend),
+            "o blend de locomoção tem de assumir a main"
+        );
+
+        // Passado o fade, o ataque deixa de tocar: o rig é só locomoção.
+        let mut time = Time::<()>::default();
+        time.advance_by(CLIP_BLEND + Duration::from_millis(50));
+        world.insert_resource(time);
+        world
+            .run_system_once(bevy::animation::transition::advance_transitions)
+            .expect("advance_transitions");
+        world
+            .run_system_once(bevy::animation::transition::expire_completed_transitions)
+            .expect("expire_completed_transitions");
+        assert!(
+            !world
+                .get::<AnimationPlayer>(player)
+                .unwrap()
+                .is_playing_animation(attack),
+            "o one-shot terminado tem de ser parado depois do fade"
         );
     }
 
