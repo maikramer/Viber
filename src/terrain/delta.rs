@@ -19,8 +19,9 @@
 //! sempre) só as colunas cujo rect cruza [`DeltaGrid::bounds`].
 //!
 //! Determinismo: o bootstrap continua determinístico; as EDIÇÕES são
-//! runtime por definição (entram por script/bridge, não pelo XML) e NÃO
-//! vão para o save nesta versão — documentado no AGENTS.md.
+//! runtime por definição (entram por script/bridge, não pelo XML) e vão
+//! para o save em `terrain_patches` — um mundo editado em jogo mente se
+//! o load as esquecer.
 
 use bevy::math::{Vec2, Vec3};
 use bevy::prelude::Resource;
@@ -53,7 +54,9 @@ pub const EDITS_PER_FRAME: usize = 4;
 #[derive(Debug, Clone, PartialEq)]
 struct DeltaRect {
     min: Vec2,
-    texel: f32,
+    /// Passo do lattice em X e em Z. Num heightmap não quadrado não são iguais;
+    /// usar o mínimo dos dois desalinha a amostra da célula.
+    step: Vec2,
     cols: usize,
     rows: usize,
     data: Vec<f32>,
@@ -64,8 +67,8 @@ struct DeltaRect {
 impl DeltaRect {
     /// Bilinear dentro do recorte; `None` fora (a grid base responde).
     fn sample(&self, x: f32, z: f32) -> Option<f32> {
-        let fx = (x - self.min.x) / self.texel;
-        let fz = (z - self.min.y) / self.texel;
+        let fx = (x - self.min.x) / self.step.x;
+        let fz = (z - self.min.y) / self.step.y;
         if fx < 0.0 || fz < 0.0 || fx > (self.cols - 1) as f32 || fz > (self.rows - 1) as f32 {
             return None;
         }
@@ -82,7 +85,11 @@ impl DeltaRect {
     }
 
     fn max_corner(&self) -> Vec2 {
-        self.min + Vec2::new((self.cols - 1) as f32, (self.rows - 1) as f32) * self.texel
+        self.min
+            + Vec2::new(
+                (self.cols - 1) as f32 * self.step.x,
+                (self.rows - 1) as f32 * self.step.y,
+            )
     }
 
     /// min/max do sub-rectângulo que intersecta o box dado; `None` quando
@@ -95,12 +102,12 @@ impl DeltaRect {
         {
             return None;
         }
-        let i0 = (((min_x - self.min.x) / self.texel).floor().max(0.0)) as usize;
-        let j0 = (((min_z - self.min.y) / self.texel).floor().max(0.0)) as usize;
-        let i1 = (((max_x - self.min.x) / self.texel)
+        let i0 = (((min_x - self.min.x) / self.step.x).floor().max(0.0)) as usize;
+        let j0 = (((min_z - self.min.y) / self.step.y).floor().max(0.0)) as usize;
+        let i1 = (((max_x - self.min.x) / self.step.x)
             .ceil()
             .min((self.cols - 1) as f32)) as usize;
-        let j1 = (((max_z - self.min.y) / self.texel)
+        let j1 = (((max_z - self.min.y) / self.step.y)
             .ceil()
             .min((self.rows - 1) as f32)) as usize;
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -122,7 +129,63 @@ pub struct DeltaGrid {
     revision: u64,
 }
 
+/// Recorte gravável no save (alturas absolutas).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeltaPatch {
+    pub min: [f32; 2],
+    pub step: [f32; 2],
+    pub cols: u32,
+    pub rows: u32,
+    pub data: Vec<f32>,
+}
+
 impl DeltaGrid {
+    /// Cópia dos recortes para o save. Vazio quando ninguém editou o terreno.
+    pub fn export_patches(&self) -> Vec<DeltaPatch> {
+        self.rects
+            .iter()
+            .map(|rect| DeltaPatch {
+                min: rect.min.to_array(),
+                step: rect.step.to_array(),
+                cols: rect.cols as u32,
+                rows: rect.rows as u32,
+                data: rect.data.clone(),
+            })
+            .collect()
+    }
+
+    /// Repõe recortes gravados. Sobe a revisão para o mesher voltar a cozer.
+    pub fn import_patches(&mut self, patches: &[DeltaPatch]) {
+        if patches.is_empty() {
+            return;
+        }
+        for patch in patches {
+            if patch.cols < 2 || patch.rows < 2 {
+                continue;
+            }
+            let cols = patch.cols as usize;
+            let rows = patch.rows as usize;
+            if patch.data.len() != cols * rows || patch.data.iter().any(|h| !h.is_finite()) {
+                continue;
+            }
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for h in &patch.data {
+                lo = lo.min(*h);
+                hi = hi.max(*h);
+            }
+            self.rects.push(DeltaRect {
+                min: Vec2::from_array(patch.min),
+                step: Vec2::from_array(patch.step),
+                cols,
+                rows,
+                data: patch.data.clone(),
+                lo,
+                hi,
+            });
+        }
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Recorte de alturas ABSOLUTAS (metros) vindas do documento do mundo — o sync de
     /// `crate::scene` (pincéis de terreno do editor/agentes, undo/redo): as células
     /// `[i0, i0+cols) × [j0, j0+rows)` do lattice da grid. Entra como qualquer edição (o mais
@@ -147,7 +210,7 @@ impl DeltaGrid {
         }
         let rect = DeltaRect {
             min: grid.cell_center(i0, j0),
-            texel: grid.texel(),
+            step: Vec2::new(grid.step_x(), grid.step_z()),
             cols,
             rows,
             data,
@@ -184,7 +247,7 @@ impl DeltaGrid {
             lo = lo.min(r.min);
             hi = hi.max(r.max_corner());
         }
-        let pad = Vec2::splat(first.texel);
+        let pad = first.step;
         Some((lo - pad, hi + pad))
     }
 
@@ -254,8 +317,8 @@ fn overlaps(a: &DeltaRect, b: &DeltaRect) -> bool {
 fn union_cells(a: &DeltaRect, b: &DeltaRect) -> usize {
     let lo = a.min.min(b.min);
     let hi = a.max_corner().max(b.max_corner());
-    let cols = ((hi.x - lo.x) / a.texel).round() as usize + 1;
-    let rows = ((hi.y - lo.y) / a.texel).round() as usize + 1;
+    let cols = ((hi.x - lo.x) / a.step.x).round() as usize + 1;
+    let rows = ((hi.y - lo.y) / a.step.y).round() as usize + 1;
     cols.saturating_mul(rows)
 }
 
@@ -272,16 +335,16 @@ fn sample_below(older: &[DeltaRect], grid: &BrushGrid, p: Vec2) -> f32 {
 /// cobre), `a` preenche o resto e as células que nenhum cobre (cantos da
 /// bbox da união) recebem a vista de baixo — o que lá se via antes.
 fn grow_pair(a: &DeltaRect, b: &DeltaRect, below: impl Fn(Vec2) -> f32) -> DeltaRect {
-    let texel = a.texel;
+    let step = a.step;
     let lo = a.min.min(b.min);
     let hi = a.max_corner().max(b.max_corner());
-    let cols = ((hi.x - lo.x) / texel).round() as usize + 1;
-    let rows = ((hi.y - lo.y) / texel).round() as usize + 1;
+    let cols = ((hi.x - lo.x) / step.x).round() as usize + 1;
+    let rows = ((hi.y - lo.y) / step.y).round() as usize + 1;
     let mut data = Vec::with_capacity(cols * rows);
     let (mut lo_h, mut hi_h) = (f32::INFINITY, f32::NEG_INFINITY);
     for j in 0..rows {
         for i in 0..cols {
-            let p = lo + Vec2::new(i as f32, j as f32) * texel;
+            let p = lo + Vec2::new(i as f32 * step.x, j as f32 * step.y);
             let v = b
                 .sample(p.x, p.y)
                 .or_else(|| a.sample(p.x, p.y))
@@ -293,7 +356,7 @@ fn grow_pair(a: &DeltaRect, b: &DeltaRect, below: impl Fn(Vec2) -> f32) -> Delta
     }
     DeltaRect {
         min: lo,
-        texel,
+        step,
         cols,
         rows,
         data,
@@ -449,23 +512,27 @@ pub fn apply_edit(grid: &BrushGrid, deltas: &mut DeltaGrid, edit: &TerrainEdit) 
     let (at, radius) = edit.center_radius();
     let radius = radius.min(EDIT_MAX_RADIUS);
 
-    let texel = grid.texel();
+    let step = Vec2::new(grid.step_x(), grid.step_z());
     // Rect ancorado ao lattice da grid (origem em -world_size/2), com uma
     // célula de margem (o falloff chega a zero no raio, portanto a borda do
     // rect já é igual à base) e recortado ao mundo: fora dele não há mesh,
     // e um recorte distante faria o envelope da próxima fusão explodir.
     let origin = -grid.world_size() * 0.5;
-    let half = radius + texel;
-    let lo = (at - Vec2::splat(half)).max(Vec2::splat(origin - texel));
-    let hi = (at + Vec2::splat(half)).min(Vec2::splat(-origin + texel));
+    let margin = Vec2::new(radius + step.x, radius + step.y);
+    let lo = (at - margin).max(Vec2::splat(origin) - step);
+    let hi = (at + margin).min(Vec2::splat(-origin) + step);
     if lo.x >= hi.x || lo.y >= hi.y {
         return false;
     }
-    let snap = |v: f32, round: fn(f32) -> f32| origin + round((v - origin) / texel) * texel;
-    let min = Vec2::new(snap(lo.x, f32::floor), snap(lo.y, f32::floor));
-    let max = Vec2::new(snap(hi.x, f32::ceil), snap(hi.y, f32::ceil));
-    let cols = (((max.x - min.x) / texel).round() as usize) + 1;
-    let rows = (((max.y - min.y) / texel).round() as usize) + 1;
+    let snap =
+        |v: f32, step: f32, round: fn(f32) -> f32| origin + round((v - origin) / step) * step;
+    let min = Vec2::new(
+        snap(lo.x, step.x, f32::floor),
+        snap(lo.y, step.y, f32::floor),
+    );
+    let max = Vec2::new(snap(hi.x, step.x, f32::ceil), snap(hi.y, step.y, f32::ceil));
+    let cols = (((max.x - min.x) / step.x).round() as usize) + 1;
+    let rows = (((max.y - min.y) / step.y).round() as usize) + 1;
     if cols < 2 || rows < 2 || cols * rows > 1_048_576 {
         return false;
     }
@@ -477,7 +544,7 @@ pub fn apply_edit(grid: &BrushGrid, deltas: &mut DeltaGrid, edit: &TerrainEdit) 
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
     for j in 0..rows {
         for i in 0..cols {
-            let p = min + Vec2::new(i as f32, j as f32) * texel;
+            let p = min + Vec2::new(i as f32 * step.x, j as f32 * step.y);
             let cur = view.sample(p.x, p.y);
             let t = p.distance(at) / radius;
             let h = if t >= 1.0 {
@@ -505,7 +572,7 @@ pub fn apply_edit(grid: &BrushGrid, deltas: &mut DeltaGrid, edit: &TerrainEdit) 
         grid,
         DeltaRect {
             min,
-            texel,
+            step,
             cols,
             rows,
             data,

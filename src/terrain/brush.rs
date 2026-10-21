@@ -201,11 +201,11 @@ impl BrushGrid {
         self.step_x().min(self.step_z())
     }
 
-    fn step_x(&self) -> f32 {
+    pub(crate) fn step_x(&self) -> f32 {
         self.world_size / (self.width.max(2) - 1) as f32
     }
 
-    fn step_z(&self) -> f32 {
+    pub(crate) fn step_z(&self) -> f32 {
         self.world_size / (self.depth.max(2) - 1) as f32
     }
 
