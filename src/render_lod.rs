@@ -126,7 +126,11 @@ const LOD_HYSTERESIS: f32 = 0.08;
 /// Overridable with `VIBER_LOD_SWAP_BUDGET` (`0` disables the ladder without
 /// disabling the culling): the two halves of this plugin have very different
 /// costs, and telling them apart in a profile needs them to be separable.
-pub const MAX_LOD_SWAPS_PER_FRAME: usize = 24;
+/// Com o cross-fade de LOD os dois tiers convivem um instante, por isso o
+/// teto desce: um teleporte não duplica a VRAM de 24 cenas ao mesmo tempo.
+pub const MAX_LOD_SWAPS_PER_FRAME: usize = 12;
+/// Quanto tempo (s) o tier antigo fica por cima, em dither temporal.
+pub const LOD_CROSSFADE_SECS: f32 = 0.12;
 
 /// Resolved swap budget: `VIBER_LOD_SWAP_BUDGET`, else the default.
 fn swap_budget() -> usize {
