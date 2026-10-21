@@ -122,9 +122,9 @@ pub fn start_ragdolls(
         if by_kind.len() < 3 {
             continue;
         }
-        commands
-            .entity(animator.player)
-            .remove::<bevy::animation::graph::AnimationGraphHandle>();
+        // Não remover o handle AQUI: `freeze_ragdoll_graphs` corre depois no
+        // chain e precisa de o ler para inserir `FrozenAnimation`. A remoção
+        // antecipada (deferida) deixava o foot IK a mexer o ragdoll.
         let _ = root_xf;
         let mut bodies = Vec::new();
         let mut bones = Vec::new();
@@ -132,6 +132,7 @@ pub fn start_ragdolls(
         for (kind, bone, pos) in &by_kind {
             let body = commands
                 .spawn((
+                    RagdollBodyOf(entity),
                     RigidBody::Dynamic,
                     Collider::capsule_y(0.18, 0.12),
                     GravityScale(1.0),
@@ -223,6 +224,26 @@ pub fn drive_ragdolls(
     }
 }
 
+/// Corpo de ragdoll ligado ao cadáver que o originou. Se o cadáver for
+/// despawnado antes dos 2,5 s (corpse lifetime 1,4 s, troca de cena), o
+/// `RagdollActive` desaparecia com ele e os corpos ficavam para sempre no
+/// mundo da física.
+#[derive(Component)]
+pub struct RagdollBodyOf(pub Entity);
+
+/// Recolhe corpos cujo dono já não tem ragdoll ativo.
+pub fn reap_orphan_ragdoll_bodies(
+    mut commands: Commands,
+    bodies: Query<(Entity, &RagdollBodyOf)>,
+    owners: Query<(), With<RagdollActive>>,
+) {
+    for (body, owner) in &bodies {
+        if owners.get(owner.0).is_err() {
+            commands.entity(body).despawn();
+        }
+    }
+}
+
 /// Garante que um rig em ragdoll não volta a ser animado pelo grafo.
 pub fn freeze_ragdoll_graphs(
     mut commands: Commands,
@@ -245,7 +266,13 @@ impl Plugin for RagdollPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (start_ragdolls, freeze_ragdoll_graphs, drive_ragdolls).chain(),
+            (
+                start_ragdolls,
+                freeze_ragdoll_graphs,
+                drive_ragdolls,
+                reap_orphan_ragdoll_bodies,
+            )
+                .chain(),
         );
     }
 }
