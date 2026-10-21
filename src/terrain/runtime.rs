@@ -2294,25 +2294,19 @@ fn spawn_roads(
             texture_handle = Some(image.clone());
             material.base_color_texture = Some(image);
         }
-        let handle = materials.add(material);
-        if let Some(texture) = texture_handle {
-            watched.push(WatchedTexture::Standard {
-                material: handle.clone(),
-                texture,
-            });
-        }
-        let mesh_handle = meshes.add(to_bevy_mesh(&mesh));
-        world
-            .spawn((
-                Name::new(path.name.clone().unwrap_or_else(|| format!("road {i}"))),
-                Transform::default(),
-                Visibility::Inherited,
-                // estrada não projeta sombra dura — a sombra própria
-                // escurecia as bordas na relva (polish loop 6)
-                NotShadowCaster,
-                ChildOf(parent),
-            ))
-            .insert((Mesh3d(mesh_handle), MeshMaterial3d(handle)));
+        // estrada não projeta sombra dura — a sombra própria escurecia as
+        // bordas na relva (polish loop 6)
+        spawn_ground_surface(
+            world,
+            meshes,
+            materials,
+            &mesh,
+            material,
+            texture_handle,
+            Name::new(path.name.clone().unwrap_or_else(|| format!("road {i}"))),
+            parent,
+            watched,
+        );
     }
 
     // Fusion discs (junctions.ts): círculo opaco nas junções multi-braço
@@ -2335,27 +2329,21 @@ fn spawn_roads(
             texture_handle = Some(image.clone());
             material.base_color_texture = Some(image);
         }
-        let handle = materials.add(material);
-        if let Some(texture) = texture_handle {
-            watched.push(WatchedTexture::Standard {
-                material: handle.clone(),
-                texture,
-            });
-        }
-        let mesh_handle = meshes.add(to_bevy_mesh(&mesh));
-        world
-            .spawn((
-                Name::new(format!("junction {i}")),
-                Transform::default(),
-                Visibility::Inherited,
-                // Um decal transparente a 10 cm do chão que projecta sombra
-                // desenha a sua própria silhueta de volta no chão: era isso
-                // que dava o anel escuro à volta do disco do portão norte e
-                // o fazia ler como um objecto pousado na relva.
-                NotShadowCaster,
-                ChildOf(parent),
-            ))
-            .insert((Mesh3d(mesh_handle), MeshMaterial3d(handle)));
+        // Um decal transparente a 10 cm do chão que projecta sombra desenha
+        // a sua própria silhueta de volta no chão: era isso que dava o anel
+        // escuro à volta do disco do portão norte e o fazia ler como um
+        // objecto pousado na relva (o helper nunca projecta).
+        spawn_ground_surface(
+            world,
+            meshes,
+            materials,
+            &mesh,
+            material,
+            texture_handle,
+            Name::new(format!("junction {i}")),
+            parent,
+            watched,
+        );
     }
 
     // Ground decals (`<GroundDecal>`): plaza floors, market aprons — the
@@ -2378,27 +2366,119 @@ fn spawn_roads(
             texture_handle = Some(image.clone());
             material.base_color_texture = Some(image);
         }
-        let handle = materials.add(material);
-        if let Some(texture) = texture_handle {
+        spawn_ground_surface(
+            world,
+            meshes,
+            materials,
+            &mesh,
+            material,
+            texture_handle,
+            Name::new(
+                dec.name
+                    .clone()
+                    .unwrap_or_else(|| format!("ground decal {i}")),
+            ),
+            parent,
+            watched,
+        );
+    }
+}
+
+/// Partição de uma fita do chão pelo alpha das cores de vértice: triângulos
+/// com os três vértices a alpha 1 vão para o miolo OPACO, os da rampa de
+/// feather para a borda blended, e os de alpha 0 (as saias) saem — não
+/// desenhavam nada e custavam rasterização.
+///
+/// Os buffers de vértices são partilhados por cópia; só os índices se
+/// dividem. Sem cores de vértice, tudo é miolo.
+fn split_ground_surface(
+    data: &super::mesh::ChunkMeshData,
+) -> (super::mesh::ChunkMeshData, super::mesh::ChunkMeshData) {
+    const OPAQUE: f32 = 0.999;
+    const INVISIBLE: f32 = 0.001;
+    let alpha = |i: u32| data.colors.get(i as usize).map_or(1.0, |c| c[3]);
+    let mut core = Vec::new();
+    let mut edge = Vec::new();
+    for tri in data.indices.chunks_exact(3) {
+        let a = [alpha(tri[0]), alpha(tri[1]), alpha(tri[2])];
+        if a.iter().all(|&v| v >= OPAQUE) {
+            core.extend_from_slice(tri);
+        } else if a.iter().any(|&v| v > INVISIBLE) {
+            edge.extend_from_slice(tri);
+        }
+    }
+    let with = |indices: Vec<u32>| super::mesh::ChunkMeshData {
+        positions: data.positions.clone(),
+        normals: data.normals.clone(),
+        uvs: data.uvs.clone(),
+        colors: data.colors.clone(),
+        indices,
+    };
+    (with(core), with(edge))
+}
+
+/// Spawna uma superfície do chão (fita de estrada, disco de junção, decal)
+/// como borda blended + miolo opaco.
+///
+/// Tudo blended custava ~2,2 ms de GPU na praça (RTX 4050, 1280×720): as
+/// fitas cobrem boa parte do ecrã e o passe transparente voltava a fazer
+/// PBR completo por cima do terreno, sem prepass nem early-z. Com o miolo
+/// opaco o terreno por baixo deixa de ser sombreado e o blend fica só na
+/// rampa de feather. A entidade nomeada guarda a borda e o material
+/// original (o que os sistemas procuram); o miolo é um filho `…/core`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_ground_surface(
+    world: &mut World,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    data: &super::mesh::ChunkMeshData,
+    material: StandardMaterial,
+    texture: Option<Handle<Image>>,
+    name: Name,
+    parent: Entity,
+    watched: &mut Vec<WatchedTexture>,
+) {
+    let (core, edge) = split_ground_surface(data);
+    let core_material = (!core.indices.is_empty()).then(|| {
+        materials.add(StandardMaterial {
+            alpha_mode: bevy::material::AlphaMode::Opaque,
+            ..material.clone()
+        })
+    });
+    let handle = materials.add(material);
+    for material in std::iter::once(&handle).chain(core_material.as_ref()) {
+        if let Some(texture) = texture.clone() {
             watched.push(WatchedTexture::Standard {
-                material: handle.clone(),
+                material: material.clone(),
                 texture,
             });
         }
-        let mesh_handle = meshes.add(to_bevy_mesh(&mesh));
-        world
-            .spawn((
-                Name::new(
-                    dec.name
-                        .clone()
-                        .unwrap_or_else(|| format!("ground decal {i}")),
-                ),
-                Transform::default(),
-                Visibility::Inherited,
-                NotShadowCaster,
-                ChildOf(parent),
-            ))
-            .insert((Mesh3d(mesh_handle), MeshMaterial3d(handle)));
+    }
+    let core_name = format!("{}/core", name.as_str());
+    let mut root = world.spawn((
+        name,
+        Transform::default(),
+        Visibility::Inherited,
+        NotShadowCaster,
+        ChildOf(parent),
+    ));
+    if !edge.indices.is_empty() {
+        root.insert((
+            Mesh3d(meshes.add(to_bevy_mesh(&edge))),
+            MeshMaterial3d(handle),
+        ));
+    }
+    let root = root.id();
+    if let Some(core_material) = core_material {
+        world.spawn((
+            Name::new(core_name),
+            Transform::default(),
+            Visibility::Inherited,
+            NotShadowCaster,
+            ChildOf(root),
+            Mesh3d(meshes.add(to_bevy_mesh(&core))),
+            MeshMaterial3d(core_material),
+        ));
     }
 }
 
@@ -2497,6 +2577,32 @@ fn load_heightmap(
 
 #[cfg(test)]
 mod tests {
+    /// Miolo (alpha 1 nos três vértices) opaco, rampa blended, saias (alpha
+    /// 0) fora — e sem cores de vértice tudo é miolo.
+    #[test]
+    fn ground_surface_splits_core_edge_and_drops_skirts() {
+        use super::super::mesh::ChunkMeshData;
+        let colors = |a: [f32; 7]| a.iter().map(|&a| [1.0, 1.0, 1.0, a]).collect();
+        let data = ChunkMeshData {
+            positions: vec![[0.0; 3]; 7],
+            normals: vec![[0.0, 1.0, 0.0]; 7],
+            uvs: vec![[0.0; 2]; 7],
+            colors: colors([1.0, 1.0, 1.0, 0.4, 0.0, 0.0, 0.0]),
+            // miolo · rampa (1, 1, 0.4) · saia (0, 0, 0)
+            indices: vec![0, 1, 2, 1, 2, 3, 4, 5, 6],
+        };
+        let (core, edge) = super::split_ground_surface(&data);
+        assert_eq!(core.indices, vec![0, 1, 2]);
+        assert_eq!(edge.indices, vec![1, 2, 3]);
+        let bare = ChunkMeshData {
+            colors: Vec::new(),
+            ..data
+        };
+        let (core, edge) = super::split_ground_surface(&bare);
+        assert_eq!(core.indices.len(), 9);
+        assert!(edge.indices.is_empty());
+    }
+
     /// Os albedos têm de ser os primeiros na fila: o material do chão não
     /// desenha enquanto falta um, e o `IoTaskPool` só corre 4 loads de cada
     /// vez. Um `height.ktx2` ausente não pode furar a fila.

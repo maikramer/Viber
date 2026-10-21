@@ -102,7 +102,7 @@ mod tests {
     fn flat_runtime() -> TerrainRuntime {
         let n = 33usize;
         let raw: Vec<u16> = (0..n * n)
-            .map(|i| ((10.0f32 / 50.0) * 65535.0).round() as u16)
+            .map(|_| ((10.0f32 / 50.0) * 65535.0).round() as u16)
             .collect();
         let grid = BrushGrid::new(raw, n, n, 16.0, 50.0, 1.0).expect("grid");
         TerrainRuntime {
