@@ -260,8 +260,16 @@ pub fn collect_counters(world: &mut World) -> GameCounters {
     let mut q_colliders = world.query_filtered::<(), With<bevy_rapier3d::prelude::Collider>>();
     let colliders = q_colliders.iter(world).count();
 
-    let mut q_sinks =
-        world.query_filtered::<(), Or<(With<AudioSink>, With<bevy::audio::SpatialAudioSink>)>>();
+    // O engine toca por kira (`LoopInstance`); o bevy_audio do Bevy não tem
+    // players, por isso contar `AudioSink` dava sempre 0.
+    let mut q_sinks = world.query_filtered::<
+        (),
+        Or<(
+            With<crate::music::LoopInstance>,
+            With<AudioSink>,
+            With<bevy::audio::SpatialAudioSink>,
+        )>,
+    >();
     let audio_sinks = q_sinks.iter(world).count();
 
     let mut q_shadow_lights = world.query::<&PointLight>();

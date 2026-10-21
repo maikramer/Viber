@@ -199,11 +199,12 @@ pub fn run_profiler_cmd(world: &mut World, cmd: &str) -> String {
     }
     if let Some(raw) = cmd.strip_prefix("hitch:") {
         let ms: f32 = raw.trim().parse().unwrap_or(0.0);
-        if ms.is_finite() && ms > 0.0 {
-            if let Some(mut log) = world.get_resource_mut::<super::HitchLog>() {
-                log.threshold_ms = ms;
-                return format!("hitch ≥ {ms:.0} ms");
-            }
+        if ms.is_finite()
+            && ms > 0.0
+            && let Some(mut log) = world.get_resource_mut::<super::HitchLog>()
+        {
+            log.threshold_ms = ms;
+            return format!("hitch ≥ {ms:.0} ms");
         }
         return "limiar de hitch inválido".into();
     }

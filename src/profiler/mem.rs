@@ -52,8 +52,8 @@ fn parse_status(text: &str) -> MemorySnapshot {
         };
         let mut fields = rest.split_whitespace();
         match key {
-            "VmRSS" => out.rss_mb = fields.next().and_then(|v| kb_to_mb(v)),
-            "VmHWM" => out.peak_rss_mb = fields.next().and_then(|v| kb_to_mb(v)),
+            "VmRSS" => out.rss_mb = fields.next().and_then(kb_to_mb),
+            "VmHWM" => out.peak_rss_mb = fields.next().and_then(kb_to_mb),
             "Threads" => out.threads = fields.next().and_then(|v| v.parse().ok()),
             _ => {}
         }

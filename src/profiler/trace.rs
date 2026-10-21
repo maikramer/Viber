@@ -552,31 +552,36 @@ pub fn export(path: Option<PathBuf>, format: &str) -> std::io::Result<TraceExpor
         finished
     };
     let path = path.unwrap_or_else(default_path);
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(&path)?;
-    let mut out = BufWriter::new(file);
-    match format {
-        "chrome" => write_chrome(&mut out, &finished)?,
-        _ => write_native(&mut out, &finished)?,
-    }
-    out.flush()?;
-    drop(out);
-    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let result = TraceExport {
-        path: path.display().to_string(),
-        bytes,
-        frames: finished.frames.len(),
-        events: finished.events.len(),
-        truncated: finished.truncated,
-    };
+    // O `finished` saiu de `state.last`; se qualquer passo de IO falhar tem
+    // de VOLTAR. Antes, um caminho inválido/disco cheio destruía a única
+    // gravação e a retry dizia "nenhum trace gravado".
+    let result = (|| -> std::io::Result<TraceExport> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(&path)?;
+        let mut out = BufWriter::new(file);
+        match format {
+            "chrome" => write_chrome(&mut out, &finished)?,
+            _ => write_native(&mut out, &finished)?,
+        }
+        out.flush()?;
+        drop(out);
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Ok(TraceExport {
+            path: path.display().to_string(),
+            bytes,
+            frames: finished.frames.len(),
+            events: finished.events.len(),
+            truncated: finished.truncated,
+        })
+    })();
     // Devolve o trace ao estado: exportar não o consome (dá para exportar
-    // chrome e json da mesma gravação).
+    // chrome e json da mesma gravação) e falhar também não.
     lock().last = Some(finished);
-    Ok(result)
+    result
 }
 
 fn normalize_format(format: &str) -> std::io::Result<&'static str> {
