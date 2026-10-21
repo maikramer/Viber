@@ -92,13 +92,17 @@ const GROUND_STRENGTH: f32 = 0.55;
 /// Fica OPT-IN até existir o histórico temporal do passe (reprojeção + clamp
 /// de vizinhança — o próximo trabalho de verdade).
 pub fn water_ssr_requested() -> bool {
-    matches!(
-        std::env::var("VIBER_WATER_SSR")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
+    match std::env::var("VIBER_WATER_SSR")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("0" | "false" | "off" | "no") => false,
+        Some("1" | "true" | "yes" | "on") => true,
+        // Preset `alto`: o histórico temporal já acumula o reflexo. O
+        // equilibrado fica de fora — o passe custa e o orçamento é 11 ms.
+        _ => crate::graphics::preset() == crate::graphics::GraphicsPreset::Alto,
+    }
 }
 
 /// Marcador na câmara 3D que recebe o passe (postfx insere com o gate on).
@@ -155,6 +159,7 @@ struct SsrParams {
 @group(0) @binding(5) var<uniform> ssr_params: SsrParams;
 // histórico do reflexo: rgb = cor acumulada, a = confiança do raio
 @group(0) @binding(6) var ssr_history: texture_2d<f32>;
+@group(0) @binding(7) var motion_vectors: texture_2d<f32>;
 
 struct FullscreenVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -188,6 +193,14 @@ fn px_of(uv: vec2<f32>) -> vec2<i32> {
     return clamp(p, vec2<i32>(0i), vec2<i32>(ssr_view.viewport.xy) - vec2<i32>(1i));
 }
 
+fn history_uv(uv: vec2<f32>) -> vec2<f32> {
+    // O prepass do Bevy grava (clip - clip_anterior) * (0.5, -0.5),
+    // que já é um delta de UV. Sem motion (textura a zero) o histórico
+    // fica no mesmo píxel.
+    let mv = textureLoad(motion_vectors, px_of(uv), 0).xy;
+    return clamp(uv - mv, vec2<f32>(0.0), vec2<f32>(1.0));
+}
+
 fn hash12(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
@@ -210,7 +223,7 @@ fn edge_fade(uv: vec2<f32>, fade_px: f32) -> f32 {
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     let uv = in.uv;
-    let src = textureSampleLevel(input_color, samp, uv, 0.0);
+    var src = textureSampleLevel(input_color, samp, uv, 0.0);
     if (ssr_params.count < 0.5) { return SsrOut(src, vec4<f32>(0.0)); }
 
     let d0 = textureLoad(prepass_depth, px_of(uv), 0);
@@ -238,6 +251,13 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     let ground_m = wet * smoothstep(0.5, 0.8, n_world.y) * (1.0 - water_m);
     let effect = max(ssr_params.strength * water_m, ground_m);
     if (effect < 0.003) { return SsrOut(src, vec4<f32>(0.0)); }
+    // Refração barata: um sample da cor da cena desviado pela normal,
+    // em vez da cor do corpo. Um tap, sem segundo raymarch.
+    if (water_m > 0.05) {
+        let refr_uv = clamp(uv + n_world.xz * 0.012 * water_m, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refr = textureSampleLevel(input_color, samp, refr_uv, 0.0).rgb;
+        src = vec4<f32>(mix(src.rgb, refr, 0.45 * water_m), src.a);
+    }
 
     // 3) raio refletido; fade SUAVE perto do horizonte do reflexo — o corte
     //    duro em r_dir.y fazia o reflexo piscar nas cristas das ondas.
@@ -313,7 +333,7 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     }
     // sem hit NESTE frame: o histórico decai suavemente (o blink de
     // hit/miss vira fade — é o coração do anti-flicker).
-    let hist_nh = textureSampleLevel(ssr_history, samp, uv, 0.0);
+    let hist_nh = textureSampleLevel(ssr_history, samp, history_uv(uv), 0.0);
     if (!hit) {
         // SEGURA a cor (o reflexo não pode desaparecer por um miss
         // intermitente) e só a confiança decai devagar: sem hit durante
@@ -357,7 +377,7 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     // por frame contra 1.6-3.5 sem o passe). Aqui o reflexo converge por
     // mistura adaptativa: diferença grande = confia no atual (sem fantasma),
     // diferença pequena = acumula (mata o piscar).
-    let hist_prev = textureSampleLevel(ssr_history, samp, uv, 0.0);
+    let hist_prev = textureSampleLevel(ssr_history, samp, history_uv(uv), 0.0);
     let cur = vec4<f32>(refl, hit_conf);
     let diff = length(hist_prev.rgb - cur.rgb) + abs(hist_prev.a - cur.a) * 0.5;
     let alpha = clamp(0.3 + (1.0 - exp(-diff * 3.0)) * 0.55, 0.3, 0.9);
@@ -378,6 +398,8 @@ struct WaterSsrPipeline {
     sampler: Sampler,
     variants: Variants<RenderPipeline, WaterSsrSpecializer>,
     params_buf: Buffer,
+    /// 1×1 a zero quando a câmara não tem motion vectors.
+    motion_fallback: TextureView,
 }
 
 /// Chave de especialização do pipeline (formato do alvo — HDR/LDR).
@@ -531,6 +553,16 @@ fn init_pipeline(
             },
             count: None,
         },
+        BindGroupLayoutEntry {
+            binding: 7,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
     ];
     let layout = BindGroupLayoutDescriptor::new("water_ssr_layout", &entries);
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
@@ -561,10 +593,12 @@ fn init_pipeline(
         }),
         ..Default::default()
     };
+    let motion_fallback = create_history(&render_device, 1, 1).view;
     commands.insert_resource(WaterSsrPipeline {
         layout,
         sampler,
         variants: Variants::new(WaterSsrSpecializer, desc),
+        motion_fallback,
         params_buf: render_device.create_buffer(&BufferDescriptor {
             label: Some("water_ssr_params"),
             size: 176,
@@ -716,6 +750,11 @@ fn prepare_bind_groups(
             queue.write_buffer(&g.view_buf, 0, &view_bytes);
             let hist_read = g.hist[g.parity].view.clone();
             let view_buf_g = g.view_buf.clone();
+            let motion = prepass
+                .motion_vectors
+                .as_ref()
+                .map(|attachment| attachment.texture.default_view.clone())
+                .unwrap_or_else(|| pipeline.motion_fallback.clone());
             let make = |texture: &TextureView| {
                 (
                     texture.id(),
@@ -730,6 +769,7 @@ fn prepare_bind_groups(
                             view_buf_g.as_entire_binding(),
                             pipeline.params_buf.as_entire_binding(),
                             &hist_read,
+                            &motion,
                         )),
                     ),
                 )
@@ -750,6 +790,11 @@ fn prepare_bind_groups(
                 create_history(&render_device, w, h),
             ];
             let hist_read = hist[0].view.clone();
+            let motion = prepass
+                .motion_vectors
+                .as_ref()
+                .map(|attachment| attachment.texture.default_view.clone())
+                .unwrap_or_else(|| pipeline.motion_fallback.clone());
             let make = |texture: &TextureView| {
                 (
                     texture.id(),
@@ -764,6 +809,7 @@ fn prepare_bind_groups(
                             view_buf.as_entire_binding(),
                             pipeline.params_buf.as_entire_binding(),
                             &hist_read,
+                            &motion,
                         )),
                     ),
                 )
