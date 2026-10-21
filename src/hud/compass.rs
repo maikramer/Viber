@@ -195,17 +195,20 @@ pub fn hud_compass_landmarks_update(
         .map(|b| {
             let (dx, dz) = (b.position.x - origin.x, b.position.z - origin.z);
             (
-                bearing_delta(heading, world_bearing_deg(dx, dz)).abs(),
+                // Com sinal: o offset do losango é o mesmo das letras.
+                // `.abs()` punha um marco à esquerda do olhar do lado direito.
+                bearing_delta(heading, world_bearing_deg(dx, dz)),
                 origin.distance(b.position),
                 b.tower,
             )
         })
-        .filter(|(delta, _, _)| *delta < 55.0)
+        .filter(|(delta, _, _)| delta.abs() < 55.0)
         .collect();
     // Mais alinhado com o olhar primeiro; atalaias ganham empates (é a
     // estrutura da exploração — a torre manda sobre o mojão atrás dela).
     ranked.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
+        a.0.abs()
+            .total_cmp(&b.0.abs())
             .then_with(|| b.2.cmp(&a.2))
             .then_with(|| a.1.total_cmp(&b.1))
     });
