@@ -1130,6 +1130,7 @@ fn build_static_scene(
                 &group.spec.template_urls,
                 bevy::math::Affine3A::IDENTITY,
                 &format!("inst-{id}"),
+                0,
             );
             engine_outputs.push((recipe, output));
             continue;
@@ -1157,6 +1158,7 @@ fn build_static_scene(
             &group.spec.template_urls,
             parent_world,
             &format!("inst-{id}"),
+            0,
         );
         let recipe = doc.node_mut(&target).expect("resolvido");
         recipe.tag = "Scatter".into();
@@ -1395,6 +1397,7 @@ pub(crate) fn generated_group(
     template_urls: &[String],
     parent_world: bevy::math::Affine3A,
     name_prefix: &str,
+    name_start: usize,
 ) -> XmlNode {
     let mut group = XmlNode::new("Group")
         .with_attr("name", format!("spawn/{id}"))
@@ -1411,7 +1414,7 @@ pub(crate) fn generated_group(
         group.push_child(static_instance_node(
             template,
             &local,
-            &format!("{name_prefix}-{i:04}"),
+            &format!("{name_prefix}-{:04}", name_start + i),
         ));
     }
     group

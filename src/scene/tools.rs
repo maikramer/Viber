@@ -139,6 +139,7 @@ pub fn scatter(world: &mut World, selector: &str) -> Result<ToolOutput> {
         &spec.template_urls,
         parent_world,
         &format!("inst-{id}"),
+        0,
     );
     let parent_selector = doc.selector(&parent);
     let mut ops = vec![EditOp::Insert {
@@ -235,6 +236,11 @@ pub fn scatter_in_region(
         None => node.parent().expect("não-raiz"),
     };
     let parent_world = node_frame(&doc, &parent, &frames);
+    let name_start = existing
+        .as_ref()
+        .and_then(|group| doc.node(group))
+        .map(|group| group.children.len())
+        .unwrap_or(0);
     let output = crate::bake::generated_group(
         &recipe,
         &id,
@@ -242,13 +248,27 @@ pub fn scatter_in_region(
         &spec.template_urls,
         parent_world,
         &format!("inst-{id}"),
+        name_start,
     );
     let mut ops = Vec::new();
-    for child in &output.children {
+    if existing.is_some() {
+        for child in &output.children {
+            ops.push(EditOp::Insert {
+                parent: doc.selector(&parent),
+                index: None,
+                xml: fragment_xml(std::slice::from_ref(child)),
+            });
+        }
+    } else {
+        // Sem grupo, o dab tem de criar o `<Group generated-by>`. Inserir só
+        // os filhos deixava a receita sem grupo e o dab seguinte repetia
+        // `inst-…-0000`.
+        let scatter_parent = node.parent().expect("não-raiz");
+        let index = node.path.last().copied().unwrap_or(0) + 1;
         ops.push(EditOp::Insert {
-            parent: doc.selector(&parent),
-            index: None,
-            xml: fragment_xml(std::slice::from_ref(child)),
+            parent: doc.selector(&scatter_parent),
+            index: Some(index),
+            xml: fragment_xml(std::slice::from_ref(&output)),
         });
     }
     Ok(ToolOutput {
@@ -555,7 +575,15 @@ pub fn node_frame(
                 .find(|(_, target)| *target == current.file)
                 .map(|(path, _)| NodeRef::new(file, path.clone()))
         });
-        match includer.and_then(|include| include.parent()) {
+        let Some(include) = includer else {
+            return Affine3A::IDENTITY;
+        };
+        // A pose do `<Include>` é o referencial dos filhos. Saltar para o pai
+        // gravava o scatter no espaço errado.
+        if let Some(frame) = frames.get(&doc.origin_of(&include)) {
+            return *frame;
+        }
+        match include.parent() {
             Some(parent) => current = parent,
             None => return Affine3A::IDENTITY,
         }
