@@ -502,11 +502,55 @@ fn quest_debug_hostile(
     let Ok((_pe, player_global, mut transform)) = players.single_mut() else {
         return;
     };
-    let player_pos = player_global.translation();
-    // hostil = script de inimigo/boss (townsfolk/POIs ficam de fora)
+    let Some(target) = nearest_hostile_pos(&creatures, player_global.translation()) else {
+        toasts.write(ScriptToast("QA: nenhuma criatura hostil ativa".into()));
+        return;
+    };
+    place_hero_near(&mut transform, target, terrain.as_deref(), 1.8);
+    toasts.write(ScriptToast("QA: teleport à criatura mais próxima".into()));
+}
+
+fn place_hero_near(
+    transform: &mut Transform,
+    target: Vec3,
+    terrain: Option<&crate::terrain::runtime::TerrainRuntime>,
+    offset: f32,
+) {
+    let x = target.x + offset;
+    let z = target.z + offset;
+    let y = terrain.map(|t| t.sample(x, z)).unwrap_or(target.y);
+    transform.translation = Vec3::new(x, y + 0.1, z);
+}
+
+/// Hostil = script de inimigo/boss (townsfolk e POIs ficam de fora) e sem
+/// interação de colheita.
+fn is_qa_harvest_label(label: &str) -> bool {
+    let label = label.to_lowercase();
+    [
+        "cortar",
+        "minerar",
+        "colher",
+        "abrir",
+        "revistar",
+        "vazio",
+        "ler",
+        "examinar",
+        "inspecionar",
+    ]
+    .into_iter()
+    .any(|needle| label.contains(needle))
+}
+
+fn nearest_hostile_pos(
+    creatures: &Query<
+        (&GlobalTransform, &LuaScriptRef, Option<&ScriptInteraction>),
+        (With<LuaScriptRef>, With<Health>, Without<Player>),
+    >,
+    player_pos: Vec3,
+) -> Option<Vec3> {
     let is_hostile =
         |path: &str| path.contains("enemies/") || path.contains("bosses/") || path.contains("boss");
-    let Some(target) = creatures
+    creatures
         .iter()
         .filter(|(_, script, interaction)| interaction.is_none() && is_hostile(&script.path))
         .min_by(|(a, _, _), (b, _, _)| {
@@ -515,15 +559,6 @@ fn quest_debug_hostile(
                 .total_cmp(&b.translation().distance_squared(player_pos))
         })
         .map(|(t, _, _)| t.translation())
-    else {
-        toasts.write(ScriptToast("QA: nenhuma criatura hostil ativa".into()));
-        return;
-    };
-    let x = target.x + 1.8;
-    let z = target.z + 1.8;
-    let y = terrain.as_ref().map(|t| t.sample(x, z)).unwrap_or(target.y);
-    transform.translation = Vec3::new(x, y + 0.1, z);
-    toasts.write(ScriptToast("QA: teleport à criatura mais próxima".into()));
 }
 
 /// Debug de QA (**F9**): teleporta o herói ao colhível/ponto de interação
@@ -544,14 +579,13 @@ fn quest_debug_harvest(
         return;
     };
     let player_pos = player_global.translation();
-    // exclui o último alvo para o ciclo avançar pela cadeia de vizinhos
+    // exclui o último alvo para o ciclo avançar pela cadeia de vizinhos.
+    // Árvore/pedra (cortar/minerar), baú (abrir/revistar/vazio), quadro e
+    // marcos (ler/examinar/colher). "Falar" fica de fora — isso é o F7.
     let previous = *last;
     let Some((target_entity, target_transform)) = interactions
         .iter()
-        .filter(|(_, _, interaction)| {
-            let label = interaction.label.to_lowercase();
-            label.contains("cortar") || label.contains("minerar")
-        })
+        .filter(|(_, _, interaction)| is_qa_harvest_label(&interaction.label))
         .filter(|(entity, _, _)| previous.is_none_or(|l| l != *entity))
         .min_by(|(_, a, _), (_, b, _)| {
             a.translation()
@@ -583,28 +617,38 @@ fn quest_debug_teleport(
     keys: Res<ButtonInput<KeyCode>>,
     mut players: Query<(Entity, &GlobalTransform, &mut Transform), With<Player>>,
     npcs: Query<(&GlobalTransform, &crate::recipes::spawn::DialogueNpc)>,
-    enemies: Query<(&GlobalTransform, &LuaScriptRef)>,
+    creatures: Query<
+        (&GlobalTransform, &LuaScriptRef, Option<&ScriptInteraction>),
+        (With<LuaScriptRef>, With<Health>, Without<Player>),
+    >,
     terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
     mut toasts: MessageWriter<ScriptToast>,
     mut cursor: Local<usize>,
 ) {
-    if !keys.just_pressed(KeyCode::F7) || npcs.is_empty() {
+    if !keys.just_pressed(KeyCode::F7) {
         return;
     }
-    if true {
-        let _ = enemies;
-    }
-    let Ok((_player_entity, _player_global, mut transform)) = players.single_mut() else {
+    let Ok((_player_entity, player_global, mut transform)) = players.single_mut() else {
         return;
     };
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if shift {
+        let Some(target) = nearest_hostile_pos(&creatures, player_global.translation()) else {
+            toasts.write(ScriptToast("QA: nenhuma criatura hostil ativa".into()));
+            return;
+        };
+        place_hero_near(&mut transform, target, terrain.as_deref(), 1.8);
+        toasts.write(ScriptToast("QA: teleport à criatura mais próxima".into()));
+        return;
+    }
+    if npcs.is_empty() {
+        return;
+    }
     let list: Vec<Vec3> = npcs.iter().map(|(t, _)| t.translation()).collect();
     let index = *cursor % list.len();
     *cursor += 1;
     let target = list[index];
-    let x = target.x + 1.6;
-    let z = target.z + 1.6;
-    let y = terrain.as_ref().map(|t| t.sample(x, z)).unwrap_or(target.y);
-    transform.translation = Vec3::new(x, y + 0.1, z);
+    place_hero_near(&mut transform, target, terrain.as_deref(), 1.6);
     toasts.write(ScriptToast(format!("QA: teleport para npc #{index}")));
 }
 
@@ -645,8 +689,23 @@ fn quest_dialogue_system(
     mut balloons: Query<(&mut Visibility, &mut HudBalloon, &Children)>,
     mut texts: Query<&mut Text>,
     mut events: Option<ResMut<crate::luau::ScriptEventQueue>>,
+    mut dialogue: crate::dialogue::DialogueAccess,
 ) {
-    if !keys.just_pressed(KeyCode::KeyE) {
+    let choice = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ]
+    .iter()
+    .position(|key| keys.just_pressed(*key))
+    .map(|index| index + 1);
+    if !keys.just_pressed(KeyCode::KeyE) && choice.is_none() {
         return;
     }
     let dialogue_owned = owners
@@ -683,6 +742,39 @@ fn quest_dialogue_system(
         return;
     }
     let id = npc.dialogue_id.clone();
+    if let (Some(book), Some(sessions)) = (dialogue.book.as_deref(), dialogue.sessions.as_deref_mut())
+        && let Some(graph) = book.graphs.get(&id)
+    {
+        if let Some(shown) = crate::dialogue::advance(graph, sessions, &id, choice) {
+            let body = shown.text.clone();
+            if shown.accept {
+                let _ = log.accept(&id);
+            }
+            if shown.turn_in {
+                let _ = log.turn_in(&id, vault.as_deref_mut());
+            }
+            if let Some(voice) = shown.voice.clone() {
+                commands.spawn(crate::dialogue::PendingVoice(voice));
+                sfx.write(crate::ambient::SfxEvent {
+                    clip: crate::ambient::SfxClip::Notification,
+                    position: Some(player_pos),
+                });
+            }
+            show_balloon(
+                &mut balloons,
+                &mut texts,
+                &body,
+                crate::hud::BALLOON_DURATION,
+            );
+            return;
+        }
+        if choice.is_some() {
+            return;
+        }
+    }
+    if choice.is_some() && !keys.just_pressed(KeyCode::KeyE) {
+        return;
+    }
     let vault_ref = vault.as_deref();
     info!(target: "viber::quests", "diálogo [E] com '{id}' — estado {}", crate::quests::status_name(log.status(&id, vault_ref)));
     let body: String = match log.status(&id, vault.as_deref()) {
