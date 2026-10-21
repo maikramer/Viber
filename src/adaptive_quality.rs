@@ -100,7 +100,7 @@ pub fn tier_levers(tier: u8) -> (QualityGates, Option<usize>) {
             QualityGates {
                 off: Vec::new(),
                 ssao: Some(Ssao::Medium),
-                volumetric_steps: Some(32),
+                volumetric_steps: Some(20),
                 contact_steps: None,
             },
             Some(8),
@@ -109,7 +109,7 @@ pub fn tier_levers(tier: u8) -> (QualityGates, Option<usize>) {
             QualityGates {
                 off: vec!["DOF", "MOTION_BLUR"],
                 ssao: Some(Ssao::Low),
-                volumetric_steps: Some(24),
+                volumetric_steps: Some(16),
                 contact_steps: Some(12),
             },
             Some(4),
@@ -118,7 +118,7 @@ pub fn tier_levers(tier: u8) -> (QualityGates, Option<usize>) {
             QualityGates {
                 off: vec!["DOF", "MOTION_BLUR", "VOLUMETRICS", "CHROMATIC"],
                 ssao: Some(Ssao::Low),
-                volumetric_steps: Some(24),
+                volumetric_steps: Some(16),
                 contact_steps: Some(8),
             },
             Some(0),

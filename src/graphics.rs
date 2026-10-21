@@ -140,10 +140,15 @@ pub fn dir_shadow_size() -> usize {
 }
 
 /// Passos do raymarch volumétrico; `0` desliga o volumétrico.
+///
+/// O passe escala linearmente com os passos (RTX 4050, 1280×720, praça do
+/// Vael): 40 → 3,9 ms, 24 → 2,4 ms, 16 → 1,6 ms. Com o jitter do raio e o
+/// TAA a acumular, 24 e 40 diferem ~2/255 em média — o `equilibrado` fica
+/// nos 24.
 pub fn volumetric_steps() -> u32 {
     match preset() {
         GraphicsPreset::Alto => 64,
-        GraphicsPreset::Equilibrado => 40,
+        GraphicsPreset::Equilibrado => 24,
         GraphicsPreset::Desempenho => 0,
     }
 }
@@ -223,7 +228,7 @@ mod tests {
         assert_eq!(preset(), GraphicsPreset::Equilibrado);
         assert_eq!(shadow_cascades(), 3);
         assert_eq!(shadow_distance(), 150.0);
-        assert_eq!(volumetric_steps(), 40);
+        assert_eq!(volumetric_steps(), 24);
         assert_eq!(dir_shadow_size(), 4096);
         assert!(heavy_fx_enabled());
         assert_eq!(cull_scale(), 1.0);

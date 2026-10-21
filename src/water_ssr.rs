@@ -52,6 +52,8 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery
 use bevy::render::view::{ExtractedView, ViewTarget};
 use bevy::render::{Extract, Render, RenderApp, RenderStartup, RenderSystems};
 
+use std::sync::OnceLock;
+
 use crate::terrain::runtime::TerrainRuntime;
 
 /// Quantos corpos de água entram no teste de cota (os 8 primeiros do
@@ -91,6 +93,104 @@ const GROUND_STRENGTH: f32 = 0.55;
 /// suave, passos geométricos, blur por rugosidade) reduzem mas não eliminam.
 /// Fica OPT-IN até existir o histórico temporal do passe (reprojeção + clamp
 /// de vizinhança — o próximo trabalho de verdade).
+///
+/// O `config.yaml` do jogo pode fixar o modo (`reflections.mode`), o chão
+/// molhado (`wet-ground`) e o orçamento (`steps`, `max-distance`). O env
+/// `VIBER_WATER_SSR` continua a ganhar para A/B.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReflectionMode {
+    /// Segue o preset: SSR só no `alto` (comportamento histórico).
+    #[default]
+    Auto,
+    Off,
+    /// Só superfícies de água; o chão molhado fica no sheen PBR.
+    Water,
+    /// Água + chão molhado (o modo caro quando chove no mapa todo).
+    Full,
+}
+
+impl ReflectionMode {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "preset" => Self::Auto,
+            "off" | "none" | "0" | "false" => Self::Off,
+            "water" | "water-only" | "agua" | "água" | "cheap" => Self::Water,
+            "full" | "all" | "1" | "true" => Self::Full,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReflectionProfile {
+    mode: ReflectionMode,
+    /// `None` = o default do modo (`Full` chão dentro, `Water` fora).
+    wet_ground: Option<bool>,
+    steps: Option<u32>,
+    max_distance: Option<f32>,
+}
+
+impl Default for ReflectionProfile {
+    fn default() -> Self {
+        Self {
+            mode: ReflectionMode::Auto,
+            wet_ground: None,
+            steps: None,
+            max_distance: None,
+        }
+    }
+}
+
+static REFLECTION_PROFILE: OnceLock<ReflectionProfile> = OnceLock::new();
+
+/// Resolve o perfil de reflexos UMA vez, antes de a App nascer.
+pub fn resolve_profile(config: Option<&crate::config::ReflectionsConfig>) {
+    let Some(config) = config else {
+        let _ = REFLECTION_PROFILE.set(ReflectionProfile::default());
+        return;
+    };
+    let mode = match config.mode.as_deref() {
+        Some(raw) => match ReflectionMode::parse(raw) {
+            Some(mode) => mode,
+            None => {
+                // `resolve_profile` corre antes do subscriber de log.
+                eprintln!(
+                    "warning: config.yaml reflections.mode: `{raw}` inválido \
+                     (auto|off|water|full) — usando auto"
+                );
+                ReflectionMode::Auto
+            }
+        },
+        None => ReflectionMode::Auto,
+    };
+    let profile = ReflectionProfile {
+        mode,
+        wet_ground: config.wet_ground,
+        steps: config.steps.filter(|steps| *steps > 0),
+        max_distance: config
+            .max_distance
+            .filter(|distance| distance.is_finite() && *distance > 0.0),
+    };
+    let _ = REFLECTION_PROFILE.set(profile);
+}
+
+fn profile() -> &'static ReflectionProfile {
+    REFLECTION_PROFILE.get_or_init(ReflectionProfile::default)
+}
+
+fn preset_ssr() -> bool {
+    crate::graphics::preset() == crate::graphics::GraphicsPreset::Alto
+}
+
+/// O modo efetivo: `Auto` resolve pelo preset (`alto` = full, resto = off).
+fn effective_mode() -> ReflectionMode {
+    match profile().mode {
+        ReflectionMode::Auto if preset_ssr() => ReflectionMode::Full,
+        ReflectionMode::Auto => ReflectionMode::Off,
+        mode => mode,
+    }
+}
+
 pub fn water_ssr_requested() -> bool {
     match std::env::var("VIBER_WATER_SSR")
         .ok()
@@ -99,10 +199,44 @@ pub fn water_ssr_requested() -> bool {
     {
         Some("0" | "false" | "off" | "no") => false,
         Some("1" | "true" | "yes" | "on") => true,
-        // Preset `alto`: o histórico temporal já acumula o reflexo. O
-        // equilibrado fica de fora — o passe custa e o orçamento é 11 ms.
-        _ => crate::graphics::preset() == crate::graphics::GraphicsPreset::Alto,
+        // QA: força o passe ligado mas só na água (sem o chão do mapa todo).
+        Some("water" | "water-only" | "cheap") => true,
+        _ => effective_mode() != ReflectionMode::Off,
     }
+}
+
+/// Força do reflexo no CHÃO. `water` e `wet-ground: false` devolvem 0 — o
+/// chão mantém o sheen barato do material (`walls_b.w`), sem raymarch.
+fn ground_strength_for(mode: ReflectionMode, wet_ground: Option<bool>) -> f32 {
+    let default_ground = mode == ReflectionMode::Full;
+    match wet_ground {
+        Some(true) => GROUND_STRENGTH,
+        Some(false) => 0.0,
+        None if default_ground => GROUND_STRENGTH,
+        None => 0.0,
+    }
+}
+
+fn ground_strength() -> f32 {
+    ground_strength_for(effective_mode(), profile().wet_ground)
+}
+
+fn ssr_steps() -> u32 {
+    std::env::var("VIBER_WATER_SSR_STEPS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|steps| *steps > 0)
+        .or(profile().steps)
+        .unwrap_or(STEPS)
+}
+
+fn ssr_max_distance() -> f32 {
+    std::env::var("VIBER_WATER_SSR_MAX_DIST")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|distance| distance.is_finite() && *distance > 0.0)
+        .or(profile().max_distance)
+        .unwrap_or(MAX_DIST_M)
 }
 
 /// Marcador na câmara 3D que recebe o passe (postfx insere com o gate on).
@@ -672,15 +806,15 @@ fn pack_params_uniform(surfaces: &[f32], rain: f32) -> Vec<u8> {
     let _ = &data;
     for f in [
         surfaces.len() as f32,
-        MAX_DIST_M,
+        ssr_max_distance(),
         THICKNESS_M,
         FRESNEL_F0,
-        STEPS as f32,
+        ssr_steps() as f32,
         EDGE_FADE_PX,
         STRENGTH,
         BAND_M,
         rain,
-        GROUND_STRENGTH,
+        ground_strength(),
     ] {
         data.extend_from_slice(&f.to_le_bytes());
     }
@@ -707,6 +841,7 @@ fn prepare_bind_groups(
             &ExtractedView,
             &ViewTarget,
             Option<&ViewPrepassTextures>,
+            Option<&bevy::render::camera::TemporalJitter>,
             Option<&mut WaterSsrViewGpu>,
         ),
         With<WaterSsr>,
@@ -720,7 +855,7 @@ fn prepare_bind_groups(
     );
     let bind_group_layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
 
-    for (entity, view, target, prepass_opt, mut gpu) in &mut views {
+    for (entity, view, target, prepass_opt, jitter, mut gpu) in &mut views {
         let Some(prepass) = prepass_opt else { continue };
         let Some(depth) = prepass.depth.as_ref() else {
             continue;
@@ -735,8 +870,14 @@ fn prepare_bind_groups(
             continue;
         };
         let (w, h) = (view.viewport.z.max(1), view.viewport.w.max(1));
-        let view_bytes =
-            pack_view_uniform(&view.clip_from_view, &view.world_from_view, view.viewport);
+        // A prepass de profundidade/normais é desenhada com a projeção
+        // JITTERED do TAA; reconstruir com a matriz limpa lia o texel ao
+        // lado e fazia o SSR tremer.
+        let mut clip_from_view = view.clip_from_view;
+        if let Some(jitter) = jitter {
+            jitter.jitter_projection(&mut clip_from_view, view.viewport.zw().as_vec2());
+        }
+        let view_bytes = pack_view_uniform(&clip_from_view, &view.world_from_view, view.viewport);
 
         if let Some(g) = gpu.as_mut() {
             if g.size != bevy::math::UVec2::new(w, h) {
@@ -1000,11 +1141,41 @@ mod tests {
         // count em 128
         let count = f32::from_le_bytes(packed[128..132].try_into().unwrap());
         assert_eq!(count, 2.0);
-        // rain em 160, ground em 164
+        // rain em 160, ground em 164. No default (auto/equilibrado) o chão
+        // NÃO entra no raymarch — o teste valida o wiring, não o valor.
         let rain = f32::from_le_bytes(packed[160..164].try_into().unwrap());
         assert_eq!(rain, 0.75);
         let ground = f32::from_le_bytes(packed[164..168].try_into().unwrap());
-        assert_eq!(ground, GROUND_STRENGTH);
+        assert_eq!(ground, ground_strength());
+    }
+
+    /// O modo `water` corta o chão; `full` mantém-no; `wet-ground: false`
+    /// ganha ao default do modo (é o override do `config.yaml`).
+    #[test]
+    fn test_ground_strength_by_mode() {
+        assert_eq!(
+            ground_strength_for(ReflectionMode::Full, None),
+            GROUND_STRENGTH
+        );
+        assert_eq!(ground_strength_for(ReflectionMode::Water, None), 0.0);
+        assert_eq!(ground_strength_for(ReflectionMode::Off, None), 0.0);
+        assert_eq!(ground_strength_for(ReflectionMode::Full, Some(false)), 0.0);
+        assert_eq!(
+            ground_strength_for(ReflectionMode::Water, Some(true)),
+            GROUND_STRENGTH
+        );
+    }
+
+    #[test]
+    fn test_reflection_mode_parse() {
+        assert_eq!(ReflectionMode::parse("auto"), Some(ReflectionMode::Auto));
+        assert_eq!(ReflectionMode::parse("OFF"), Some(ReflectionMode::Off));
+        assert_eq!(
+            ReflectionMode::parse(" water-only "),
+            Some(ReflectionMode::Water)
+        );
+        assert_eq!(ReflectionMode::parse("full"), Some(ReflectionMode::Full));
+        assert_eq!(ReflectionMode::parse("nublado"), None);
     }
 
     /// O WGSL não pode ter imports (o harness naga valida-o cru) nem overlays.

@@ -158,7 +158,6 @@ pub fn lint_world(world_xml: &Path) -> Result<LintReport> {
         &config.scripts_dir_on(&world_dir),
         &world.entities,
     ));
-    findings.extend(check_quests(&world_dir, &config));
     findings.extend(check_duplicate_names(duplicates));
     findings.extend(check_project(
         &world_xml,
@@ -484,6 +483,18 @@ fn check_scripts(
 /// tipo/intervalo/enum (`script-prop-type`) e, num `entity`, nomear uma
 /// entidade do mundo (`script-prop-entity`). Props num nó sem script são
 /// órfãos (`script-prop-orphan`).
+/// `prop-__*` são dados INTERNOS da engine (`hostile`/`health`/`ragdoll`/
+/// `stream`), colocados em `EntitySpec.props` pelo parser. Não são props
+/// autorais de script: não se comparam com `--@export` nem contam como
+/// órfãos quando o nó não tem `script=`.
+fn authored_props(props: &[(String, String)]) -> Vec<(String, String)> {
+    props
+        .iter()
+        .filter(|(key, _)| !key.starts_with("__"))
+        .cloned()
+        .collect()
+}
+
 fn check_script_props(scripts_dir: &Path, entities: &[EntitySpec]) -> Vec<Finding> {
     let mut names: HashSet<String> = HashSet::new();
     // (rótulo, script, props) de cada uso.
@@ -496,16 +507,19 @@ fn check_script_props(scripts_dir: &Path, entities: &[EntitySpec]) -> Vec<Findin
         let label = spec_label(spec);
         if let EntityKind::StaticSpawner { spec: spawner }
         | EntityKind::DynamicSpawner { spec: spawner } = &spec.kind
-            && !spawner.template_props.is_empty()
         {
-            uses.push((
-                format!("{label} (template)"),
-                spawner.template_script.clone(),
-                spawner.template_props.clone(),
-            ));
+            let props = authored_props(&spawner.template_props);
+            if !props.is_empty() {
+                uses.push((
+                    format!("{label} (template)"),
+                    spawner.template_script.clone(),
+                    props,
+                ));
+            }
         }
-        if !spec.props.is_empty() {
-            uses.push((label, spec.script.clone(), spec.props.clone()));
+        let props = authored_props(&spec.props);
+        if !props.is_empty() {
+            uses.push((label, spec.script.clone(), props));
         }
     });
     let mut cache: HashMap<String, Option<crate::luau::exports::ScriptExports>> = HashMap::new();
@@ -942,41 +956,6 @@ pub fn compile(lua: &mlua::Lua, source: &str, name: &str) -> Result<(), String> 
         .map_err(|error| error.to_string())
 }
 
-/// Quests: cada `*.json` do `quests_dir` PARSEIA como array JSON. O esquema
-/// das quests é do JOGO (Vael); a engine só valida a sintaxe do ficheiro.
-fn check_quests(world_dir: &Path, config: &crate::config::GameConfig) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let quests_dir = config.quests_dir_on(world_dir);
-    let Ok(entries) = std::fs::read_dir(&quests_dir) else {
-        return findings; // mundo sem quests: legítimo
-    };
-    let mut files: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .collect();
-    files.sort();
-    for file in files {
-        let name = file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        // O formato é do jogo; aqui só se exige um ARRAY JSON válido.
-        let Ok(defs) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
-            findings.push(Finding::error(
-                "quest-parse",
-                format!("quests/{name}: JSON não parseia como array de quests"),
-            ));
-            continue;
-        };
-        let _ = defs; // parseou — as refs são do audit
-    }
-    findings
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn syntax_error_script_load_and_broken_quest_json_are_found() {
+    fn syntax_error_and_script_load_are_found() {
         let dir = fixture(
             WORLD,
             &[
@@ -1057,7 +1036,7 @@ mod tests {
                 ("lib/broken.lua", "local x = {"),
                 ("lib/ok.lua", "return viber.load('lib/falta.lua')\n"),
             ],
-            &[("ruim.json", "{ náo é json")],
+            &[],
         );
         let report = lint_world(&dir.path().join("world.xml")).unwrap();
         let kinds: Vec<&str> = report.findings.iter().map(|f| f.kind).collect();
@@ -1070,11 +1049,10 @@ mod tests {
             2
         );
         assert!(kinds.contains(&"script-load"), "{kinds:?}");
-        assert!(kinds.contains(&"quest-parse"), "{kinds:?}");
         assert_eq!(
             report.errors().count(),
-            4,
-            "sintaxe×2 + viber.load + quest-parse"
+            3,
+            "sintaxe×2 + viber.load"
         );
     }
 
@@ -1138,6 +1116,32 @@ mod tests {
             "{:?}",
             report.findings
         );
+    }
+
+    #[test]
+    fn engine_internal_props_are_not_script_props() {
+        // `hostile`/`health`/`ragdoll`/`stream` viram `__*` em EntitySpec.props;
+        // são dados da engine, não props de script. `--@export` nem os aceita
+        // (`valid_name` recusa nomes a começar por `_`).
+        let dir = fixture(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<world>
+  <Entity name="boss" script="boss.lua" hostile="true" health="400" ragdoll="true" />
+  <Entity name="resident" script="boss.lua" stream="resident" />
+  <Entity name="internal" hostile="true" />
+</world>
+"#,
+            &[("boss.lua", "function on_update(dt) end\n")],
+            &[],
+        );
+        let report = lint_world(&dir.path().join("world.xml")).unwrap();
+        let offending: Vec<&String> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind.starts_with("script-prop"))
+            .map(|f| &f.message)
+            .collect();
+        assert!(offending.is_empty(), "{offending:?}");
     }
 
     #[test]

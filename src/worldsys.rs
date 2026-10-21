@@ -391,12 +391,22 @@ pub const INTERIOR_IBL_INTENSITY: f32 = 0.05;
 /// pelo [`sun_drive`] no frame seguinte, não precisa de restauro.
 pub fn interior_lighting_apply(
     state: Res<InteriorLighting>,
-    mut suns: Query<&mut bevy::light::DirectionalLight>,
-    mut probes: Query<&mut bevy::light::GeneratedEnvironmentMapLight>,
+    mut suns: Query<(Entity, &mut bevy::light::DirectionalLight)>,
+    mut probes: Query<&mut GeneratedEnvironmentMapLight>,
     mut was_active: bevy::ecs::system::Local<bool>,
+    mut saved_suns: bevy::ecs::system::Local<Vec<(Entity, f32)>>,
 ) {
     if state.active {
-        for mut sun in &mut suns {
+        if !*was_active {
+            saved_suns.clear();
+        }
+        for (entity, mut sun) in &mut suns {
+            // Guarda a lux autoral UMA vez para restaurar à saída. O comentário
+            // assumia que o `sun_drive` a reescrevia, mas sem `<DayCycle>`
+            // ele retorna cedo e o sol ficava a zero para sempre.
+            if !saved_suns.iter().any(|(saved, _)| *saved == entity) {
+                saved_suns.push((entity, sun.illuminance));
+            }
             sun.illuminance = 0.0;
         }
         for mut probe in &mut probes {
@@ -404,6 +414,11 @@ pub fn interior_lighting_apply(
         }
         *was_active = true;
     } else if *was_active {
+        for (entity, lux) in saved_suns.drain(..) {
+            if let Ok((_, mut sun)) = suns.get_mut(entity) {
+                sun.illuminance = lux;
+            }
+        }
         for mut probe in &mut probes {
             probe.intensity = crate::ibl::IBL_INTENSITY;
         }
@@ -723,8 +738,11 @@ fn seat_at(
         .map(|span| span.top)
         .find(|&top| top <= y + 0.25)
         .unwrap_or_else(|| {
+            // Spans chegam top-down: o fallback tem de ser o MAIS BAIXO
+            // (chão), não `first()` (o teto de um arco/caverna), senão um
+            // static enterrado saltava para o telhado.
             spans
-                .first()
+                .last()
                 .map(|span| span.top)
                 .unwrap_or(f32::NEG_INFINITY)
         });
@@ -862,7 +880,7 @@ fn place_ground_y(
         .rev()
         .map(|span| span.top)
         .find(|&top| top <= authored_y + 0.25)
-        .or_else(|| spans.first().map(|span| span.top))
+        .or_else(|| spans.last().map(|span| span.top))
         .unwrap_or(authored_y)
 }
 
@@ -994,6 +1012,15 @@ pub fn daycycle_drive(
     if !clock.drive_ambient {
         return;
     }
+    // A cor AUTORAL do ambiente é capturada antes de qualquer escrita —
+    // inclusive antes da saída antecipada do interior. Se a primeira frame
+    // já for dentro de uma sala, a referência ficava a cor do interior e o
+    // lerp noturno partia dela para sempre.
+    if !*ambient_color_captured {
+        let c = ambient.color.to_srgba();
+        *ambient_color_ref = [c.red, c.green, c.blue];
+        *ambient_color_captured = true;
+    }
     // Dentro de um interior o relógio continua a andar (as quests e o mundo lá
     // fora dependem dele), mas a LUZ da sala não: ambiente fixo, sem noite.
     if interior.is_some_and(|state| state.active) {
@@ -1029,31 +1056,27 @@ pub fn daycycle_drive(
     };
     // Fill de sombras: o sol da cena é 10k lux e o ambiente autoral ~110 —
     // sem isto a sombra é preto puro. Golden hour mantém o ×2.2 de pico
-    // (2.8 no peso, dia não mexe). À noite o peso sobe de 0.8 para 1.6
-    // (×2.6 sobre o rácio night/day): o lado da casa que a lua não vê tem
-    // de mostrar parede, não um buraco. O clamp a 3 impede o fill de
-    // lavar o dia. Um frame velho de elevação não se nota — o dia inteiro
-    // dura 20 minutos.
+    // (2.8 no peso, dia não mexe). À noite o peso desce de 1.6 para 1.0
+    // (×2.0 sobre o rácio night/day): com a lanterna do viajante a 60k lm e
+    // as tochas ×8, o fill alto só servia para lavar o herói e as paredes
+    // num véu azul-claro (medido 2026-10-21: chão 0,44 às 22:00). O clamp a
+    // 3 impede o fill de lavar o dia.
     let night = 1.0 - (sun.elevation_deg / 6.0).clamp(0.0, 1.0);
     let golden = (-(((sun.elevation_deg - 4.0) / 8.0).powi(2))).exp() * (1.0 - night);
-    let fill = 2.8 * golden + 1.6 * night;
+    let fill = 2.8 * golden + 1.0 * night;
     ambient.brightness = clock.ambient_reference * (scale * (1.0 + fill)).clamp(0.0, 3.0);
     // Cor do ambiente: esfria para azul-profundo à noite (a cor autoral é
-    // capturada UMA vez — flag explícita: a sentinela `== 0.0` recapturava
-    // para sempre quando a cor autoral ERA preta/azul-pura (r=g=0), e o
-    // lerp noturno derivava a cor de cada tick em vez de partir dela).
-    if !*ambient_color_captured {
-        let c = ambient.color.to_srgba();
-        *ambient_color_ref = [c.red, c.green, c.blue];
-        *ambient_color_captured = true;
-    }
+    // capturada acima, UMA vez — flag explícita: a sentinela `== 0.0`
+    // recapturava para sempre quando a cor autoral ERA preta/azul-pura).
     // Golden entra no lerp com peso leve: o split quente/frio existe, mas a
     // base da muralha em sombra não pode ficar turva (r13 — transição do
     // lift suavizada; sombras longas mantêm-se pela LUZ, não pelo ambiente).
+    // **Azul mais fundo (2026-10-21; era 0.30/0.40/0.72):** os valores
+    // antigos liam como azul-claro de dia enevoado, não como noite.
     let cool_mix = (night.clamp(0.0, 1.0) * 0.8 + golden * 0.3).min(1.0);
-    let r = ambient_color_ref[0] + (0.30 - ambient_color_ref[0]) * cool_mix;
-    let g = ambient_color_ref[1] + (0.40 - ambient_color_ref[1]) * cool_mix;
-    let b = ambient_color_ref[2] + (0.72 - ambient_color_ref[2]) * cool_mix;
+    let r = ambient_color_ref[0] + (0.20 - ambient_color_ref[0]) * cool_mix;
+    let g = ambient_color_ref[1] + (0.28 - ambient_color_ref[1]) * cool_mix;
+    let b = ambient_color_ref[2] + (0.55 - ambient_color_ref[2]) * cool_mix;
     ambient.color = Color::srgba(r, g, b, 1.0);
 }
 
@@ -1178,11 +1201,19 @@ const HORIZON_GOLD: Rgb = [0.44, 0.26, 0.12];
 // azul profundo que se lê como céu, e é esse contraste que faz a lua, as
 // estrelas e as fogueiras valerem ouro. Antes era [0.008,0.016,0.055] /
 // [0.035,0.062,0.135] = "só escuro" (gap nº 9 do gauntlet).
-const ZENITH_NIGHT: Rgb = [0.008, 0.016, 0.050];
-const HORIZON_NIGHT: Rgb = [0.030, 0.050, 0.110];
+//
+// **×0,45 (2026-10-21).** A paleta do céu e da névoa NÃO passa pela exposição
+// do PBR (o domo é material custom e o `DistanceFog` é somado depois de
+// `view.exposure`); o CDL da noite escurece os objetos PBR mas NÃO esta
+// paleta. Os valores antigos liam-se como um véu azul-claro de dia enevoado
+// (medido: céu 0,50 e chão 0,44 às 22:00) e tapavam até as fogueiras. A
+// paleta noturna/crepuscular é por isso autorada em espaço de EXIBIÇÃO —
+// aqui 0,0225 linear ≈ 0,16 sRGB. O dia e a golden hour não são tocados.
+const ZENITH_NIGHT: Rgb = [0.0036, 0.0072, 0.0225];
+const HORIZON_NIGHT: Rgb = [0.0135, 0.0225, 0.0495];
 /// Azul do crepúsculo (blue hour) — o sol já se pôs, o céu ainda não é noite.
-const ZENITH_TWILIGHT: Rgb = [0.020, 0.045, 0.135];
-const HORIZON_TWILIGHT: Rgb = [0.20, 0.155, 0.30];
+const ZENITH_TWILIGHT: Rgb = [0.0090, 0.0203, 0.0608];
+const HORIZON_TWILIGHT: Rgb = [0.0900, 0.0698, 0.1350];
 
 const SUN_TINT_HIGH: Rgb = [1.0, 0.96, 0.88];
 const SUN_TINT_LOW: Rgb = [1.0, 0.46, 0.14];
@@ -1260,14 +1291,17 @@ pub fn atmosphere_for_elevation(elevation_deg: f32) -> AtmosphereState {
     // Névoa = horizonte puxado ao azul e dessaturado: a "cortina" que separa
     // as camadas de serra. De dia é fria; ao pôr-do-sol herda o dourado do
     // horizonte (mas menos saturado, senão o mundo inteiro vira laranja).
+    // A dessaturação cai para METADE à noite: 22 % de luma sobre um céu já
+    // escuro lia-se como véu cinzento no longe (relato 2026-10-21).
     let luma = horizon[0] * 0.25 + horizon[1] * 0.5 + horizon[2] * 0.25;
-    let mut fog = mix3(horizon, [luma, luma, luma], 0.22);
-    // Um empurrão de azul/violeta na névoa diurna — a assinatura da
-    // perspetiva aérea do BOTW.
+    let mut fog = mix3(horizon, [luma, luma, luma], 0.22 * (1.0 - 0.5 * night));
+    // Um empurrão de azul/violeta na névoa — a assinatura da perspetiva
+    // aérea do BOTW. De dia 0.7; à noite 0.55, senão a névoa (e o horizonte
+    // que ela funde) lia CINZENTO em vez de azul-noite (relato 2026-10-21).
     fog = mix3(
         fog,
         [fog[0] * 0.90, fog[1] * 0.98, fog[2] * 1.14],
-        day * 0.7,
+        (day * 0.7 + night * 0.55).min(1.0),
     );
 
     let sun_tint = mix3(

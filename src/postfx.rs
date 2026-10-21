@@ -233,15 +233,28 @@ static FX_RUNTIME_OFF: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<&'static str>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
+/// Gates religados AO VIVO. Existe só para o bridge/`<PostFxDebugToggle>`
+/// poderem A/B um efeito que o `config.yaml` do jogo desligou; não força
+/// contra o env nem contra o preset `desempenho` (esses continuam a ganhar).
+static FX_RUNTIME_ON: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<&'static str>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 /// Força um gate OFF/ON ao vivo. `on=false` força o corte (o env também pode
 /// cortar, mas não pode LIGAR por cima de um corte runtime); `on=true`
-/// restaura o comportamento do env/default. Keys: os mesmos de `fx_off`
-/// (`AUTOEXPOSURE`, `BLOOM`, `DOF`, `SSAO`, `CONTACT_SHADOWS`, `AERIAL`,
-/// `SPLITTONE`, `VIGNETTE`, `CHROMATIC`, `CAS`, `MOTION_BLUR`, `TAA`,
-/// `VOLUMETRICS`).
+/// restaura o default E sobrepõe-se ao perfil do `config.yaml` — o QA do
+/// bridge continua a poder medir um efeito que o jogo desligou. Keys: os
+/// mesmos de `fx_off` (`AUTOEXPOSURE`, `BLOOM`, `DOF`, `SSAO`,
+/// `CONTACT_SHADOWS`, `AERIAL`, `SPLITTONE`, `VIGNETTE`, `CHROMATIC`, `CAS`,
+/// `MOTION_BLUR`, `TAA`, `VOLUMETRICS`).
 pub fn fx_runtime_toggle(key: &'static str, on: bool) {
-    let mut set = FX_RUNTIME_OFF.lock().expect("FX_RUNTIME_OFF");
-    let changed = if on { set.remove(key) } else { set.insert(key) };
+    let mut off = FX_RUNTIME_OFF.lock().expect("FX_RUNTIME_OFF");
+    let mut on_set = FX_RUNTIME_ON.lock().expect("FX_RUNTIME_ON");
+    let changed = if on {
+        off.remove(key) | on_set.insert(key)
+    } else {
+        off.insert(key) | on_set.remove(key)
+    };
     if changed {
         FX_GATE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -250,6 +263,11 @@ pub fn fx_runtime_toggle(key: &'static str, on: bool) {
 /// O gate está forçado OFF ao vivo (bridge ou `<PostFxDebugToggle>`)?
 pub fn fx_forced_off(key: &str) -> bool {
     FX_RUNTIME_OFF.lock().is_ok_and(|set| set.contains(key))
+}
+
+/// O gate foi religado ao vivo (e pode sobrepor-se ao perfil do jogo)?
+fn fx_runtime_on(key: &str) -> bool {
+    FX_RUNTIME_ON.lock().is_ok_and(|set| set.contains(key))
 }
 
 /// Sobe a cada mudança de gate em runtime (bridge, `<PostFxDebugToggle>`,
@@ -301,6 +319,119 @@ fn fx_quality_off(key: &str) -> bool {
     FX_QUALITY.lock().is_ok_and(|q| q.off.contains(&key))
 }
 
+/// Perfil de pós-processamento autorado no `config.yaml` do jogo.
+///
+/// A lente da engine liga tudo por omissão. Um jogo que não quer pagar um
+/// passe full-res (god-rays, DOF, motion blur) declara aqui os gates que
+/// desliga — sem passar o preset `desempenho` inteiro, que também corta
+/// sombras, relva e alcance de render. `VIBER_NO_<KEY>` continua a ganhar
+/// (bissecção de QA) e o preset `desempenho` continua a cortar os
+/// [`HEAVY_FX_KEYS`] por cima.
+#[derive(Debug, Clone, Default)]
+pub struct PostFxProfile {
+    off: Vec<&'static str>,
+    /// Qualidade do SSAO pedida pelo jogo; `VIBER_SSAO` e os tiers do
+    /// `<AdaptiveQuality>` continuam a ganhar.
+    pub ssao: Option<ScreenSpaceAmbientOcclusionQualityLevel>,
+}
+
+impl PostFxProfile {
+    /// Normaliza os nomes do config (os mesmos aliases do bridge) e ignora
+    /// efeitos desconhecidos com warning — uma gralha não derruba o jogo.
+    fn from_config(config: Option<&crate::config::PostFxConfig>) -> Self {
+        let Some(config) = config else {
+            return Self::default();
+        };
+        let mut off = Vec::new();
+        for raw in &config.disabled {
+            match fx_profile_key(raw) {
+                Some(key) if !off.contains(&key) => off.push(key),
+                Some(_) => {}
+                // `resolve_profile` corre antes do subscriber de log: um
+                // `warn!` aqui morria antes de existir quem o imprimisse.
+                None => eprintln!(
+                    "warning: config.yaml postfx.disabled: efeito desconhecido `{raw}` — ignorado"
+                ),
+            }
+        }
+        let ssao = config.ssao.as_deref().and_then(parse_ssao_quality);
+        if config.ssao.is_some() && ssao.is_none() {
+            eprintln!(
+                "warning: config.yaml postfx.ssao: `{}` inválido (low|medium|high|ultra) — ignorado",
+                config.ssao.as_deref().unwrap_or_default()
+            );
+        }
+        Self { off, ssao }
+    }
+
+    fn off(&self, key: &str) -> bool {
+        self.off.contains(&key)
+    }
+}
+
+/// Alias do config → key de [`fx_off`]. Mesma tabela do `<PostFxDebugToggle>`
+/// e do `viber.debug.postfx`, para o autor ter um só vocabulário.
+fn fx_profile_key(raw: &str) -> Option<&'static str> {
+    let norm: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    Some(match norm.as_str() {
+        "bloom" => "BLOOM",
+        "ca" | "chromatic" | "chromaticaberration" => "CHROMATIC",
+        "vignette" => "VIGNETTE",
+        "ssao" | "ao" => "SSAO",
+        "dof" | "depthoffield" => "DOF",
+        "autoexposure" | "exposure" => "AUTOEXPOSURE",
+        "contactshadows" => "CONTACT_SHADOWS",
+        "cas" | "sharpen" => "CAS",
+        "splittone" => "SPLITTONE",
+        "aerial" | "aerialperspective" => "AERIAL",
+        "volumetrics" | "volumetric" | "godrays" | "fog" => "VOLUMETRICS",
+        "motionblur" => "MOTION_BLUR",
+        "lens" => "LENS",
+        "taa" | "aa" | "antialiasing" => "TAA",
+        _ => return None,
+    })
+}
+
+fn parse_ssao_quality(raw: &str) -> Option<ScreenSpaceAmbientOcclusionQualityLevel> {
+    use ScreenSpaceAmbientOcclusionQualityLevel as Q;
+    Some(match raw.trim().to_ascii_lowercase().as_str() {
+        "low" | "baixo" => Q::Low,
+        "medium" | "medio" | "médio" => Q::Medium,
+        "high" | "alto" => Q::High,
+        "ultra" => Q::Ultra,
+        _ => return None,
+    })
+}
+
+static POSTFX_PROFILE: OnceLock<PostFxProfile> = OnceLock::new();
+
+/// Resolve o perfil UMA vez, antes de a App nascer (o attach da câmara lê os
+/// gates no primeiro `Update`). Sem `postfx:` no config fica a stack completa.
+pub fn resolve_profile(config: Option<&crate::config::PostFxConfig>) {
+    let profile = PostFxProfile::from_config(config);
+    if !profile.off.is_empty() || profile.ssao.is_some() {
+        info!(
+            "postfx profile: off={:?} ssao={:?}",
+            profile.off, profile.ssao
+        );
+    }
+    // `set` falha se já estiver resolvido (dois `run` no mesmo processo nos
+    // testes) — o primeiro ganha, como no `graphics::resolve`.
+    let _ = POSTFX_PROFILE.set(profile);
+}
+
+fn profile() -> &'static PostFxProfile {
+    POSTFX_PROFILE.get_or_init(PostFxProfile::default)
+}
+
+fn profile_off(key: &str) -> bool {
+    profile().off(key)
+}
+
 /// Gate de A/B por efeito: `VIBER_NO_<KEY>=1` tira ESSE efeito da câmara e
 /// deixa o resto da lente intacto.
 ///
@@ -315,6 +446,11 @@ fn fx_quality_off(key: &str) -> bool {
 /// (`VIGNETTE`, `CHROMATIC`, `CAS`), `MOTION_BLUR`, `TAA`, `VOLUMETRICS`.
 /// O bridge (`viber.debug.postfx{...}`) força os mesmos keys AO VIVO.
 pub fn fx_off(key: &str) -> bool {
+    // O perfil do jogo é um DEFAULT: o bridge/`<PostFxDebugToggle>` pode
+    // religar um efeito ao vivo para A/B. O env e o preset continuam a ganhar.
+    if profile_off(key) && !fx_runtime_on(key) {
+        return true;
+    }
     if HEAVY_FX_KEYS.contains(&key) && !crate::graphics::heavy_fx_enabled() {
         return true;
     }
@@ -373,9 +509,12 @@ fn ssao_quality(taa: bool) -> ScreenSpaceAmbientOcclusionQualityLevel {
         Ok("medium") | Ok("medio") | Ok("médio") => Q::Medium,
         Ok("high") | Ok("alto") => Q::High,
         Ok("ultra") => Q::Ultra,
-        _ => quality_gates()
-            .ssao
-            .unwrap_or(if taa { Q::High } else { Q::Medium }),
+        _ => {
+            quality_gates()
+                .ssao
+                .or(profile().ssao)
+                .unwrap_or(if taa { Q::High } else { Q::Medium })
+        }
     }
 }
 
@@ -498,34 +637,33 @@ pub fn ev100_for_exposure_multiplier(base_ev100: f32, multiplier: f32) -> f32 {
 /// **Âncora empírica (2026-09-12, vila do simple-rpg):** o histograma do
 /// `AutoExposure` lê o buffer HDR, onde o fog e o domo escrevem a PALETA em
 /// bruto e as poças/chamas/luas escrevem valores 10..30× acima — a MÉDIA da
-/// noite da vila mede ≈ −2.25 EV e a golden hour ≈ −2.6 EV (derivado de
-/// pares de screenshots com lift conhecido). O "escuro físico" de −6..−12
-/// em que a curva original pensava nunca acontece; a curva até −3 é o que
-/// protege o DIA e a GOLDEN HOUR de serem tocados, e o teto abaixo de −6 é
-/// a rede de segurança para cenas mesmo sem luz nenhuma.
+/// noite da vila mede ≈ −3,9 EV e a golden hour ≈ −2,6 EV.
 ///
-/// A legibilidade da NOITE não vive aqui — vive no desvio de grading
-/// [`NIGHT_GRADING_EXPOSURE_EV`], que escurece o frame DEPOIS do medidor
-/// (estável, não é corrigido). Este teto mantém-se 0.5: defensivo, e
-/// intocado pelo look aprovado de dia.
-/// `VIBER_NO_AECURVE=1` devolve a curva plana (o comportamento sem teto)
-/// para A/B.
-pub const NIGHT_LIFT_CAP_EV: f32 = 0.5;
+/// **1,5 (2026-10-21; era 0,5).** O medidor, por si, expõe a noite para o
+/// meio-cinza (+4 EV numa cena a −4 EV) e essa compensação é somada ao campo
+/// `ColorGrading.exposure` — era isso que CANCELAVA o filtro ND de −4,5, não
+/// um bug de uniforme (A/B: `VIBER_NO_AUTOEXPOSURE=1` devolvia média 0,084 em
+/// vez de 0,46). O teto tem de segurar a noite num valor JOGÁVEL: 1,5 EV
+/// acima da cena crua deixa o chão ao luar escuro (≈0,14 display) e as poças
+/// quentes/tochas/lanterna (25× o ambiente) a POPAR. O dia e a golden hour
+/// (x ≥ −3) ficam fora da curva e intactos.
+pub const NIGHT_LIFT_CAP_EV: f32 = 1.5;
 
 /// Luminância média (log2, a unidade do histograma) a partir da qual a curva
 /// começa a cercear o lift do medidor (rampa até ao teto).
 ///
-/// **−6,0 (LOOP C; era −3,0).** A noite da vila MEDIA −2,25 EV quando a curva
-/// foi calibrada (LOOP A, ambiente nocturno 0,13); o lote LOOP C baixou o
-/// ambiente (0,075) e a média desceu para ≈ **−3,9** — CAIU DENTRO da rampa
-/// antiga, que roubava ~1,65 stops ao medidor: com o ND de −2,8 EV por cima,
-/// as poças esmagavam para ~0,15 e liam-se azul (o "no light doing work" do
-/// crítico era em parte ISTO — medido 2026-09-13: brazeiro de 1M lm com a
-/// curva antiga quente −0,09; com o joelho a −6 e a mesma cena, poça a
-/// tonemap(1,5) ≈ 0,55 BLAZING). O joelho a −6 fica ABAIXO da noite mais
-/// escura autorada (−3,9) com margem, e a golden hour (−2,6) e o dia
-/// continuam em medição cheia — exactamente como estavam.
-pub const NIGHT_LIFT_KNEE_EV: f32 = 6.0;
+/// **−3,0 (2026-10-21; era −6,0).** A noite da vila mede ≈ −3,9 EV: com o
+/// joelho a −6 o medidor abria os +3,9 EV todos e a noite ficava em
+/// meio-cinza (o "dia enevoado" de 2026-10-21). O joelho a −3 fica ACIMA da
+/// noite e ABAIXO da golden hour (−2,6), portanto protege o look aprovado do
+/// dia/crepúsculo e prende a noite no teto.
+pub const NIGHT_LIFT_KNEE_EV: f32 = 3.0;
+
+/// Luminância média a partir da qual o lift está COMPLETAMENTE preso no
+/// teto. A rampa KNEE→FULL é curta de propósito (0,25 EV): o medidor já
+/// persegue o alvo a ~1 EV/s, portanto o degrau não se vê, e a noite não
+/// passa por uma zona húmida em que o lift ainda excede o teto.
+pub const NIGHT_LIFT_FULL_EV: f32 = 3.25;
 
 /// Compensação (stops) que o medidor soma ao alvo, para uma cena de
 /// luminância média `x` (log2) — o `y` da curva de
@@ -534,22 +672,26 @@ pub const NIGHT_LIFT_KNEE_EV: f32 = 6.0;
 ///
 /// * `x ≥ −KNEE`: `0` — o alvo de sempre (`−x`, expor para o meio-cinza):
 ///   dia, crepúsculo, sombra funda e interiores ficam exactamente como eram.
-/// * `x ≤ −2·KNEE`: `x + CAP` — o alvo fica preso em [`NIGHT_LIFT_CAP_EV`].
-/// * Entre os dois: rampa linear do `y` entre `0` e `−2·KNEE + CAP`, para o
-///   shutter não dar um degrau ao escurecer. (Rampa no `y` — rampear o ALVO
-///   não é monótono, porque `−x` cresce mais depressa do que a rampa aperta.)
+/// * `x ≤ −FULL`: `x + CAP` — o lift fica preso em [`NIGHT_LIFT_CAP_EV`].
+/// * Entre os dois: rampa curta na COMPENSAÇÃO (de `−FULL+CAP` até 0); o
+///   alvo sobe de CAP até `−x` no joelho, sem descer abaixo do teto.
 pub fn auto_exposure_compensation(x: f32) -> f32 {
     let knee = NIGHT_LIFT_KNEE_EV;
+    let full = NIGHT_LIFT_FULL_EV;
     if !x.is_finite() {
         return 0.0;
     }
     if x >= -knee {
         0.0
-    } else if x <= -2.0 * knee {
+    } else if x <= -full {
         x + NIGHT_LIFT_CAP_EV
     } else {
-        let s = (-x - knee) / knee;
-        (NIGHT_LIFT_CAP_EV - 2.0 * knee) * s
+        // Rampa curta entre o teto (−FULL) e o dia (−KNEE): interpola a
+        // COMPENSAÇÃO de `−FULL + CAP` até 0. O alvo sobe de CAP até `−x`
+        // (medição cheia) no joelho — nunca desce abaixo do teto.
+        let comp_full = -full + NIGHT_LIFT_CAP_EV;
+        let t = (-x - full) / (knee - full);
+        comp_full * (1.0 - t)
     }
 }
 
@@ -587,16 +729,17 @@ pub fn night_capped_compensation_curve() -> AutoExposureCompensationCurve {
 fn night_capped_curve_points() -> [bevy::math::Vec2; 6] {
     use bevy::math::vec2;
     let knee = NIGHT_LIFT_KNEE_EV;
+    let full = NIGHT_LIFT_FULL_EV;
     let at = |x: f32| vec2(x, auto_exposure_compensation(x));
     [
         // Escuro fundo: o teto já está preso (dois pontos só para a LUT
-        // cobrir toda a gama do histograma). −15/−12/−9/−6/0/8 são múltiplos
-        // de 0.25 — exactidão f32 obrigatória (ver doc acima). NOTA: com
-        // knee = 6, o 2.º ponto (−2·knee = −12) tem de ser DISTINTO do 1.º
-        // (x duplicado = DiscontinuityFound → LUT plana silenciosa).
+        // cobrir toda a gama do histograma). −15/−9/−3,25/−3/0/8 são
+        // múltiplos de 0.25 — exactidão f32 obrigatória (ver doc acima).
+        // A ordem TEM de ser ascendente: com o joelho antigo a −6 o 2.º ponto
+        // era −12; agora −3,25 vem DEPOIS de −9.
         at(-15.0),
-        at(-2.0 * knee),
         at(-9.0),
+        at(-full),
         at(-knee),
         at(0.0),
         at(8.0),
@@ -1273,14 +1416,13 @@ pub fn grade_temperature_full(golden: f32, low_sun: f32, night: f32) -> f32 {
 }
 
 /// Saturação pós-tonemap do grading CDL pela hora. A golden hour satura
-/// (+0.18); a noite NÃO dessatura (2026-09-12): a paleta noturna (fog/céu)
-/// já é um azul profundo pouco saturado à nascença (B:R ≈ 2.6 no fog) e o
-/// −0.22 antigo esmagava-o a CINZENTO — a "lama" do crítico (saturação
-/// medida 0.07 no frame inteiro às 23:00 da vila). A assinatura BOTW é azul
-/// SATURADO: 1.0 deixa o azul da paleta chegar ao ecrã e as poças de
-/// lanterna ganham o contraste de matiz que as separa do fundo.
-pub fn grade_saturation(golden: f32, _night: f32) -> f32 {
-    1.0 + golden * 0.18
+/// (+0.18); a noite ganha **+0.15** (2026-10-21): 1.0 deixava o azul chegar
+/// ao ecrã, mas o frame lia "acinzentado" (relato do utilizador) porque a
+/// média do fog/ambiente é dessaturada. O +0.15 separa o azul do céu e o
+/// quente das poças sem voltar à "lama" do −0.22 (que dessaturava tudo).
+pub fn grade_saturation(golden: f32, night: f32) -> f32 {
+    let n = if night.is_finite() { night.clamp(0.0, 1.0) } else { 0.0 };
+    1.0 + golden * 0.18 + n * 0.15
 }
 
 /// Desvio de exposição CDL (stops) aplicado à noite, por [`night`].
@@ -1294,24 +1436,27 @@ pub fn grade_saturation(golden: f32, _night: f32) -> f32 {
 /// porque a noite É ESCURA: céu 0.05..0.13, chão ao luar ~0.10, poças e
 /// lua por contraste.
 ///
-/// Este desvio EMPURRA o frame inteiro para baixo ([`NIGHT_GRADING_EXPOSURE_EV`]
-/// stops na noite cheia, rampando com `night`) DEPOIS do medidor — um filtro ND estável
-/// que o `AutoExposure` não corrige (o histograma é computado no buffer
-/// HDR pré-grading). As razões preservam-se: o fog e o céu escurecem, e o
+/// Este desvio EMPURRA o frame inteiro para baixo
+/// ([`NIGHT_GRADING_EXPOSURE_EV`] stops na noite cheia) — a mecânica da
+/// LOOP A. Mas descobriu-se (2026-10-21) que o `AutoExposure` soma a
+/// compensação do medidor ao MESMO campo, portanto o ND era cancelado na
+/// noite. O teto do medidor ([`NIGHT_LIFT_CAP_EV`]) limita essa compensação a
+/// 1,5 EV; o ND de −4,0 deixa um net de −2,5 EV — escuro, com as luzes a
+/// POPAR. As razões preservam-se: o fog e o céu escurecem, e o
 /// que já estava 10..30× acima do fog (chamas emissivas, lua, estrelas e
 /// as poças com as lanternas reforçadas no XML) continua acima e POPA.
 /// Medido: média 0.28 → 0.114, "lama" 0.84 → 0.002, 52% do frame <0.10,
 /// poças quentes visíveis, céu azul B:R ≈ 1.9.
 ///
 /// O dia (night=0) fica EXACTAMENTE como estava — desvio 0.
-/// **−4,5 (2026-10-20; era −7,4).** O −7,4 (depois de −6,8 na LOOP C)
-/// empurrava o frame para o toe do tonemap: média medida na curva
-/// −6,8 → 0,21 / −4,8 → 0,38 / −2,8 → 0,61 ("noite de estúdio", rejeitada).
-/// A −7,4 o chão, a relva e as casas do simple-rpg caíam abaixo do que dá
-/// para jogar — "não se vê nada". −4,5 fica junto do ponto medido 0,38:
-/// noite azul, poças e halos ainda acima do fundo (o desvio continua
-/// depois do medidor), dia intacto (night = 0 → desvio 0).
-pub const NIGHT_GRADING_EXPOSURE_EV: f32 = -4.5;
+/// **−3,0 + teto do medidor (2026-10-21).** O ND de −4,5/−4,0 era CANCELADO:
+/// o `AutoExposure` soma a compensação ao MESMO campo `ColorGrading.exposure`
+/// e, com o medidor livre, a noite pedia +4 → net 0 (meio-cinza, o "dia
+/// enevoado" medido: média 0,46). Com o teto do medidor em 1,5 EV
+/// ([`NIGHT_LIFT_CAP_EV`]) o net passa a **−1,5 EV**: o chão ao luar fica
+/// escuro (~0,18 display), o céu/névoa escurecem e as poças/tochas/lanterna
+/// (60× o ambiente) ficam acima do fundo e POPAM.
+pub const NIGHT_GRADING_EXPOSURE_EV: f32 = -3.0;
 
 /// Desvio de exposição (stops) para a fração de noite corrente — rampa
 /// linear até [`NIGHT_GRADING_EXPOSURE_EV`] na noite cheia.
@@ -1498,21 +1643,21 @@ fn golden_key_drive(
 /// Ganho de intensidade das TOCHAS (PointLights quentes COM sombra autoral)
 /// na noite plena (LOOP D).
 ///
-/// **8×** às 120k lm das tochas de rua da LOOP C: raio da poça ×2 (6 m →
-/// ~12 m, ainda sob o `range` default de 20 m do Bevy — o clamp não come a
-/// saia). O filtro ND da noite (−7,4 EV) dá folga: mesmo os miolos a
-/// brilho-de-sol ficam no ombro do TonyMcMapface (~0,7 display), não
-/// clipam. A família é discriminada pelo marcador `AuthoredShadowLight`
-/// (os postes de tocha do simple-rpg autoram `shadows="true"`; o marcador
-/// não é removido quando o orçamento desliga a sombra).
-pub const TORCH_POOL_NIGHT_GAIN: f32 = 8.0;
+/// **64×** às 120k lm das tochas de rua (2026-10-21; era 8×). Medido na
+/// engine viva: com o net da noite em −1,5 EV e as luzes a ×8, as poças
+/// liam-se como manchas ténues (a tocha de 120k é 8× ABAIXO do default de
+/// 1M lm do Bevy, que por sua vez é calibrado para uma exposição ~10 stops
+/// mais clara que a do jogo). ×64 põe o miolo das tochas a ~7,7M lm — as
+/// poças voltam a ler-se a 20-40 m e o medidor não as fecha porque o net da
+/// noite é fixo. O `range` default (20 m) e o clamp do TonyMcMapface
+/// seguram os núcleos. A família é discriminada pelo marcador
+/// `AuthoredShadowLight` (o marcador não é removido quando o orçamento
+/// desliga a sombra).
+pub const TORCH_POOL_NIGHT_GAIN: f32 = 64.0;
 
 /// Ganho das DEMAIS luzes quentes (janelas/braseiros/faróis, sombra off) —
-/// a luz ambiente quente da vila sobe um pouco (×2), sem competir com as
-/// poças. A variante XML-1M validada usava EXACTAMENTE estes rácios
-/// (tochas ×8, janelas ×2) e media: 11 poças quentes, estrelas visíveis,
-/// noite ainda a ler noite.
-pub const WARM_FILL_NIGHT_GAIN: f32 = 2.0;
+/// a luz ambiente quente da vila sobe ×8, sem competir com as poças.
+pub const WARM_FILL_NIGHT_GAIN: f32 = 8.0;
 
 /// Intensidade autoral de uma PointLight quente, capturada antes de o
 /// [`torch_pool_drive`] começar a compor (o espelho de `SunLightBase`).
@@ -1568,6 +1713,7 @@ fn torch_pool_drive(
         &mut PointLight,
         Option<&TorchLightBase>,
         Option<&crate::ambient::AuthoredShadowLight>,
+        Option<&crate::ambient::TravellerLantern>,
     )>,
 ) {
     let torch = torch_pool_gain(atmosphere.night);
@@ -1575,7 +1721,15 @@ fn torch_pool_drive(
     if (torch - 1.0).abs() < 1e-4 && (fill - 1.0).abs() < 1e-4 {
         return;
     }
-    for (entity, mut light, base, torch_authored) in &mut lights {
+    for (entity, mut light, base, torch_authored, traveller_lantern) in &mut lights {
+        // A lanterna do viajante conduz a PRÓPRIA intensidade (`night` ×
+        // LANTERN_MAX_INTENSITY) e nasce a 0. Sem esta saída, o pool
+        // capturava a base 0 no primeiro frame e escrevia 0 × ganho para
+        // sempre — a luz do herói ficava morta. O `lantern_driver` é a única
+        // fonte deste valor.
+        if traveller_lantern.is_some() {
+            continue;
+        }
         if !torch_pool_is_warm(light.color.to_linear()) {
             continue;
         }
@@ -2478,9 +2632,14 @@ fn drive_postfx(
             if g.post_saturation != saturation {
                 g.post_saturation = saturation;
             }
-            // Sombras levemente levantadas à noite (o toe do TonyMcMapface
-            // já ajuda; o CDL acaba de dar).
-            let lift = night * 0.06;
+            // **Lift da noite a 0 (2026-10-21).** Era `night * 0.06` — um
+            // offset ADITIVO em linear aplicado a TODAS as secções. Numa cena
+            // nocturna (valores ~0,005..0,05) somar 0,06 é mais do que
+            // duplicar os pretos e cobre tudo — chão, paredes e até as poças
+            // de luz — com um véu CINZENTO (relato: "não é escuridão, até as
+            // luzes ficam acinzentadas"). O toe do TonyMcMapface e o fill do
+            // ambiente já levantam as sombras; o lift só desaturava.
+            let lift = 0.0;
             for section in grading.all_sections_mut() {
                 if section.lift != lift {
                     section.lift = lift;
@@ -2841,6 +3000,38 @@ mod tests {
         assert!(gates.vignette && !gates.chromatic && gates.cas);
     }
 
+    /// O `postfx.disabled` do config usa os mesmos aliases do bridge e chega
+    /// aos gates da câmara (não é só cosmético).
+    #[test]
+    fn test_config_profile_disables_gates() {
+        let config = crate::config::PostFxConfig {
+            disabled: vec![
+                "volumetrics".into(),
+                "motion-blur".into(),
+                "ca".into(),
+                "nao-existe".into(),
+            ],
+            ssao: Some("medium".into()),
+        };
+        let profile = PostFxProfile::from_config(Some(&config));
+        assert!(profile.off("VOLUMETRICS"));
+        assert!(profile.off("MOTION_BLUR"));
+        assert!(profile.off("CHROMATIC"));
+        assert!(!profile.off("BLOOM"));
+        assert_eq!(
+            profile.ssao,
+            Some(ScreenSpaceAmbientOcclusionQualityLevel::Medium)
+        );
+        // E o gate composto (LENS) continua a funcionar por alias.
+        let lens = PostFxProfile::from_config(Some(&crate::config::PostFxConfig {
+            disabled: vec!["lens".into()],
+            ssao: None,
+        }));
+        let gates = PostFxGates::from_off(|k| lens.off(k));
+        assert!(!gates.vignette && !gates.chromatic && !gates.cas);
+        assert!(gates.dof && gates.ssao);
+    }
+
     /// Um gate desligado AO VIVO sai da câmara já equipada e volta quando
     /// liga — antes só a flag mudava e o componente ficava lá.
     #[test]
@@ -2905,17 +3096,15 @@ mod tests {
     #[test]
     fn test_auto_exposure_lift_is_capped_in_the_dark() {
         // Escuro fundo (rede de segurança): o ganho fica preso no teto.
-        // Com o joelho LOOP C (−6), o piso da rampa é −12.
         for x in [-13.0, -15.0] {
             assert!(
                 (auto_exposure_target_lift(x) - NIGHT_LIFT_CAP_EV).abs() < 1e-5,
                 "x={x} deve estar preso no teto"
             );
         }
-        // DIA, GOLDEN HOUR (−2.6), a noite da LOOP A (−2.25) E a noite LOOP C
-        // (≈−3.9, ambiente 0,075): medição cheia — o medidor abre como sempre
-        // e as POÇAS sobrevivem ao ND (o bug do joelho a −3: a noite LOOP C
-        // caía DENTRO da rampa e perdia ~1,65 stops — poças esmagadas).
+        // No joelho (−3): medição cheia; a noite da vila (−3,9) fica PRESA no
+        // teto — é isso que a torna escura com as luzes a POPAR (antes o
+        // medidor abria os +3,9 e a noite ficava em meio-cinza).
         let knee = -NIGHT_LIFT_KNEE_EV;
         assert!((auto_exposure_target_lift(knee) + knee).abs() < 1e-5);
         assert!((auto_exposure_target_lift(0.0)).abs() < 1e-5);
@@ -2926,18 +3115,21 @@ mod tests {
             0.0,
             "noite da vila (LOOP A): curva 0"
         );
-        assert_eq!(
-            auto_exposure_compensation(-3.9),
-            0.0,
-            "noite da vila (LOOP C, ambiente 0,075): curva 0 — as poças vivem"
+        assert!(
+            (auto_exposure_target_lift(-3.9) - NIGHT_LIFT_CAP_EV).abs() < 1e-5,
+            "noite da vila (−3,9) presa no teto"
         );
-        // A rampa é monótona entre o joelho e o dobro (sem degrau no shutter).
+        // A rampa desce do joelho para o teto e FICA lá (sem voltar a subir).
         let ramp: Vec<f32> = (0..=10)
             .map(|i| auto_exposure_target_lift(knee - i as f32 * 0.3))
             .collect();
         assert!(
             ramp.windows(2).all(|w| w[1] <= w[0] + 1e-6),
             "rampa não-monotónica: {ramp:?}"
+        );
+        assert!(
+            ramp.iter().all(|v| *v <= knee.abs() + 1e-6),
+            "o lift nunca passa a medição cheia do joelho: {ramp:?}"
         );
         // A curva tem de sair do `from_curve` (monótona, sem descontinuidades
         // — um `Err` cai no default, que é a LUT plana e sem teto).
@@ -2951,17 +3143,23 @@ mod tests {
     }
 
     #[test]
-    fn test_night_readability_lives_in_grading_not_in_the_meter() {
-        // A MÉDIA da noite da vila (−2.25: fog + poças + chamas no buffer)
-        // fica ACIMA do joelho — o medidor abre como sempre (+2.25). A
-        // legibilidade vem do DESVIO de grading, que escurece DEPOIS do
-        // medidor (não é corrigido): net ≈ +2.25 − 2.8 < 0, a noite desce
-        // abaixo da paleta cru.
-        let meter_lift = auto_exposure_target_lift(-2.25);
-        assert!((meter_lift - 2.25).abs() < 1e-5, "medição cheia de noite");
-        let net = meter_lift + grade_night_exposure_offset(1.0);
-        assert!(net < 0.0, "a noite tem de ficar abaixo da paleta: {net}");
-        // E o dia fica EXACTAMENTE como estava: desvio 0, curva 0.
+    fn test_night_readability_lives_in_the_meter_cap() {
+        // A MÉDIA da noite da vila (−3,9: fog + poças + chamas no buffer) fica
+        // PRESA no teto de 1,5 EV — o medidor já não abre para o meio-cinza.
+        // As poças/lanterna (25× o ambiente) continuam acima do fundo e POPAM.
+        let lift = auto_exposure_target_lift(-3.9);
+        assert!(
+            (lift - NIGHT_LIFT_CAP_EV).abs() < 1e-5,
+            "noite presa no teto: {lift}"
+        );
+        assert!(lift < 3.0, "a noite não abre para o meio-cinza");
+        // A golden hour (−2,6) continua em medição cheia.
+        assert!((auto_exposure_target_lift(-2.6) - 2.6).abs() < 1e-5);
+        // O NET da noite: teto do medidor (1,5) + ND (−3,0) = −1,5 EV — a
+        // noite fica ABAIXO da paleta crua e as luzes (60× o ambiente) POPAM.
+        let net = auto_exposure_target_lift(-3.9) + grade_night_exposure_offset(1.0);
+        assert!((net + 1.5).abs() < 1e-5, "net da noite: {net}");
+        assert!(net < 0.0);
         assert_eq!(grade_night_exposure_offset(0.0), 0.0);
         assert_eq!(auto_exposure_compensation(-1.0), 0.0);
     }
@@ -2971,7 +3169,10 @@ mod tests {
         // A noite NÃO dessatura: o azul da paleta (fog/céu) tem de chegar ao
         // ecrã (o −0.22 antigo produzia a "lama cinzenta" medida 0.07 de
         // saturação às 23:00).
-        assert!((grade_saturation(0.0, 1.0) - 1.0).abs() < 1e-6);
+        // A noite SATURA ligeiramente (+0.15): o azul do céu e o quente das
+        // poças separam-se; o −0.22 antigo é que a esmagava a cinzento.
+        assert!((grade_saturation(0.0, 1.0) - 1.15).abs() < 1e-6);
+        assert!(grade_saturation(0.0, 1.0) > 1.0);
         assert!((grade_saturation(0.0, 0.0) - 1.0).abs() < 1e-6);
         // Golden hour continua a saturar.
         assert!((grade_saturation(1.0, 0.0) - 1.18).abs() < 1e-6);
@@ -2985,9 +3186,9 @@ mod tests {
     fn test_night_exposure_offset_ramps_and_spares_day() {
         // Dia e crepúsculo (night=0): SEM desvio — o look aprovado não mexe.
         assert_eq!(grade_night_exposure_offset(0.0), 0.0);
-        // Noite cheia: o desvio completo.
+        // Noite cheia: o desvio completo (o teto do medidor soma 1,5 → net −2,5).
         assert_eq!(grade_night_exposure_offset(1.0), NIGHT_GRADING_EXPOSURE_EV);
-        assert!(NIGHT_GRADING_EXPOSURE_EV < -2.0, "a noite tem de escurecer");
+        assert!(NIGHT_GRADING_EXPOSURE_EV <= -2.0, "a noite tem de escurecer");
         // Rampa linear e monotónica com a fração de noite (o shutter não dá
         // degraus ao anoitecer).
         let half = grade_night_exposure_offset(0.5);
@@ -3528,6 +3729,18 @@ mod tests {
                 ..Default::default()
             })
             .id();
+        // Lanterna do viajante: nasce a 0 e é o `lantern_driver` que a acende.
+        // Se o pool a apanhasse, capturava base 0 e escrevia 0 para sempre.
+        let lantern = world
+            .spawn((
+                bevy::light::PointLight {
+                    intensity: 0.0,
+                    color: Color::srgb(1.0, 0.69, 0.40),
+                    ..Default::default()
+                },
+                crate::ambient::TravellerLantern,
+            ))
+            .id();
         // Primeira passada: captura a base (via Commands); a segunda compõe.
         world.run_system_once(torch_pool_drive).unwrap();
         world.clear_trackers();
@@ -3557,6 +3770,15 @@ mod tests {
         assert!(
             world.get::<TorchLightBase>(cool).is_none(),
             "a luz fria nem ganha base"
+        );
+        let lantern_light = world.get::<bevy::light::PointLight>(lantern).unwrap();
+        assert_eq!(
+            lantern_light.intensity, 0.0,
+            "lanterna do viajante fica fora do pool (o driver é a fonte)"
+        );
+        assert!(
+            world.get::<TorchLightBase>(lantern).is_none(),
+            "a lanterna não ganha base do pool"
         );
 
         // Dia (night = 0): o drive é no-op (early-out do ganho 1).
@@ -3872,14 +4094,14 @@ mod tests {
     fn test_kick_accumulates_with_cap_and_exposure_brightens() {
         let mut state = PostFxState::default();
         assert_eq!(state.kick, 0.0);
-        state.kick_exposure(crate::vitals::LEVELUP_KICK_EV);
+        state.kick_exposure(0.6);
         assert!(
             (state.kick - 0.6).abs() < 1e-5,
             "kick do level-up: {}",
             state.kick
         );
         // Um segundo level-up a meio soma (não reinicia) — até ao teto.
-        state.kick_exposure(crate::vitals::LEVELUP_KICK_EV);
+        state.kick_exposure(0.6);
         assert!(
             (state.kick - MAX_KICK_EV).abs() < 1e-5,
             "teto: {}",

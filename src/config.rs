@@ -45,6 +45,15 @@ pub struct GameConfig {
     /// Sem suporte na máquina a engine cai para o TAA com aviso.
     #[serde(default)]
     pub dlss: Option<String>,
+    /// Perfil de pós-processamento do JOGO (ver [`crate::postfx::PostFxProfile`]):
+    /// efeitos a desligar e qualidade do SSAO. Ausente = a stack completa da
+    /// engine. `VIBER_NO_*` continua a ganhar para bissecção de QA.
+    #[serde(default)]
+    pub postfx: Option<PostFxConfig>,
+    /// Reflexos de cena (`src/water_ssr.rs`): modo, chão molhado, passos e
+    /// alcance. Ausente = o comportamento do preset (SSR só no `alto`).
+    #[serde(default)]
+    pub reflections: Option<ReflectionsConfig>,
     pub assets: AssetsConfig,
     pub game: GameDirs,
     pub save: SaveConfig,
@@ -52,6 +61,51 @@ pub struct GameConfig {
     /// [`crate::project`]. Ausente = mundo de uma só cena.
     #[serde(default)]
     pub project: Option<crate::project::ProjectConfig>,
+}
+
+/// `postfx:` — a lente que ESTE jogo quer pagar.
+///
+/// A stack da engine liga tudo por omissão (bloom, SSAO, volumétrico, DOF,
+/// motion blur, lente). Um jogo que não lê os efeitos em movimento pode
+/// desligá-los aqui sem passar o preset `desempenho` inteiro (que também
+/// corta sombras, relva e alcance de render).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PostFxConfig {
+    /// Gates a desligar, com os mesmos nomes do bridge
+    /// (`viber.debug.postfx{…}`) e de `VIBER_NO_<KEY>`: `volumetrics`, `dof`,
+    /// `motion-blur`, `contact-shadows`, `chromatic-aberration`, `vignette`,
+    /// `split-tone`, `auto-exposure`, `bloom`, `ssao`, `cas`, `aerial`,
+    /// `taa` ou `lens` (vinheta + aberração + CAS de uma vez).
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    /// Qualidade do SSAO: `low | medium | high | ultra`. `VIBER_SSAO` e os
+    /// tiers do `AdaptiveQuality` continuam a ganhar.
+    #[serde(default)]
+    pub ssao: Option<String>,
+}
+
+/// `reflections:` — o custo do reflexo de CENA (SSR raster).
+///
+/// O passe (`src/water_ssr.rs`) faz raymarch screen-space na água e, com
+/// chuva, no chão molhado. O chão é o que cobre o ecrã inteiro quando chove;
+/// `wet-ground: false` deixa lá o sheen PBR barato (`walls_b.w` no shader do
+/// terreno) e reserva o raymarch para a água.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReflectionsConfig {
+    /// `auto` (default: SSR só no preset `alto`) | `off` | `water` (só água)
+    /// | `full` (água + chão molhado). `VIBER_WATER_SSR` sobrepõe-se.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// O chão molhado entra no raymarch? `false` é o modo barato.
+    #[serde(default)]
+    pub wet_ground: Option<bool>,
+    /// Passos do raymarch (default 24). Menos passos = reflexo mais curto.
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Alcance do raymarch em metros (default 140).
+    #[serde(default)]
+    pub max_distance: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,10 +133,6 @@ pub struct AssetsConfig {
 pub struct GameDirs {
     /// `script="x.lua"` + hot-reload.
     pub scripts_dir: PathBuf,
-    /// Quests `*.json` do mundo (`quests::load_quests_from_dir`). Ausente →
-    /// `quests/` ao lado do `world.xml` (ver [`GameConfig::quests_dir_on`]).
-    #[serde(default)]
-    pub quests_dir: Option<PathBuf>,
     // NOTA: NÃO há `ui_dir` — o `src="@ui/hud.css"` do UiStyle é relativo à
     // pasta do jogo e o prefixo `ui/` é parte do caminho autor (contrato do
     // XML); juntar um dir configurável duplicava o prefixo e despia o HUD de
@@ -204,17 +254,6 @@ impl GameConfig {
         world_dir.join(&self.game.scripts_dir)
     }
 
-    /// Pasta de quests (filesystem, contra a pasta do jogo). Default
-    /// `quests/` ao lado do `world.xml` quando o config não remapeia.
-    pub fn quests_dir_on(&self, world_dir: &Path) -> PathBuf {
-        world_dir.join(
-            self.game
-                .quests_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("quests")),
-        )
-    }
-
     /// Onde gravar os saves (absoluto; `~` já expandido no load).
     pub fn save_dir(&self) -> &Path {
         &self.save.dir
@@ -265,12 +304,22 @@ pub fn load(world_dir: &Path) -> Result<GameConfig> {
 /// um campo futuro não deve rebentar numa engine antiga (igual aos attrs XML).
 fn warn_unknown_keys(path: &Path, value: &serde_yaml::Value) {
     const TOP: &[&str] = &[
-        "title", "graphics", "dlss", "assets", "game", "save", "project",
+        "title",
+        "graphics",
+        "dlss",
+        "postfx",
+        "reflections",
+        "assets",
+        "game",
+        "save",
+        "project",
     ];
     const PROJECT: &[&str] = &["main-scene", "scenes", "autoload"];
     const ASSETS: &[&str] = &["roots", "bgm_dir", "sfx_dir", "terrain_textures_dir"];
-    const GAME: &[&str] = &["scripts_dir", "quests_dir"];
+    const GAME: &[&str] = &["scripts_dir"];
     const SAVE: &[&str] = &["dir"];
+    const POSTFX: &[&str] = &["disabled", "ssao"];
+    const REFLECTIONS: &[&str] = &["mode", "wet-ground", "steps", "max-distance"];
     let Some(map) = value.as_mapping() else {
         return;
     };
@@ -290,6 +339,8 @@ fn warn_unknown_keys(path: &Path, value: &serde_yaml::Value) {
             "game" => GAME,
             "save" => SAVE,
             "project" => PROJECT,
+            "postfx" => POSTFX,
+            "reflections" => REFLECTIONS,
             _ => continue,
         };
         if let Some(inner) = group.as_mapping() {
@@ -330,8 +381,10 @@ fn expand_home(path: &Path) -> PathBuf {
 pub(crate) fn fixture() -> GameConfig {
     GameConfig {
         title: None,
-        graphics: None, // default: preset `equilibrado` (crate::graphics)
-        dlss: None,     // default: auto (só com a feature `dlss` compilada)
+        graphics: None,    // default: preset `equilibrado` (crate::graphics)
+        dlss: None,        // default: auto (só com a feature `dlss` compilada)
+        postfx: None,      // default: a stack completa da engine
+        reflections: None, // default: SSR só no preset `alto`
         assets: AssetsConfig {
             roots: Vec::new(),
             bgm_dir: PathBuf::from("assets/audio/bgm"),
@@ -340,7 +393,6 @@ pub(crate) fn fixture() -> GameConfig {
         },
         game: GameDirs {
             scripts_dir: PathBuf::from("scripts"),
-            quests_dir: None, // default: quests/ ao lado do world.xml
         },
         save: SaveConfig {
             dir: PathBuf::from("/tmp"),
@@ -402,9 +454,39 @@ mod tests {
             vec![world_dir.to_path_buf(), dir.path().join("pool/public")]
         );
         assert_eq!(config.scripts_dir_on(world_dir), world_dir.join("scripts"));
-        // quests_dir ausente no config → default `quests/` ao lado do mundo.
-        assert_eq!(config.quests_dir_on(world_dir), world_dir.join("quests"));
         assert_eq!(config.save_dir(), Path::new("/tmp/viber-test-saves"));
+    }
+
+    #[test]
+    fn postfx_profile_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!(
+                "{FULL}postfx:\n  disabled:\n    - volumetrics\n    - motion-blur\n  ssao: medium\n"
+            ),
+        );
+        let config = load(dir.path()).unwrap();
+        let postfx = config.postfx.expect("postfx parseado");
+        assert_eq!(postfx.disabled, vec!["volumetrics", "motion-blur"]);
+        assert_eq!(postfx.ssao.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn reflections_profile_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!(
+                "{FULL}reflections:\n  mode: water\n  wet-ground: false\n  steps: 16\n  max-distance: 90\n"
+            ),
+        );
+        let config = load(dir.path()).unwrap();
+        let reflections = config.reflections.expect("reflections parseado");
+        assert_eq!(reflections.mode.as_deref(), Some("water"));
+        assert_eq!(reflections.wet_ground, Some(false));
+        assert_eq!(reflections.steps, Some(16));
+        assert_eq!(reflections.max_distance, Some(90.0));
     }
 
     #[test]

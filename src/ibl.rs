@@ -25,7 +25,8 @@ use bevy::image::Image;
 use bevy::light::{GeneratedEnvironmentMapLight, LightProbe};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+    Extent3d, TextureDataOrder, TextureDimension, TextureFormat, TextureViewDescriptor,
+    TextureViewDimension,
 };
 
 use crate::worldsys::{AtmosphereState, DayCycleState};
@@ -171,8 +172,17 @@ pub fn sky_cubemap_tinted(
     let mut data = vec![0u8; (FACE_SIZE * FACE_SIZE * 6) as usize * 8];
     let sun = a.sun_dir.normalize_or_zero();
     let moon = a.moon_dir.normalize_or_zero();
-    let write = |data: &mut [u8], size: u32, face: u32, x: u32, y: u32, rgba: [u16; 4]| {
-        let base = (face * size * size + y * size + x) as usize * 8;
+    let write = |data: &mut [u8],
+                 base_off: usize,
+                 size: u32,
+                 face: u32,
+                 x: u32,
+                 y: u32,
+                 rgba: [u16; 4]| {
+        // `base_off` é o início do MIP: sem ele cada nível reescrevia o
+        // começo do mip 0 e os mips especulares ficavam a zeros (ambiente
+        // preto em roughness > 0).
+        let base = base_off + (face * size * size + y * size + x) as usize * 8;
         for c in 0..4 {
             data[base + c * 2..base + c * 2 + 2].copy_from_slice(&rgba[c].to_le_bytes());
         }
@@ -191,7 +201,7 @@ pub fn sky_cubemap_tinted(
                     f32_to_f16(color[2]),
                     0x3c00, // alpha = 1.0 em f16
                 ];
-                write(&mut data, FACE_SIZE, face, x, y, rgba);
+                write(&mut data, 0, FACE_SIZE, face, x, y, rgba);
             }
         }
     }
@@ -225,11 +235,10 @@ pub fn sky_cubemap_tinted(
                         f32_to_f16(acc[2] * 0.25),
                         0x3c00,
                     ];
-                    write(&mut data, size, face, x, y, rgba);
+                    write(&mut data, level_off, size, face, x, y, rgba);
                 }
             }
         }
-        let _ = level_off;
     }
     // Construção MANUAL (Image::default + descriptor): o `Image::new`
     // valida os bytes contra a mip chain QUE ELE calcula (log2, sem o 1×1),
@@ -245,6 +254,10 @@ pub fn sky_cubemap_tinted(
     image.texture_descriptor.dimension = TextureDimension::D2;
     image.texture_descriptor.format = TextureFormat::Rgba16Float;
     image.texture_descriptor.mip_level_count = mips;
+    // O buffer é MIP-MAJOR (6 faces por nível); o default da Image é
+    // LayerMajor (todas as mips da face 0, depois a face 1…), o que
+    // entrelaçava faces/mips a partir do nível 1.
+    image.data_order = TextureDataOrder::MipMajor;
     // A geração GPU cria views de STORAGE sobre o cubemap fonte (SPD/copy)
     // — sem STORAGE_BINDING no usage a view é inválida e o prepare do
     // GpuImage panica (storage_view_mip_N).
@@ -290,8 +303,8 @@ fn f16_to_f32(bits: u16) -> f32 {
     let exp = ((bits >> 10) & 0x1f) as i32;
     let mant = (bits & 0x03ff) as u32;
     let value = if exp == 0 {
-        // subnormal (ou zero) — chega para cores escuras
-        (mant as f32) / 1024.0 / 65536.0
+        // subnormal f16 = mant · 2^-24 (a divisão antiga dava 2^-26).
+        (mant as f32) / 16_777_216.0
     } else if exp == 31 {
         f32::INFINITY
     } else {
@@ -399,10 +412,15 @@ fn f32_to_f16(v: f32) -> u16 {
         return sign | out as u16;
     }
     if unbiased >= -25 {
-        // subnormal
-        let mut m = (mant | 0x0080_0000) >> (14 - unbiased);
-        let rest = (mant | 0x0080_0000) & ((1 << (14 - unbiased)) - 1);
-        if rest > (1 << (13 - unbiased)) || (rest == (1 << (13 - unbiased)) && (m & 1) == 1) {
+        // subnormal: valor = (2^23 + mant)·2^(e-23); o f16 subnormal vale
+        // m·2^-24, logo m = (mant | 0x800000) >> (-e - 1). O shift antigo
+        // (14 - e) era 15 bits maior: tudo abaixo de 2^-14 virava 0 e em
+        // debug dava panic de shift overflow.
+        let shift = (-unbiased - 1) as u32;
+        let mut m = (mant | 0x0080_0000) >> shift;
+        let half = 1u32 << (shift - 1);
+        let rest = (mant | 0x0080_0000) & ((1u32 << shift) - 1);
+        if rest > half || (rest == half && (m & 1) == 1) {
             m += 1;
         }
         return sign | m as u16;

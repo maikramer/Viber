@@ -51,7 +51,7 @@ fn dimensions() -> (u32, u32) {
         .map(|s| s.parse::<u32>().expect("capture width integer"))
         .unwrap_or(256);
     assert!(
-        (64..=2048).contains(&width) && width % 16 == 0,
+        (64..=2048).contains(&width) && width.is_multiple_of(16),
         "width must be 64..2048 and divisible by 16 for readback alignment"
     );
     (width, width / 2)

@@ -16,7 +16,7 @@ fn shader_validates_under_naga() {
     let module =
         naga::front::wgsl::parse_str(WGSL).unwrap_or_else(|e| panic!("parse WGSL falhou: {e:?}"));
     let mut validator = naga::valid::Validator::new(ValidationFlags::all(), Capabilities::all());
-    let info = validator
+    let _info = validator
         .validate(&module)
         .unwrap_or_else(|e| panic!("validação naga falhou: {e:?}"));
 
@@ -73,7 +73,7 @@ fn surfaces_are_unrolled_fields_no_dynamic_arrays() {
                 if member.name.as_deref().is_some_and(|n| {
                     n.len() == 2
                         && n.starts_with('s')
-                        && n.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+                        && n.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
                 }) {
                     s_fields += 1;
                 }

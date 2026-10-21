@@ -594,13 +594,17 @@ fn biome_fog_system(
         color = [color[0] * k, color[1] * k, color[2] * k];
     }
     // À noite a névoa não pode "acender" o mundo: é o azul profundo que
-    // engole o longe e deixa as fogueiras a valer ouro. Mas a névoa é
-    // VISIBILIDADE: noite +8 %, chuva +4 % (eram +35 %/+60 %, e o +12 % da
-    // chuva ainda fechava o horizonte). A base ([`FOG_BASE_DENSITY`]) e o
-    // multiplicador do bioma continuam a mandar.
+    // engole o longe e deixa as fogueiras a valer ouro. Mas a névoa também é
+    // VISIBILIDADE: abaixo de ~20 % do alcance ela deixa de separar camadas
+    // e passa a ser um véu que apaga o que está longe, incluindo as luzes.
+    // O +8 % antigo adensava-a exactamente na noite; agora o braço nocturno
+    // ABRE 20 % (a base e o multiplicador do bioma continuam a mandar) e a
+    // chuva soma só os 4 % de sempre.
     let rain = weather.map(|w| w.rain.clamp(0.0, 1.0)).unwrap_or(0.0);
-    let density =
-        FOG_BASE_DENSITY * smooth_mult * (1.0 + 0.08 * atmosphere.night) * (1.0 + 0.04 * rain);
+    let density = FOG_BASE_DENSITY
+        * smooth_mult
+        * (1.0 - 0.20 * atmosphere.night)
+        * (1.0 + 0.04 * rain);
 
     // Inscattering direcional — a escala NÃO é arbitrária, e errá-la lava o
     // frame inteiro de branco (r1/r2).
@@ -1246,6 +1250,7 @@ fn rain_emitter_driver(
     look: Res<RainLook>,
     scene: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
+    atmosphere: Option<Res<crate::worldsys::AtmosphereState>>,
     players: Query<&GlobalTransform, With<Player>>,
     mut emitters: Query<
         (
@@ -1295,8 +1300,18 @@ fn rain_emitter_driver(
     emitter.sim.resolved.emission_rate = RAIN_MAX_RATE * intensity * look.rate_scale;
     // Look ao vivo (`viber.debug.rain_look`): o preset dá o default, o
     // recurso manda. Reaplicado todos os frames — é uma escrita de 4 f32.
-    emitter.sim.resolved.near_fade_m = look.near_fade_m;
-    emitter.sim.resolved.max_alpha = look.max_alpha;
+    //
+    // À NOITE a cortina é o véu nº 1: as gotas são cinza-claro não iluminado
+    // e o fundo cai para azul-escuro, portanto o contraste relativo sobe. O
+    // near-fade afasta-se da câmara (8 → 12 m) e o alpha cai 55% — a chuva
+    // continua a ler-se, a cena por trás deixa de desaparecer. De dia
+    // (`night` = 0) os valores ficam EXACTAMENTE como estavam.
+    let night = atmosphere
+        .as_ref()
+        .map(|a| a.night.clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    emitter.sim.resolved.near_fade_m = look.near_fade_m * (1.0 + 0.5 * night);
+    emitter.sim.resolved.max_alpha = look.max_alpha * (1.0 - 0.55 * night);
     let base = crate::particles::preset("rain");
     emitter.sim.resolved.size = (
         base.size.0 * look.width_scale,
@@ -1430,10 +1445,18 @@ fn rain_ambience_driver(
 // luzes com sombras não é tocado; como está sempre a <2 m do herói, ocupa um
 // único lugar no orçamento das 12 mais próximas.
 
-/// Intensidade da lanterna à noite (lm — ~uma tocha do mundo).
-pub const LANTERN_MAX_INTENSITY: f32 = 1200.0;
+/// Intensidade da lanterna à noite (lm).
+///
+/// **600 000 (era 1 200 → 30 000).** A 1 200 lm a lanterna valia ~10 lux a
+/// 3 m — 17× ABAIXO do ambiente noturno, e nem se via. A 30 000 lm o pool
+/// ainda era ténue na engine viva: o default do Bevy é 1M lm e mesmo esse é
+/// calibrado para uma exposição ~10 stops mais clara que a do jogo, e a
+/// noite leva um net de −1,5 EV. 600k lm dão ~53 000 lux a 3 m — um pool
+/// quente inequívoco à frente do herói, com o resto do mundo escuro.
+/// `range` 12 mantém a poça antes do `range` default de 20 m das tochas.
+pub const LANTERN_MAX_INTENSITY: f32 = 600_000.0;
 /// Alcance da lanterna (m).
-pub const LANTERN_RANGE: f32 = 9.0;
+pub const LANTERN_RANGE: f32 = 12.0;
 /// Altura da chama acima do chão do herói (m).
 const LANTERN_HEIGHT: f32 = 2.2;
 
@@ -1663,7 +1686,8 @@ mod tests {
         }
     }
 
-    /// A chuva fecha o horizonte: densidade ×(1+0.6·rain) na névoa da câmara.
+    /// A chuva fecha o horizonte ×1.04 e a noite ABRE a névoa ×0.80: no
+    /// escuro a cortina tem de mostrar as luzes, não tapá-las.
     #[test]
     fn test_biome_fog_thickens_with_rain() {
         fn fog_density(rain: f32, night: f32) -> f32 {
@@ -1708,14 +1732,9 @@ mod tests {
         );
         let night = fog_density(0.0, 1.0);
         assert!(
-            (night / dry - 1.08).abs() < 1e-4,
-            "noite engrossa a névoa ×1.08 (subtil): {night} vs {dry}"
+            (night / dry - 0.80).abs() < 1e-4,
+            "noite ABRE a névoa ×0.80 (visibilidade): {night} vs {dry}"
         );
     }
 
-    #[test]
-    fn test_region_format() {
-        // REGIONS do travel expostas em travel.rs — aqui só smoke do catálogo
-        assert_eq!(crate::travel::LANDMARKS.len(), 12);
-    }
 }

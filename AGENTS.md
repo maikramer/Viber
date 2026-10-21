@@ -390,10 +390,13 @@ depth+normal prepass: água detectada por
 COTA (`TerrainRuntime.water`), raio refletido pela normal (com ondas), 24
 passos + bisseção, Fresnel; sem hit mantém o espelho do IBL. **CHÃO MOLHADO:
 com `<Weather rain>`, superfícies para cima ganham o mesmo reflexo × chuva ×
-0.55 — o look "rua molhada" sem material novo.** **OPT-IN**
-(`VIBER_WATER_SSR=1`) — sem acumulação temporal própria o reflexo dança com as
-ondas (medido 2026-09-10); é caminho raster oficial mas não está no frame por
-omissão. Ligar custa ~1 passe fullscreen de 24 passos. WGSL
+0.55 — o look "rua molhada" sem material novo.** O custo do chão é o que
+cresce com a chuva no mapa todo; `config.yaml → reflections.wet-ground: false`
+tira-o do raymarch (o sheen barato do `walls_b.w` no terreno fica). **OPT-IN**
+(`VIBER_WATER_SSR=1`, ou `reflections.mode` do config) — sem acumulação
+temporal própria o reflexo dança com as ondas (medido 2026-09-10); é caminho
+raster oficial mas não está no frame por omissão. Ligar custa ~1 passe
+fullscreen; `reflections.steps`/`max-distance` cortam o raymarch. WGSL
 self-contained em `shaders/water_ssr.wesl` (escrito no `run`); harness
 `tests/water_ssr_shader.rs` valida layout (288/176 B) e proíbe indexação
 dinâmica de arrays em uniforms (crash do compilador NV 595.84 — cotas em

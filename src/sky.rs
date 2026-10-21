@@ -634,10 +634,12 @@ mod tests {
     /// O shader gerado substitui o bloco CONFIG e mantém o resto intacto.
     #[test]
     fn test_render_world_shader_specializes_config() {
-        let mut config = SkyConfig::default();
-        config.drive = true;
-        config.clock_start = 1140.0;
-        config.aurora = 1.25;
+        let config = SkyConfig {
+            drive: true,
+            clock_start: 1140.0,
+            aurora: 1.25,
+            ..Default::default()
+        };
         let shader = config.render_world_shader();
         assert!(shader.contains("const CFG_DRIVE: f32 = 1;"));
         assert!(shader.contains("const CFG_CLOCK_START: f32 = 1140;"));
@@ -647,11 +649,10 @@ mod tests {
         assert!(shader.contains("aurora_ribbons"));
         assert_eq!(shader.matches(CONFIG_END).count(), 1);
         // Sem marcadores (template partido), devolve o template intacto.
-        assert_eq!(
+        assert!(
             SkyConfig::default()
                 .render_world_shader()
-                .contains("const CFG_DRIVE"),
-            true
+                .contains("const CFG_DRIVE")
         );
     }
 
@@ -659,10 +660,12 @@ mod tests {
     /// o IBL usa (o ganho é a constante partilhada, nunca uma cópia).
     #[test]
     fn test_render_world_shader_emits_nishita_consts() {
-        let mut config = SkyConfig::default();
-        config.model = SkyModel::Nishita;
-        config.rayleigh = 2.8;
-        config.nishita_mie = 1.5;
+        let config = SkyConfig {
+            model: SkyModel::Nishita,
+            rayleigh: 2.8,
+            nishita_mie: 1.5,
+            ..Default::default()
+        };
         let shader = config.render_world_shader();
         assert!(shader.contains("const CFG_SKY_MODEL: f32 = 1;"));
         assert!(shader.contains(&format!(
@@ -699,7 +702,6 @@ mod tests {
             script: None,
             props: Vec::new(),
             links: Default::default(),
-            destructible: None,
             transform: TransformSpec::default(),
             physics: PhysicsSpec::default(),
             kind,

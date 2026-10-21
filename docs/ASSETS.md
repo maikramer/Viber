@@ -30,6 +30,26 @@ dlss: auto                     # opcional — off | auto (default) | dlaa | qual
                                #   máquina cai para o TAA com aviso).
                                #   `VIBER_DLSS` sobrepõe; o modo troca AO VIVO
                                #   na REPL (`viber.debug.dlss("performance")`).
+postfx:                        # opcional — a lente que ESTE jogo paga.
+  disabled:                    #   Gates a desligar (mesmos nomes do bridge e
+    - volumetrics              #   de VIBER_NO_<KEY>): volumetrics, dof,
+    - dof                      #   motion-blur, contact-shadows, chromatic-
+    - motion-blur              #   aberration, vignette, split-tone, bloom,
+    - contact-shadows          #   ssao, auto-exposure, aerial, cas, taa ou
+    - chromatic-aberration     #   lens (vinheta+aberração+CAS de uma vez).
+    - vignette                 #   Ausente = stack completa. VIBER_NO_* ganha.
+    - split-tone
+  ssao: medium                 # opcional — low | medium | high | ultra.
+                               #   VIBER_SSAO e os tiers do AdaptiveQuality
+                               #   continuam a ganhar.
+reflections:                   # opcional — SSR raster de cena (src/water_ssr.rs)
+  mode: auto                   #   auto (preset: alto liga, equilibrado não) |
+                               #   off | water (só água) | full (água + chão).
+                               #   VIBER_WATER_SSR sobrepõe-se.
+  wet-ground: false            #   chão molhado no raymarch? false = só o sheen
+                               #   PBR barato do terreno (sem custo por pixel).
+  steps: 16                    #   passos do raymarch (default 24).
+  max-distance: 90             #   alcance em metros (default 140).
 
 assets:                        # resolve contra as ROOTS (AssetServer)
   roots:                       # extra, por ordem, DEPOIS da pasta do jogo
