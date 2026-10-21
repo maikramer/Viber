@@ -309,6 +309,8 @@ pub struct UiScriptState {
     pub creates: UiCreateQueue,
     /// Binds de script (`viber.ui.set`).
     pub binds: UiBindQueue,
+    /// Nomes de bind da engine que um script tentou ocupar — warn 1×.
+    pub bind_collisions: std::collections::HashSet<String>,
     /// Contador para ids gerados (`ui-gen-N`) de elementos sem `id`.
     pub generated_ids: Arc<std::sync::atomic::AtomicU64>,
     /// True once the `viber.ui` table exists on the host.
@@ -993,13 +995,17 @@ pub fn install_ui_api(lua: &Lua, state: &UiScriptState) -> mlua::Result<()> {
                 fn chain_of<'a>(
                     id: &str,
                     structure: &'a HashMap<String, UiElementNode>,
-                ) -> Option<Vec<&'a UiElementNode>> {
+                ) -> Option<Vec<(String, &'a UiElementNode)>> {
                     let mut chain = Vec::new();
+                    let mut current_id = id.to_string();
                     let mut current = structure.get(id)?;
-                    chain.push(current);
-                    while let Some(parent) = current.parent.as_deref() {
-                        current = structure.get(parent)?;
-                        chain.push(current);
+                    loop {
+                        chain.push((current_id, current));
+                        let Some(parent) = current.parent.clone() else {
+                            break;
+                        };
+                        current = structure.get(&parent)?;
+                        current_id = parent;
                         if chain.len() > 32 {
                             return None;
                         }
@@ -1009,7 +1015,7 @@ pub fn install_ui_api(lua: &Lua, state: &UiScriptState) -> mlua::Result<()> {
                 }
                 let elements = view.elements.lock().ok();
                 let mut index = 0usize;
-                for (id, node) in structure.iter() {
+                for (id, _) in structure.iter() {
                     let Some(chain) = chain_of(id, &structure) else {
                         continue;
                     };
@@ -1024,37 +1030,46 @@ pub fn install_ui_api(lua: &Lua, state: &UiScriptState) -> mlua::Result<()> {
                     } else {
                         StyleState::Normal
                     };
-                    let sibling = node.parent.as_deref().and_then(|parent| {
-                        structure
-                            .get(parent)
-                            .and_then(|parent| parent.children.iter().position(|kid| kid == id))
-                    });
                     let last = chain.len().saturating_sub(1);
                     let refs: Vec<super::style::ElementRef<'_>> = chain
                         .iter()
                         .enumerate()
-                        .map(|(depth, node)| super::style::ElementRef {
-                            tag: &node.tag,
-                            id: None,
-                            classes: &node.classes,
-                            // `:hover` só vale para o PRÓPRIO elemento (o
-                            // último da chain); os ancestrais ficam neutros.
-                            state: if depth == last {
-                                state
-                            } else {
-                                StyleState::Normal
-                            },
-                            focused: node.classes.iter().any(|c| c == "focused"),
-                            checked: node.classes.iter().any(|c| c == "checked"),
-                            empty: node.children.is_empty(),
-                            sibling_index: sibling.unwrap_or(0),
-                            sibling_count: node
+                        .map(|(depth, (chain_id, node))| {
+                            let sibling_index = node
+                                .parent
+                                .as_deref()
+                                .and_then(|parent| {
+                                    structure.get(parent).and_then(|parent| {
+                                        parent.children.iter().position(|kid| kid == chain_id)
+                                    })
+                                })
+                                .unwrap_or(0);
+                            let sibling_count = node
                                 .parent
                                 .as_deref()
                                 .and_then(|parent| {
                                     structure.get(parent).map(|parent| parent.children.len())
                                 })
-                                .unwrap_or(1),
+                                .unwrap_or(1);
+                            super::style::ElementRef {
+                                tag: &node.tag,
+                                // O id vive na chave do mapa; sem isto `#menu`
+                                // nunca casa.
+                                id: Some(chain_id.as_str()),
+                                classes: &node.classes,
+                                // `:hover` só vale para o PRÓPRIO elemento (o
+                                // último da chain); os ancestrais ficam neutros.
+                                state: if depth == last {
+                                    state
+                                } else {
+                                    StyleState::Normal
+                                },
+                                focused: node.classes.iter().any(|c| c == "focused"),
+                                checked: node.classes.iter().any(|c| c == "checked"),
+                                empty: node.children.is_empty(),
+                                sibling_index,
+                                sibling_count,
+                            }
                         })
                         .collect();
                     if selector.matches(&refs) {
@@ -1433,7 +1448,7 @@ pub fn apply_ui_creates(world: &mut World) {
 /// Aplica os binds de script (`viber.ui.set`) no recurso [`UiScriptBinds`] —
 /// nomes da engine têm prioridade (colisão = warn 1× e recusa).
 pub fn apply_ui_script_binds(
-    state: Res<UiScriptState>,
+    mut state: ResMut<UiScriptState>,
     data: Res<UiData>,
     mut binds: ResMut<UiScriptBinds>,
 ) {
@@ -1444,7 +1459,9 @@ pub fn apply_ui_script_binds(
     drop(queue);
     for (name, value) in pending {
         if data.get(&name).is_some() {
-            warn!("ui: viber.ui.set(`{name}`) colide com um bind da engine — recusado");
+            if state.bind_collisions.insert(name.clone()) {
+                warn!("ui: viber.ui.set(`{name}`) colide com um bind da engine — recusado");
+            }
             continue;
         }
         binds.0.insert(name, value);

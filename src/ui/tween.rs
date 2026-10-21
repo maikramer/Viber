@@ -404,7 +404,18 @@ impl UiTransitions {
             return false;
         };
         // Re-alvo no MEIO de um tween: parte do valor exibido (sem salto).
-        self.tweens.retain(|run| run.field != field || run.explicit);
+        // Um explícito em curso só cede a outro explícito — senão o segundo
+        // `viber.ui.tween` empilhava e o primeiro reaparecia ao acabar.
+        // A cascata não se mete por cima de um explícito ainda a correr.
+        if !explicit
+            && self
+                .tweens
+                .iter()
+                .any(|run| run.field == field && run.explicit && !run.finished())
+        {
+            return false;
+        }
+        self.tweens.retain(|run| run.field != field);
         self.tweens.push(TweenRun {
             field,
             from,
@@ -477,6 +488,37 @@ pub struct UiAnimation {
 
 /// Resolve o offset 0..1 atual de uma animação, com loops/alternate/reverse.
 /// `None` = ainda no delay ou terminada (sem fill).
+/// A animação finita já passou do último ciclo (o delay não conta).
+pub fn animation_finished(spec: &AnimationSpec, elapsed: f32) -> bool {
+    let Iterations::Count(n) = spec.iterations else {
+        return false;
+    };
+    if spec.duration <= f32::EPSILON {
+        return elapsed >= spec.delay;
+    }
+    elapsed >= spec.delay + spec.duration * n.max(0.0)
+}
+
+/// Offset do último instante de uma animação finita (o frame que `progress == n`
+/// nunca amostra, porque aí o ciclo seguinte ainda não começou).
+pub fn animation_terminal_offset(spec: &AnimationSpec) -> Option<f32> {
+    let Iterations::Count(n) = spec.iterations else {
+        return None;
+    };
+    if n <= 0.0 {
+        return Some(if spec.reverse { 0.0 } else { 1.0 });
+    }
+    let cycle = (n - 1.0).floor();
+    let mut offset = 1.0;
+    if spec.alternate && (cycle as i64) % 2 == 1 {
+        offset = 0.0;
+    }
+    if spec.reverse {
+        offset = 1.0 - offset;
+    }
+    Some(offset)
+}
+
 pub fn animation_offset(spec: &AnimationSpec, elapsed: f32) -> Option<f32> {
     let active = elapsed - spec.delay;
     if active < 0.0 {
@@ -567,11 +609,22 @@ pub fn drive_ui_animations(
             continue;
         };
         animation.elapsed += dt;
-        let Some(offset) = animation_offset(&animation.spec, animation.elapsed) else {
+        if animation_finished(&animation.spec, animation.elapsed) {
+            // O frame em que `progress` chega ao número de voltas nunca era
+            // amostrado: `steps()` perdia o último degrau e `forwards` ficava
+            // no frame anterior.
+            if let Some(end) = animation_terminal_offset(&animation.spec)
+                && let Some(overlay) = sample_keyframes(keyframes, end, &animation.spec)
+            {
+                computed.0.merge(&overlay);
+            }
+            commands.entity(entity).remove::<UiAnimation>();
             if !animation.spec.fill_forwards {
-                commands.entity(entity).remove::<UiAnimation>();
                 commands.entity(entity).insert(UiStyleDirty);
             }
+            continue;
+        }
+        let Some(offset) = animation_offset(&animation.spec, animation.elapsed) else {
             continue;
         };
         if let Some(overlay) = sample_keyframes(keyframes, offset, &animation.spec) {
@@ -749,6 +802,33 @@ mod tests {
         );
         let run = &transitions.tweens[0];
         assert!((run.from.num_value() - 130.0).abs() < 1e-5);
+        // Dois tweens explícitos no mesmo campo: fica só o segundo.
+        assert!(transitions.start(
+            StyleField::Width,
+            TweenValue::Num(NumUnit::Px, 10.0),
+            Easing::Linear,
+            1.0,
+            0.0,
+            true
+        ));
+        assert!(transitions.start(
+            StyleField::Width,
+            TweenValue::Num(NumUnit::Px, 20.0),
+            Easing::Linear,
+            1.0,
+            0.0,
+            true
+        ));
+        assert_eq!(transitions.tweens.len(), 1);
+        assert!(!transitions.start(
+            StyleField::Width,
+            TweenValue::Num(NumUnit::Px, 30.0),
+            Easing::Linear,
+            1.0,
+            0.0,
+            false
+        ));
+        assert_eq!(transitions.tweens.len(), 1);
         // Unidades mistas: recusa e mantém o alvo antigo.
         let bad = TweenValue::Num(NumUnit::Percent, 50.0);
         assert!(!transitions.start(StyleField::Height, bad, Easing::Linear, 1.0, 0.0, false));
@@ -777,6 +857,18 @@ mod tests {
         // Count: 3 iterações terminam a 3.0s.
         assert!(animation_offset(&spec(Iterations::Count(3.0), false), 2.5).is_some());
         assert!(animation_offset(&spec(Iterations::Count(3.0), false), 3.5).is_none());
+        assert!(animation_finished(
+            &spec(Iterations::Count(3.0), false),
+            3.0
+        ));
+        assert_eq!(
+            animation_terminal_offset(&spec(Iterations::Count(1.0), false)),
+            Some(1.0)
+        );
+        let mut alternate = spec(Iterations::Count(2.0), true);
+        assert_eq!(animation_terminal_offset(&alternate), Some(0.0));
+        alternate.reverse = true;
+        assert_eq!(animation_terminal_offset(&alternate), Some(1.0));
         // Delay: nada antes do arranque.
         let mut delayed = spec(Iterations::Infinite, false);
         delayed.delay = 0.4;

@@ -547,7 +547,9 @@ impl Expr {
                 let low = min.eval(viewport, parent)?;
                 let mid = value.eval(viewport, parent)?;
                 let high = max.eval(viewport, parent)?;
-                Some(mid.max(low).min(high))
+                // CSS: max(MIN, min(VAL, MAX)). Com os extremos trocados,
+                // min(max(VAL, MIN), MAX) devolvia o MAX em vez do MIN.
+                Some(mid.min(high).max(low))
             }
         }
     }
@@ -2788,23 +2790,25 @@ fn parse_justify(value: &str) -> Option<JustifyContent> {
 /// pode ter qualquer proporção — o valor acompanha.
 pub fn parse_val(value: &str) -> Option<Val> {
     let value = value.trim();
-    if value == "auto" {
+    // CSS: unidades e `auto` são case-insensitive (`10PX`, `40VH`, `Auto`).
+    if value.eq_ignore_ascii_case("auto") {
         return Some(Val::Auto);
     }
+    let lower = value.to_ascii_lowercase();
     for (suffix, make) in [
         ("vmin", Val::VMin as fn(f32) -> Val),
         ("vmax", Val::VMax as fn(f32) -> Val),
         ("vw", Val::Vw as fn(f32) -> Val),
         ("vh", Val::Vh as fn(f32) -> Val),
     ] {
-        if let Some(number) = value.strip_suffix(suffix) {
+        if let Some(number) = lower.strip_suffix(suffix) {
             return number.trim().parse().ok().map(make);
         }
     }
-    if let Some(pct) = value.strip_suffix('%') {
+    if let Some(pct) = lower.strip_suffix('%') {
         return pct.trim().parse().ok().map(Val::Percent);
     }
-    let number = value.strip_suffix("px").unwrap_or(value).trim();
+    let number = lower.strip_suffix("px").unwrap_or(lower.as_str()).trim();
     number.parse().ok().map(Val::Px)
 }
 
@@ -2878,7 +2882,9 @@ fn parse_radius(value: &str) -> Option<BorderRadius> {
 /// `none`/`transparent`, os nomes do HUD — e a paleta Tailwind por nome
 /// (`slate-900`, `rose-400/80`, `amber`), ver [`super::palette`].
 pub fn parse_color(value: &str) -> Option<Color> {
-    let value = value.trim();
+    // CSS: nomes, `rgb()`/`hsl()` e `transparent` são case-insensitive.
+    let value = value.trim().to_ascii_lowercase();
+    let value = value.as_str();
     match value {
         "none" | "transparent" => return Some(Color::NONE),
         "white" => return Some(Color::WHITE),
@@ -2929,21 +2935,30 @@ pub fn parse_color(value: &str) -> Option<Color> {
         .or_else(|| value.strip_prefix("hsl("))
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        // `hsl(120, 50%, 50%)` e o moderno `hsl(120 50% 50%)` — separadores
-        // vírgula ou espaço; `%` opcional em s/l.
-        let tokens: Vec<f32> = args
-            .split([',', ' '])
-            .filter_map(|p| {
-                let p = p.trim().strip_suffix('%').unwrap_or(p.trim());
-                p.parse::<f32>().ok()
-            })
+        // `hsl(120, 50%, 50%)`, `hsl(120deg 100% 50%)` e `hsl(120 50% 50% / 50%)`.
+        // O alfa em percentagem (`50%`) é 0.5 — tratar o número já sem `%` como
+        // 0..1 e fazer clamp punha `50%` em alfa 1.
+        let tokens: Vec<&str> = args
+            .split([',', ' ', '/'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
             .collect();
         if tokens.len() < 3 {
             return None;
         }
-        let alpha = tokens.get(3).copied().unwrap_or(1.0);
-        let (r, g, b) = hsl_to_rgb(tokens[0], tokens[1] / 100.0, tokens[2] / 100.0);
-        return Some(Color::srgba(r, g, b, alpha.clamp(0.0, 1.0)));
+        let (Some(hue), Some(sat), Some(light)) = (
+            css_angle_deg(tokens[0]),
+            css_percent_unit(tokens[1]),
+            css_percent_unit(tokens[2]),
+        ) else {
+            return None;
+        };
+        let alpha = tokens
+            .get(3)
+            .map(|token| css_alpha(token))
+            .unwrap_or(Some(1.0))?;
+        let (r, g, b) = hsl_to_rgb(hue, sat, light);
+        return Some(Color::srgba(r, g, b, alpha));
     }
     // Nomes do CSS — depois dos numéricos, antes da paleta Tailwind.
     if let Some((r, g, b)) = named_color(value) {
@@ -2952,6 +2967,41 @@ pub fn parse_color(value: &str) -> Option<Color> {
     }
     // Última tentativa: a paleta Tailwind (`slate-900`, `rose-400/80`).
     palette::resolve(value)
+}
+
+/// Ângulo CSS: `120`, `120deg`, `120°`, `0.25turn`, `1.2rad` → graus.
+fn css_angle_deg(raw: &str) -> Option<f32> {
+    let raw = raw.trim().trim_end_matches('°');
+    let (raw, scale) = if let Some(n) = raw.strip_suffix("deg") {
+        (n, 1.0)
+    } else if let Some(n) = raw.strip_suffix("turn") {
+        (n, 360.0)
+    } else if let Some(n) = raw.strip_suffix("rad") {
+        (n, 180.0 / std::f32::consts::PI)
+    } else {
+        (raw, 1.0)
+    };
+    raw.trim().parse::<f32>().ok().map(|v| v * scale)
+}
+
+/// Saturação/luminosidade: `50%` e `50` são ambos 0.5 (`%` é opcional).
+fn css_percent_unit(raw: &str) -> Option<f32> {
+    let raw = raw.trim();
+    let raw = raw.strip_suffix('%').unwrap_or(raw);
+    raw.parse::<f32>().ok().map(|v| v / 100.0)
+}
+
+/// Alfa CSS: `0.5` ou `50%`. Um número > 1 sem `%` não é percentagem.
+fn css_alpha(raw: &str) -> Option<f32> {
+    let raw = raw.trim();
+    if let Some(n) = raw.strip_suffix('%') {
+        n.trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| (v / 100.0).clamp(0.0, 1.0))
+    } else {
+        raw.parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0))
+    }
 }
 
 /// `hsl(hue°, sat%, light%)` → `(r, g, b)` 0..1. Fórmula padrão; hue em graus
@@ -3263,6 +3313,14 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_uses_the_css_formula_when_bounds_are_swapped() {
+        // CSS: max(MIN, min(VAL, MAX)) → clamp(200px, 50px, 10px) = 200px.
+        let mut props = parse_declarations("width: clamp(200px, 50px, 10px)", "t");
+        props.resolve_viewport((1280.0, 720.0), None);
+        assert_eq!(props.width, Some(Measure::plain(Val::Px(200.0))));
+    }
+
+    #[test]
     fn test_parse_val_viewport_units() {
         assert_eq!(parse_val("40vw"), Some(Val::Vw(40.0)));
         assert_eq!(parse_val("100vh"), Some(Val::Vh(100.0)));
@@ -3270,6 +3328,10 @@ mod tests {
         assert_eq!(parse_val("30 vmax"), Some(Val::VMax(30.0)));
         // Decimais também — 4.5vh é um offset perfeitamente normal.
         assert_eq!(parse_val("4.5vh"), Some(Val::Vh(4.5)));
+        // Unidades CSS são case-insensitive.
+        assert_eq!(parse_val("10PX"), Some(Val::Px(10.0)));
+        assert_eq!(parse_val("40VH"), Some(Val::Vh(40.0)));
+        assert_eq!(parse_val("Auto"), Some(Val::Auto));
         // `v` solto não é unidade.
         assert_eq!(parse_val("10v"), None);
     }
@@ -4052,6 +4114,12 @@ mod tests {
         assert!(green.to_srgba().green > 0.99);
         let half_blue = parse_color("hsla(240, 100%, 50%, 0.5)").expect("hsla");
         assert!((half_blue.alpha() - 0.5).abs() < 1e-6);
+        // `50%` é metade, não um alfa que o clamp leva a 1. `deg` e a caixa
+        // do nome da função também contam.
+        let pct = parse_color("HSLA(240deg, 100%, 50%, 50%)").expect("hsla %");
+        assert!((pct.alpha() - 0.5).abs() < 1e-6);
+        assert!(pct.to_srgba().blue > 0.99);
+        assert_eq!(parse_color("Transparent"), Some(Color::NONE));
         // Nomes CSS.
         assert_eq!(parse_color("red"), Some(Color::srgb(1.0, 0.0, 0.0)));
         assert_eq!(
