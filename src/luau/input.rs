@@ -25,7 +25,8 @@ pub fn key_code_from_str(key: &str) -> Option<KeyCode> {
         "," => return Some(KeyCode::Comma),
         "." => return Some(KeyCode::Period),
         "/" => return Some(KeyCode::Slash),
-        "\\" | "`" => return Some(KeyCode::Backquote),
+        "\\" => return Some(KeyCode::Backslash),
+        "`" => return Some(KeyCode::Backquote),
         _ => {}
     }
     // Normalização: minúsculas, só alfanuméricos (`"Arrow_Up"` → `"arrowup"`).
