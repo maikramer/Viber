@@ -33,6 +33,12 @@ pub struct SimpleFoliage {
     pub material: Handle<StandardMaterial>,
 }
 
+/// `<GltfScene>` estático sem script/física: candidato a entrar no batch.
+/// [`arm_candidates`] confirma o resto (um mesh, sem colisor em nenhum
+/// ancestral) quando a cena do glTF já spawnou.
+#[derive(Component)]
+pub struct FoliageCandidate;
+
 #[derive(Component)]
 pub struct FoliageTile {
     pub key: IVec2,
@@ -84,7 +90,6 @@ fn triples(values: &VertexAttributeValues) -> Option<Vec<[f32; 3]>> {
 pub fn batch_tiles(
     mut commands: Commands,
     camera: Query<&GlobalTransform, With<Camera3d>>,
-    meshes: Res<Assets<Mesh>>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
     foliage: Query<(Entity, &GlobalTransform, &SimpleFoliage, &Visibility)>,
     tiles: Query<(Entity, &FoliageTile)>,
@@ -121,7 +126,7 @@ pub fn batch_tiles(
         if tiles.iter().any(|(_, tile)| tile.key == key && tile.mesh_id == mesh_id) {
             continue;
         }
-        let Some(src) = meshes.get(&members[0].2) else {
+        let Some(src) = mesh_assets.get(&members[0].2) else {
             continue;
         };
         let Some(src_pos) = src.attribute(Mesh::ATTRIBUTE_POSITION).and_then(triples) else {
@@ -177,6 +182,100 @@ pub fn batch_tiles(
     let _ = tiles;
 }
 
+/// Confirma os candidatos quando a cena do glTF já resolveu: um só mesh,
+/// nenhum ancestral com script/animador/colisor/corpo. Insere o
+/// [`SimpleFoliage`] NO mesh (é ele que o batch esconde) e larga o marcador.
+#[allow(clippy::type_complexity)]
+pub fn arm_candidates(
+    mut commands: Commands,
+    candidates: Query<Entity, With<FoliageCandidate>>,
+    ready: Query<(), With<bevy::world_serialization::WorldAssetRoot>>,
+    children: Query<&Children>,
+    meshes: Query<(
+        Entity,
+        &Mesh3d,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    parents: Query<&ChildOf>,
+    blocked: Query<(
+        Option<&crate::luau::LuaScriptRef>,
+        Option<&crate::animation::CharacterAnimator>,
+        Option<&bevy_rapier3d::prelude::Collider>,
+        Option<&bevy_rapier3d::prelude::RigidBody>,
+        Option<&crate::physics::PendingCollider>,
+    )>,
+) {
+    fn collect_meshes(
+        root: Entity,
+        children: &Query<&Children>,
+        meshes: &Query<(Entity, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
+        out: &mut Vec<(Entity, Handle<Mesh>, Handle<StandardMaterial>)>,
+    ) {
+        if let Ok((entity, mesh, material)) = meshes.get(root) {
+            out.push((entity, mesh.0.clone(), material.0.clone()));
+            return;
+        }
+        if let Ok(kids) = children.get(root) {
+            for child in kids.iter() {
+                collect_meshes(child, children, meshes, out);
+            }
+        }
+    }
+
+    fn blocked_ancestor(
+        entity: Entity,
+        parents: &Query<&ChildOf>,
+        blocked: &Query<(
+            Option<&crate::luau::LuaScriptRef>,
+            Option<&crate::animation::CharacterAnimator>,
+            Option<&bevy_rapier3d::prelude::Collider>,
+            Option<&bevy_rapier3d::prelude::RigidBody>,
+            Option<&crate::physics::PendingCollider>,
+        )>,
+    ) -> bool {
+        let mut current = Some(entity);
+        let mut depth = 0;
+        while let Some(node) = current {
+            if let Ok((script, animator, collider, body, pending)) = blocked.get(node)
+                && (script.is_some()
+                    || animator.is_some()
+                    || collider.is_some()
+                    || body.is_some()
+                    || pending.is_some())
+            {
+                return true;
+            }
+            current = parents.get(node).ok().map(|c| c.parent());
+            depth += 1;
+            if depth > 64 {
+                return true;
+            }
+        }
+        false
+    }
+
+    for entity in &candidates {
+        // A cena do glTF ainda não aterrou: tentar no próximo frame (o
+        // marcador fica; sem isto o candidato nunca era confirmado).
+        if ready.get(entity).is_err() {
+            continue;
+        }
+        let mut found = Vec::new();
+        collect_meshes(entity, &children, &meshes, &mut found);
+        if found.len() != 1 {
+            commands.entity(entity).remove::<FoliageCandidate>();
+            continue;
+        }
+        if blocked_ancestor(entity, &parents, &blocked) {
+            commands.entity(entity).remove::<FoliageCandidate>();
+            continue;
+        }
+        let (mesh_entity, mesh, material) = found.pop().unwrap();
+        commands.entity(mesh_entity).insert(SimpleFoliage { mesh, material });
+        commands.entity(entity).remove::<FoliageCandidate>();
+    }
+}
+
 /// Impostor: para lá de 150 m e antes do cull, um cartaz sem sombra.
 pub const IMPOSTOR_NEAR: f32 = 150.0;
 
@@ -200,7 +299,8 @@ pub struct FoliagePlugin;
 
 impl Plugin for FoliagePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, batch_tiles);
+        app.add_systems(Update, arm_candidates)
+            .add_systems(PostUpdate, batch_tiles);
     }
 }
 

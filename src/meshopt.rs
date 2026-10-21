@@ -945,6 +945,7 @@ impl AssetReader for MultiRootFileReader {
 /// Must run **before** `AssetPlugin` is added, since the plugin snapshots the
 /// registered sources when it builds.
 pub fn register_asset_source(app: &mut App, asset_roots: Vec<PathBuf>) {
+    let _ = ASSET_ROOTS.set(asset_roots.clone());
     app.register_asset_source(
         AssetSourceId::Default,
         AssetSourceBuilder::new(move || {
@@ -953,6 +954,20 @@ pub fn register_asset_source(app: &mut App, asset_roots: Vec<PathBuf>) {
             )))) as Box<dyn ErasedAssetReader>
         }),
     );
+}
+
+/// As roots do reader de assets, por ordem de precedência — guardadas no
+/// registo para quem precisa de saber se um ficheiro EXISTE antes de pedir o
+/// load (um `load` de um caminho ausente só falha assíncrono, com warn).
+static ASSET_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// `true` quando `path` (relativo às asset roots, com ou sem `/` inicial)
+/// existe numa delas. `false` antes do registo (apps de teste sem roots).
+pub fn asset_file_exists(path: &str) -> bool {
+    let rel = path.trim_start_matches('/');
+    ASSET_ROOTS
+        .get()
+        .is_some_and(|roots| roots.iter().any(|root| root.join(rel).is_file()))
 }
 
 /// Loads a glTF with validation relaxed.

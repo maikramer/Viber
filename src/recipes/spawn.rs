@@ -1663,13 +1663,28 @@ fn spawn_entity(
                     )
                 })
             };
+            // Sem ladder autorada, um `*_lod0.glb` com irmãos `_lod1`/`_lod2`
+            // no pool ganha-a sozinho: as ~1300 entidades soltas do Vael
+            // (muralhas, bancos, NPCs — 20–40 k triângulos cada) desenhavam
+            // o tier 0 a qualquer distância, na câmara e nas cascatas.
+            let (lod1, lod2) = if lod1.is_none() && lod2.is_none() {
+                sibling_lods(url)
+            } else {
+                (lod1.clone(), lod2.clone())
+            };
             entity.insert(GltfScenePending {
                 handle,
-                lod1: lod_load(lod1),
-                lod2: lod_load(lod2),
+                lod1: lod_load(&lod1),
+                lod2: lod_load(&lod2),
                 lod_near: *lod_near,
                 lod_mid: *lod_mid,
             });
+            // Candidato ao batch de vegetação (`foliage::arm_candidates`
+            // confirma um só mesh e nenhum colisor/script nos ancestrais).
+            // Props com física ou script ficam entidades normais.
+            if spec.script.is_none() && spec.destructible.is_none() && spec.physics.is_empty() {
+                entity.insert(crate::foliage::FoliageCandidate);
+            }
         }
         EntityKind::Primitive { shape, material } => {
             // UV world-space (`texture-tile-size` > 0 em Plane/Cuboid, a
@@ -2372,6 +2387,19 @@ pub fn auto_orbit(time: Res<Time>, mut cameras: Query<(&mut Transform, &mut Auto
     }
 }
 
+/// Ladder implícita de um `*_lod0.glb`: os irmãos `_lod1`/`_lod2` que
+/// existem nas asset roots.
+pub fn sibling_lods(url: &str) -> (Option<String>, Option<String>) {
+    let Some(stem) = url.strip_suffix("_lod0.glb") else {
+        return (None, None);
+    };
+    let tier = |n: u8| {
+        let candidate = format!("{stem}_lod{n}.glb");
+        crate::meshopt::asset_file_exists(&candidate).then_some(candidate)
+    };
+    (tier(1), tier(2))
+}
+
 /// Swap loaded `<GltfScene>` pendings for their default scene (parented under
 /// the entity, so its transform applies). Load failures log once and leave an
 /// empty node — a broken asset must not take the world down.
@@ -2382,6 +2410,18 @@ pub fn gltf_scene_spawner(
     pending: Query<(Entity, &GltfScenePending)>,
 ) {
     for (entity, scene) in &pending {
+        // A ladder só fecha quando TODOS os tiers resolveram: um lod1 ainda
+        // em voo no frame em que o lod0 aterra deixava a instância sem LOD
+        // para sempre (o pool de props carrega os três tiers em paralelo).
+        let lod_in_flight = [&scene.lod1, &scene.lod2].into_iter().flatten().any(|h| {
+            !matches!(
+                server.get_load_state(h),
+                Some(LoadState::Loaded | LoadState::Failed(_))
+            )
+        });
+        if lod_in_flight {
+            continue;
+        }
         match server.get_load_state(&scene.handle) {
             Some(LoadState::Loaded) => {
                 if let Some(gltf) = gltfs.get(&scene.handle) {
