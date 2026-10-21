@@ -77,7 +77,9 @@ if [[ "$build" == 1 ]]; then
       rm -f "$fail_fp_file"
     else
       mkdir -p "$store"
-      echo "$fp" >"$fail_fp_file"
+      # Fingerprint de DEPOIS: o próprio cargo pode reescrever o Cargo.lock,
+      # e com o de antes o arranque seguinte voltava a tentar o mesmo erro.
+      fingerprint >"$fail_fp_file"
       echo "viber: o build do checkout falhou — a correr o último binário bom ($last_good)" >&2
     fi
   fi
