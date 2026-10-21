@@ -474,16 +474,15 @@ pub fn extract_scene_ops(
             for key in ["translation", "pos"] {
                 if let Some((_, value)) = xml.attrs.iter_mut().find(|(k, _)| k == key) {
                     // Em f64: `2603.4 - 2600` em f32 dava `3.3999`.
-                    crate::xml::values::parse_vec3(value, key)?;
-                    let parts: Vec<f64> = value
-                        .split_whitespace()
-                        .filter_map(|p| p.parse::<f64>().ok())
-                        .collect();
-                    *value = parts
+                    // `translation="100"` é broadcast para os três eixos.
+                    // Subtrair só os tokens escritos deixava um número só,
+                    // que voltava a fazer broadcast no reload.
+                    let parsed = crate::xml::values::parse_vec3(value, key)?;
+                    *value = parsed
                         .iter()
                         .zip(recenter)
                         .map(|(v, r)| {
-                            let x = ((v - f64::from(r)) * 1000.0).round() / 1000.0;
+                            let x = ((f64::from(*v) - f64::from(r)) * 1000.0).round() / 1000.0;
                             let x = if x == 0.0 { 0.0 } else { x };
                             format!("{x}")
                         })
@@ -528,14 +527,11 @@ pub fn nodes_within(
     let (z0, z1) = (rect[1].min(rect[3]), rect[1].max(rect[3]));
     let mut out = Vec::new();
     for (index, node) in doc.files[file_id].doc.children.iter().enumerate() {
-        let Some(t) = node
-            .attr("translation")
-            .or_else(|| node.attr("pos"))
-            .and_then(|v| crate::xml::values::parse_vec3(v, "translation").ok())
-        else {
+        let Ok(pose) = super::pose::read_pose(node) else {
             continue;
         };
-        if t[0] >= x0 && t[0] <= x1 && t[2] >= z0 && t[2] <= z1 {
+        let t = pose.translation;
+        if t.x >= x0 && t.x <= x1 && t.z >= z0 && t.z <= z1 {
             out.push(doc.selector(&super::doc::NodeRef::new(file_id, vec![index])));
         }
     }
