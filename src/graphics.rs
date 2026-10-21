@@ -89,6 +89,25 @@ pub fn preset() -> GraphicsPreset {
     *PRESET.get().unwrap_or(&GraphicsPreset::Equilibrado)
 }
 
+/// Modo de apresentação da janela (`VIBER_PRESENT_MODE` =
+/// `fifo|fifo_relaxed|mailbox|immediate|auto_vsync|auto_novsync`).
+pub fn present_mode() -> bevy::window::PresentMode {
+    use bevy::window::PresentMode;
+    match std::env::var("VIBER_PRESENT_MODE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fifo" => PresentMode::Fifo,
+        "fifo_relaxed" => PresentMode::FifoRelaxed,
+        "mailbox" => PresentMode::Mailbox,
+        "immediate" => PresentMode::Immediate,
+        "auto_novsync" | "novsync" => PresentMode::AutoNoVsync,
+        _ => PresentMode::AutoVsync,
+    }
+}
+
 /// Cascatas do shadow map do sol por preset.
 pub fn shadow_cascades() -> usize {
     match preset() {

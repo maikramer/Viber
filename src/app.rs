@@ -309,6 +309,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         .set(bevy::window::WindowPlugin {
             primary_window: Some(bevy::window::Window {
                 title,
+                present_mode: crate::graphics::present_mode(),
                 ..Default::default()
             }),
             ..Default::default()
