@@ -109,8 +109,19 @@ fn test_bridge_end_to_end_headless() {
     // input.click + input.move → CursorMoved
     let click = call_async(METHOD_CLICK, serde_json::json!({ "x": 10.0, "y": 20.0 }));
     let mouse_move = call_async(METHOD_MOVE, serde_json::json!({ "x": 30.0, "y": 40.0 }));
+    // O duplo buffer de `Messages` evicta a mais velha ao fim de dois frames.
+    // Sob carga os dois pedidos não caem no mesmo frame — guarda-se o máximo
+    // visto durante a espera, não a contagem no fim.
+    let mut cursors = std::collections::HashSet::new();
     for _ in 0..600 {
         app.update();
+        for cursor in app
+            .world()
+            .resource::<Messages<CursorMoved>>()
+            .iter_current_update_messages()
+        {
+            cursors.insert((cursor.position.x as i32, cursor.position.y as i32));
+        }
         if click.is_finished() && mouse_move.is_finished() {
             break;
         }
@@ -118,14 +129,9 @@ fn test_bridge_end_to_end_headless() {
     }
     click.join().unwrap().expect("input.click responde");
     mouse_move.join().unwrap().expect("input.move responde");
-    // As escritas do cursor acontecem no frame em que cada pedido é drenado;
-    // se click e move caírem em frames DIFERENTES, o duplo buffer do
-    // `Messages` evicta a mais velha ao fim de DOIS swaps — contar aqui, com
-    // as duas a ≤1 frame de distância, e só depois dar os frames do release.
-    let cursor_count = app.world().resource::<Messages<CursorMoved>>().len();
     assert!(
-        cursor_count >= 2,
-        "CursorMoved de click+move: {cursor_count}"
+        cursors.len() >= 2,
+        "CursorMoved de click+move: {cursors:?}"
     );
     // O clique é injectado no PreUpdate do frame SEGUINTE (press agora,
     // release depois — ver `deferred_mouse_release`): dá-lhe dois frames.
