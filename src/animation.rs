@@ -155,27 +155,38 @@ impl MotionSpeeds {
     }
 }
 
-/// Pesos contínuos idle/walk/run para a velocidade planar e os limiares do rig.
+/// Pesos contínuos idle/walk/run para a velocidade planar e as nominais do rig.
 ///
-/// Entre o limiar de idle e o de corrida o peso passa de idle para walk e
-/// depois de walk para run, sem troca seca de clip.
-pub fn locomotion_weights(speed: f32, gates: MotionGates) -> (f32, f32, f32) {
+/// O walk é o clip de apoio entre andar devagar e correr: fica com peso cheio
+/// desde metade da sua velocidade nominal até à nominal, e só a partir daí
+/// cede ao run. A rampa idle→walk é curta — a velocidade de reprodução do clip
+/// (ver [`MotionSpeeds::scale_for`]) já trata de pisar mais devagar, por isso
+/// deixar o walk a meia peso a 4 m/s fazia as pernas mexerem metade do que
+/// deviam (o blend antigo esticava idle→run por toda a gama).
+pub fn locomotion_weights(
+    speed: f32,
+    gates: MotionGates,
+    speeds: MotionSpeeds,
+) -> (f32, f32, f32) {
     let idle_edge = gates.idle.max(0.0);
-    let run_edge = gates.run.max(idle_edge + 1e-3);
+    let walk_edge = (speeds.walk * 0.5)
+        .clamp(idle_edge + 0.05, speeds.walk.max(idle_edge + 0.05));
+    let run_edge = speeds.run.max(speeds.walk + 1e-3);
     if speed <= idle_edge {
         return (1.0, 0.0, 0.0);
+    }
+    if speed < walk_edge {
+        let u = (speed - idle_edge) / (walk_edge - idle_edge).max(1e-3);
+        return (1.0 - u, u, 0.0);
+    }
+    if speed <= speeds.walk {
+        return (0.0, 1.0, 0.0);
     }
     if speed >= run_edge {
         return (0.0, 0.0, 1.0);
     }
-    let t = (speed - idle_edge) / (run_edge - idle_edge);
-    if t < 0.5 {
-        let u = t / 0.5;
-        (1.0 - u, u, 0.0)
-    } else {
-        let u = (t - 0.5) / 0.5;
-        (0.0, 1.0 - u, u)
-    }
+    let u = (speed - speeds.walk) / (run_edge - speeds.walk);
+    (0.0, 1.0 - u, u)
 }
 
 /// Nós do blend 1D de locomoção, quando o ficheiro tem idle, walk e run distintos.
@@ -660,15 +671,25 @@ pub fn bind_animations(
                     .unwrap_or_default()
             })
             .collect();
+        // Clip lengths: a one-shot has to hand the rig back exactly when the
+        // clip ends, not on a hard-coded timer. O Gltf aterra antes dos
+        // `AnimationClip` que ele referencia: bindar com `durations` a 0 fazia
+        // cada one-shot "acabar" em 0,25 s e o blend de locomoção voltava por
+        // cima de um ataque ainda a tocar (a animação parecia não terminar).
+        // Fica `AnimatedScene` e tenta-se outra vez no frame seguinte.
+        let mut durations = Vec::with_capacity(gltf.animations.len());
+        for clip in &gltf.animations {
+            let Some(clip) = clips.get(clip) else {
+                durations.clear();
+                break;
+            };
+            durations.push(clip.duration());
+        }
+        if durations.len() != gltf.animations.len() {
+            continue;
+        }
         let (graph, nodes, locomotion) = build_clip_graph(&gltf.animations, &clip_names);
         let handle = graphs.add(graph);
-        // Clip lengths: a one-shot has to hand the rig back exactly when the
-        // clip ends, not on a hard-coded timer.
-        let durations: Vec<f32> = gltf
-            .animations
-            .iter()
-            .map(|clip| clips.get(clip).map(|c| c.duration()).unwrap_or(0.0))
-            .collect();
 
         // Measured-motion state survives a re-bind: the entity itself never
         // moved during the swap, so the speed low-pass and the position
@@ -1185,7 +1206,11 @@ pub fn drive_player_animation(
             && !animator.is_busy()
             && !matches!(state, AnimState::Jump | AnimState::Fall);
         if let Ok(handle) = handles.get(animator.player) {
-            let weights = locomotion_weights(animator.speed, MotionGates::HERO);
+            let weights = locomotion_weights(
+                animator.speed,
+                MotionGates::HERO,
+                MotionSpeeds::HERO,
+            );
             drive_locomotion_blend(
                 &mut animator,
                 &mut players,
@@ -1270,7 +1295,7 @@ pub fn drive_character_animation(
         let state = advance_motion(&mut animator, position, true, 0.0, dt, gates);
         let blended = animator.locomotion.is_some() && !animator.is_busy();
         if let Ok(handle) = handles.get(animator.player) {
-            let weights = locomotion_weights(animator.speed, gates);
+            let weights = locomotion_weights(animator.speed, gates, speeds);
             drive_locomotion_blend(
                 &mut animator,
                 &mut players,
@@ -1449,15 +1474,22 @@ mod tests {
     #[test]
     fn locomotion_blend_is_continuous_between_idle_and_run() {
         let gates = MotionGates::HERO;
-        let (i, w, r) = locomotion_weights(0.0, gates);
-        assert_eq!((i, w, r), (1.0, 0.0, 0.0));
-        let (i, w, r) = locomotion_weights(gates.run, gates);
-        assert_eq!((i, w, r), (0.0, 0.0, 1.0));
-        let mid = (gates.idle + gates.run) * 0.5;
-        let (i, w, r) = locomotion_weights((gates.idle + mid) * 0.5, gates);
+        let speeds = MotionSpeeds::HERO;
+        let at = |speed| locomotion_weights(speed, gates, speeds);
+        assert_eq!(at(0.0), (1.0, 0.0, 0.0));
+        // Na nominal de walk o walk manda sozinho — era aqui que o blend
+        // antigo deixava ~48 % de run e as pernas mexiam metade.
+        assert_eq!(at(speeds.walk), (0.0, 1.0, 0.0));
+        assert_eq!(at(speeds.run), (0.0, 0.0, 1.0));
+        // Rampa curta idle→walk e rampa walk→run, ambas sem saltos.
+        let (i, w, r) = at((gates.idle + speeds.walk * 0.5) * 0.5);
         assert!(i > 0.0 && w > 0.0 && r == 0.0);
-        let (i2, w2, r2) = locomotion_weights((mid + gates.run) * 0.5, gates);
+        let (i2, w2, r2) = at((speeds.walk + speeds.run) * 0.5);
         assert!(i2 == 0.0 && w2 > 0.0 && r2 > 0.0);
+        // Pisar devagar continua a ser walk cheio: a velocidade de reprodução
+        // do clip é que baixa, não o peso.
+        let (i3, w3, r3) = at(speeds.walk * 0.75);
+        assert_eq!((i3, w3, r3), (0.0, 1.0, 0.0));
     }
 
     #[test]
