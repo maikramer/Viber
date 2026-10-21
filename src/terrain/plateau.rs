@@ -393,7 +393,7 @@ mod tests {
         let spec = spec_at(Vec2::ZERO);
         carve_plateau(&mut grid, &spec, 0).expect("plateau");
         let band = plateau_wall_band(&spec, &grid, grid.texel()).expect("band");
-        let mut mods = band.clone().into_mods("plateau:0");
+        let mods = band.clone().into_mods("plateau:0");
         assert!(!mods.is_empty(), "ring produces face mods");
         let field = crate::terrain::voxel::VoxelField::new(mods, 96.0, 32.0);
 

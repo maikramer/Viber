@@ -826,6 +826,9 @@ pub fn reset_scene_resources(world: &mut World) {
     world.insert_resource(GlobalAmbientLight::default());
     world.insert_resource(ClearColor::default());
     reset_default::<crate::terrain::plugin::ChunkLodState>(world);
+    // Registos "frios" pertencem à cena antiga: sem reset, acordavam no
+    // spawn da cena nova com poses/entidades do mundo anterior.
+    reset_default::<crate::streaming::ColdStore>(world);
     reset_default::<crate::physics::ColliderCache>(world);
     reset_default::<crate::physics::TerrainCollisionStatus>(world);
     reset_default::<crate::interact::InteractionFocus>(world);

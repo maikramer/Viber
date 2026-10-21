@@ -302,7 +302,9 @@ pub struct CliffMask {
 fn scan_steep(grid: &BrushGrid, angle_deg: f32, bits: &mut [u64]) {
     let (width, depth) = (grid.width(), grid.depth());
     bits.iter_mut().for_each(|w| *w = 0);
-    if !angle_deg.is_finite() || angle_deg <= 0.0 {
+    // `tan` é negativa a partir de 90°: o teste `drop > limit` ficava
+    // verdadeiro em TODOS os texels e pintava o mapa inteiro de falésia.
+    if !angle_deg.is_finite() || angle_deg <= 0.0 || angle_deg >= 89.9 {
         return;
     }
     let limit = angle_deg.to_radians().tan() * grid.texel();

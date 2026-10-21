@@ -77,7 +77,7 @@ fn build_boxes_with_field(
                 [false; 4],
             );
             for b in &boxes {
-                if let Some(data) = build_box_mesh(spec, grid, field, b) {
+                if let Some(data) = build_box_mesh(spec, grid, field, b, !spec.layers.is_empty()) {
                     out.push(((cx, cz), data));
                 }
             }

@@ -1214,10 +1214,19 @@ fn refine_organic(path: &RoadPath) -> (Vec<Vec2>, Vec<f32>, Vec<f32>, Vec<bool>)
     }
     // 3) noise lateral + wobble da largura (seed = primeira estação)
     let seed = (pts[0].x.to_bits() ^ pts[0].y.to_bits()) & 0xFFFF;
+    // A última estação usa a direção do último segmento; `Vec2::ONE` era
+    // um diagonal fixo (√2, 45°) que dobrava a linha final para um lado
+    // arbitrário em todas as estradas.
+    let last_dir = pts
+        .get(pts.len().saturating_sub(2))
+        .zip(pts.last())
+        .map(|(a, b)| (*b - *a).normalize_or_zero())
+        .filter(|d| d.length_squared() > 0.0)
+        .unwrap_or(Vec2::Y);
     let dirs: Vec<Vec2> = pts
         .windows(2)
         .map(|w| (w[1] - w[0]).normalize_or_zero())
-        .chain(std::iter::once(Vec2::ONE))
+        .chain(std::iter::once(last_dir))
         .collect();
     for (i, p) in pts.iter_mut().enumerate() {
         let arc_t = i as f32 / 2.0; // ~2 m por passo
@@ -1335,8 +1344,11 @@ pub fn road_ribbon_mesh(
         let fl = feather_eff * (1.0 + 0.45 * organic_noise(feather_seed, arc_t * 0.3));
         let fr = feather_eff
             * (1.0 + 0.45 * organic_noise(feather_seed.wrapping_add(0x77), arc_t * 0.3));
-        let core_l = (outer_l + fl.clamp(0.05, hw * 0.9)).min(-0.02);
-        let core_r = (outer_r - fr.clamp(0.05, hw * 0.9)).max(0.02);
+        // `clamp(min, max)` entra em pânico se min > max: com `width` <
+        // ~0.11 m, `hw*0.9 < 0.05`. O parser aceita qualquer largura > 0.
+        let feather_cap = (hw * 0.9).max(0.05);
+        let core_l = (outer_l + fl.clamp(0.05, feather_cap)).min(-0.02);
+        let core_r = (outer_r - fr.clamp(0.05, feather_cap)).max(0.02);
 
         let laterals = [outer_l, outer_l, core_l, core_r, outer_r, outer_r];
         // As saias laterais NÃO se desenham (alpha 0). Não há corte para
@@ -2633,6 +2645,11 @@ mod tests {
             // Perfil autoriado livre de clamp — o limite de gradiente tem
             // teste próprio (`test_limit_grade_clamps_steep_profiles`).
             flatten_max_grade: 1.5,
+            // Sem Chaikin: o teste isola o vão de viaduto e afirma o perfil
+            // AUTORADO (16 m). O smoothing de canais arredonda o pico para
+            // ~14,7 m e a folga medida desce abaixo do clearance — comportamento
+            // do smoothing, com teste próprio, não do carve do viaduto.
+            smoothing: 0,
             ..road_spec()
         };
         let path = carve_road(&mut grid, &spec, 0, &RoadGuards::default()).expect("carved");

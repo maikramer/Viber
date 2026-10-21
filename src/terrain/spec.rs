@@ -404,9 +404,11 @@ mod tests {
 
     #[test]
     fn test_effective_render_distance_defaults_to_the_chunk_budget() {
-        let mut spec = TerrainSpec::default();
         // An authored value always wins.
-        spec.render_distance = Some(700.0);
+        let mut spec = TerrainSpec {
+            render_distance: Some(700.0),
+            ..Default::default()
+        };
         assert_eq!(spec.effective_render_distance(), 700.0);
 
         // Without one, the radius is the disc that holds the chunk budget.
@@ -473,8 +475,10 @@ mod tests {
 
     #[test]
     fn test_env_render_distance_override() {
-        let mut spec = TerrainSpec::default();
-        spec.render_distance = Some(950.0);
+        let mut spec = TerrainSpec {
+            render_distance: Some(950.0),
+            ..Default::default()
+        };
 
         // Env válido: o override ganha ao valor do XML.
         unsafe { std::env::set_var("VIBER_RENDER_DISTANCE", "450") };

@@ -78,7 +78,7 @@ fn bake_column(
     let mut bake = ColumnColliderBake::new();
     let mut meshed = 0;
     for b in &boxes {
-        if let Some(data) = build_box_mesh(spec, grid, field, b) {
+        if let Some(data) = build_box_mesh(spec, grid, field, b, !spec.layers.is_empty()) {
             bake.add_mesh_data(b.origin, &data);
             meshed += 1;
         }
@@ -214,7 +214,9 @@ fn test_the_bake_is_deterministic() {
     let bake = || {
         let mut b = ColumnColliderBake::new();
         for spec_box in &boxes {
-            if let Some(data) = build_box_mesh(&spec, &grid, &field, spec_box) {
+            if let Some(data) =
+                build_box_mesh(&spec, &grid, &field, spec_box, !spec.layers.is_empty())
+            {
                 b.add_mesh_data(spec_box.origin, &data);
             }
         }

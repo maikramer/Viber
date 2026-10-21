@@ -61,12 +61,12 @@ fn bench_voxel_box_build_per_lod() {
 
         // Warm-up (allocator, caches).
         for b in &boxes {
-            let _ = build_box_mesh(&spec, &grid, &field, b);
+            let _ = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty());
         }
         let start = Instant::now();
         let mut built = 0usize;
         for b in &boxes {
-            if build_box_mesh(&spec, &grid, &field, b).is_some() {
+            if build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()).is_some() {
                 built += 1;
             }
         }
@@ -174,12 +174,12 @@ fn bench_voxel_box_build_refined() {
         .collect();
     assert!(!refined.is_empty(), "a coluna da ponte tem caixas");
     for b in &refined {
-        let _ = build_box_mesh(&spec, &grid, &field, b);
+        let _ = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty());
     }
     let start = Instant::now();
     let mut built = 0usize;
     for b in &refined {
-        if build_box_mesh(&spec, &grid, &field, b).is_some() {
+        if build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()).is_some() {
             built += 1;
         }
     }
@@ -242,12 +242,12 @@ fn bench_voxel_box_build_with_a_field_full_of_mods() {
                 })
                 .collect();
             for b in &boxes {
-                let _ = build_box_mesh(&spec, &grid, &field, b);
+                let _ = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty());
             }
             let start = Instant::now();
             let mut built = 0usize;
             for b in &boxes {
-                if build_box_mesh(&spec, &grid, &field, b).is_some() {
+                if build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()).is_some() {
                     built += 1;
                 }
             }

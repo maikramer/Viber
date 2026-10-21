@@ -201,6 +201,24 @@ fn walk_entities(specs: &[crate::recipes::EntitySpec], config: &mut WaterSurface
             crate::recipes::EntityKind::Lake { spec } => {
                 config.wave_amp = config.wave_amp.max(spec.ripple.clamp(0.2, 2.0));
             }
+            // `<Sky sun-elevation/sun-azimuth>`: sem `<DayCycle>` o domo usa
+            // estes valores, mas a água ficava com os defaults 17°/205° e o
+            // brilho especular apontava para um sol que não está no céu.
+            crate::recipes::EntityKind::HudElement { tag, attrs } if tag == "sky" => {
+                let f = |key: &str| {
+                    attrs
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .and_then(|(_, v)| v.parse::<f32>().ok())
+                        .filter(|v| v.is_finite())
+                };
+                if let Some(v) = f("sun-elevation") {
+                    config.sun_elevation = v;
+                }
+                if let Some(v) = f("sun-azimuth") {
+                    config.sun_azimuth = v;
+                }
+            }
             _ => {}
         }
         walk_entities(&spec.children, config);
@@ -221,7 +239,6 @@ mod tests {
             script: None,
             props: Vec::new(),
             links: Default::default(),
-            destructible: None,
             transform: TransformSpec::default(),
             physics: PhysicsSpec::default(),
             kind,

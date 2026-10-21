@@ -134,14 +134,16 @@ pub fn resample_channels(
         }
         let seg_len = seg;
         let dir = (b - a) / seg;
-        // Distance of the last emitted station from `a` along this segment —
-        // negative while it still sits on the previous segment.
-        let mut from_a = -carried;
+        // Distância da estação emitida a `a` ao longo DESTE segmento. O
+        // `from_a` arrancava em `-carried`; depois de somar `advance` ficava
+        // `spacing - 2*carried`, atirando a estação para trás da curva e
+        // desalinhando os canais (rio/estrada cortados ao lado da linha).
+        let mut from_a = 0.0;
         while carried + seg >= spacing {
             let advance = spacing - carried;
             from_a += advance;
             let t = (from_a / seg_len).clamp(0.0, 1.0);
-            let p = out.last().expect("resample always emitted the first point") + dir * advance;
+            let p = a + dir * from_a;
             out.push(p);
             for (ci, ch) in channels.iter_mut().enumerate() {
                 if !valid[ci] {

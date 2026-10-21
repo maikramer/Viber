@@ -95,6 +95,7 @@ pub fn stream_rings(
         Has<Resident>,
         Has<Streamable>,
     )>,
+    children: Query<&Children>,
 ) {
     let Some(player) = players.iter().next() else {
         return;
@@ -150,7 +151,23 @@ pub fn stream_rings(
         if !should_sleep(distance, resident, editing) {
             continue;
         }
-        let key = source_key(source);
+        // `despawn()` é recursivo no Bevy: adormecer um pai com filhos XML
+        // apagava a subárvore, e o ColdRecord só guarda a pose do root.
+        // Só folhas hibernam (o pai fica residente e os filhos seguem o LOD).
+        if children.get(entity).is_ok_and(|kids| !kids.is_empty()) {
+            continue;
+        }
+        // Duas entidades podem partilhar a mesma origem (`<Use>`/include
+        // repetido); sem uma chave única a segunda hibernação substituía o
+        // registo da primeira e uma instância desaparecia para sempre. A
+        // primeira mantém a chave histórica (`ficheiro#path`), a colisão
+        // leva o id — saves/testes antigos continuam a reconhecê-la.
+        let base = source_key(source);
+        let key = if store.records.contains_key(&base) {
+            format!("{}#{}", base, entity.to_bits())
+        } else {
+            base
+        };
         let state_json = script.and_then(|_| {
             host.as_ref()
                 .and_then(|h| h.dump_entity_state(entity))

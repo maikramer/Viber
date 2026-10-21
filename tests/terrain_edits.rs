@@ -42,7 +42,7 @@ fn mesh_probe(grid: &BrushGrid, deltas: &DeltaGrid, spec: &TerrainSpec) -> (usiz
     let mut triangles = 0usize;
     let mut min_y = f32::INFINITY;
     for b in &boxes {
-        let Some(data) = build_box_mesh(spec, &base, &field, b) else {
+        let Some(data) = build_box_mesh(spec, &base, &field, b, !spec.layers.is_empty()) else {
             continue;
         };
         triangles += data.indices.len() / 3;

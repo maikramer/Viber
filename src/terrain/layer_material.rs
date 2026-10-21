@@ -887,7 +887,6 @@ mod tests {
             script: None,
             props: Vec::new(),
             links: Default::default(),
-            destructible: None,
             transform: TransformSpec::default(),
             physics: PhysicsSpec::default(),
             kind,

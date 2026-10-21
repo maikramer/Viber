@@ -335,6 +335,7 @@ pub fn build_box_mesh(
     base: &dyn HeightField,
     field: &VoxelField,
     b: &VoxelBoxSpec,
+    uses_layer_material: bool,
 ) -> Option<super::super::mesh::ChunkMeshData> {
     let params = VoxelChunkParams {
         origin: b.origin,
@@ -343,7 +344,10 @@ pub fn build_box_mesh(
         texture_tile_size: spec.texture_tile_size,
         tint: spec.chunk_tint(),
         max_height: spec.max_height,
-        uses_layer_material: !spec.layers.is_empty(),
+        // Deriva do material REAL: com `VIBER_CHUNK_LAYERS=0` o fallback
+        // Standard recebia o tint de layers (R=0.502, G/B=1) e a geometria
+        // toda saía ciano.
+        uses_layer_material,
         transitions: b.transitions,
     };
     let density = |p: Vec3| field.density(base, p);
@@ -436,7 +440,13 @@ pub(crate) fn spawn_column(
     let mut meshed = 0;
     let mut bake = crate::physics::ColumnColliderBake::new();
     for b in boxes {
-        if let Some(data) = build_box_mesh(spec, base, field, b) {
+        if let Some(data) = build_box_mesh(
+            spec,
+            base,
+            field,
+            b,
+            matches!(material, ChunkMaterialHandle::Layer(_)),
+        ) {
             bake.add_mesh_data(b.origin, &data);
             spawn_box_entity(commands, meshes, column, b, data, material, true);
             meshed += 1;
@@ -846,7 +856,7 @@ mod tests {
         assert!(!boxes.is_empty(), "flat ground must still be meshed");
         let mut meshed = 0;
         for b in &boxes {
-            if let Some(data) = build_box_mesh(&spec, &grid, &field, b) {
+            if let Some(data) = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()) {
                 meshed += 1;
                 for (i, pos) in data.positions.iter().enumerate() {
                     // Os vértices de selo pendem seal_depth abaixo da
@@ -930,7 +940,7 @@ mod tests {
         );
         let mut downward = 0usize;
         for b in &boxes {
-            if let Some(data) = build_box_mesh(&spec, &grid, &field, b) {
+            if let Some(data) = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()) {
                 downward += data.normals.iter().filter(|n| n[1] < -0.5).count();
             }
         }

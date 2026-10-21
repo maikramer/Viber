@@ -313,7 +313,10 @@ pub(crate) fn waterline_reach(depth: f32, offset: f32) -> f32 {
 /// concordar ao centímetro, senão a banda de areia/lama do splat
 /// desancora da linha de água.
 pub(crate) fn lake_mirror_reach(depth: f32, water_offset: f32) -> f32 {
-    (waterline_reach(depth, water_offset) * CARVE_MARGIN).clamp(0.5, CONTOUR_PEAK * CARVE_MARGIN)
+    // Sem interseção com a linha de água o reach é 0 (o teste de
+    // `waterline_reach` já o garante); o piso 0.5 criava um espelho em
+    // lagos secos e alargava a linha em lagos rasos.
+    (waterline_reach(depth, water_offset) * CARVE_MARGIN).clamp(0.0, CONTOUR_PEAK * CARVE_MARGIN)
 }
 
 /// Ilha declarada dentro de um lago (filho repetível
@@ -1210,7 +1213,10 @@ pub fn carve_river_with_falls(
         }
         for (i, st) in stations.iter().enumerate() {
             let theta = (st.y - lake.at.y).atan2(st.x - lake.at.x);
-            let contour = lake.shape.contour(lake.radius, theta);
+            // A linha de água REAL é o contorno × mirror_reach, como em
+            // `surface_y_at`/`distance_to_waterline`; usar o contorno nominal
+            // punha um degrau no encontro rio/lago.
+            let contour = lake.shape.contour(lake.radius, theta) * lake.mirror_reach;
             if st.distance(lake.at) <= contour {
                 surface[i] = surface[i].max(lake.water_y);
             }
@@ -1871,7 +1877,9 @@ pub fn river_water_mesh(spec: &RiverSpec, body: &WaterBody) -> ChunkMeshData {
             let b = a + 1;
             let c = a + per;
             let d = c + 1;
-            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            // Winding +Y (a convenção do mesh do lago): `a,c,b` olhava para
+        // baixo e o `is_front` do shader desligava a onda no rio.
+        mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
         }
     }
     mesh

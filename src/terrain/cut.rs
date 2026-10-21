@@ -277,12 +277,12 @@ mod tests {
             "floor at natural − depth: {floor}"
         );
         // Nenhum texel subiu (lower-only)…
-        for i in 0..before.len() {
+        for (i, before) in before.iter().enumerate() {
             assert!(
-                grid.raw()[i] <= before[i],
+                grid.raw()[i] <= *before,
                 "texel {i} went up: {} > {}",
                 grid.raw()[i],
-                before[i]
+                before
             );
         }
         // …e o corredor é local: a 20 m do eixo nada mudou.

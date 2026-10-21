@@ -618,7 +618,21 @@ impl VoxelMod for CliffFaceMod {
             _ => CONCAVE_UNDERCUT,
         };
         let back = w * (lean + 0.1) + 1.0;
-        let lo = lo - self.normal.abs() * back;
+        // O undercut fica atrás da crista, no lado `-normal`: expandir só
+        // `lo` com `|normal|` cortava-o quando a normal aponta para −X/−Z
+        // (o density ignora mods fora de bounds()). Expandir os DOIS lados
+        // punha o corpo da parede dentro do SDF, que o escavava; cada eixo
+        // cresce apenas no sentido do undercut.
+        let lo = lo
+            - Vec2::new(
+                back * self.normal.x.max(0.0),
+                back * self.normal.y.max(0.0),
+            );
+        let hi = hi
+            + Vec2::new(
+                back * (-self.normal.x).max(0.0),
+                back * (-self.normal.y).max(0.0),
+            );
         let y_lo = self.bot.0.min(self.bot.1) - 1.0;
         let y_hi = self.top.0.max(self.top.1) + 1.0;
         Bounds3::from_corners(Vec3::new(lo.x, y_lo, lo.y), Vec3::new(hi.x, y_hi, hi.y))

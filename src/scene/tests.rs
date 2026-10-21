@@ -388,7 +388,7 @@ fn file_tree_json_and_filters_are_stable() {
 
 #[test]
 fn glb_drop_pose_writes_yaw_and_scale() {
-    let (tmp, doc) = load();
+    let (_tmp, doc) = load();
     let op = super::catalog::glb_drop_pose(&doc, "#", "/x/model.glb", [1.0, 0.0, 2.0], 45.0, 2.0)
         .expect("op");
     let super::ops::EditOp::Insert { xml, .. } = op else {

@@ -411,7 +411,12 @@ fn push_biomes(world: &mut World) {
     world
         .resource_mut::<crate::terrain::runtime::TerrainRuntime>()
         .spec
-        .biomes = biomes;
+        .biomes = biomes.clone();
+    // O rebake lê `TerrainSplat.params.biomes` (clone do bootstrap), não o
+    // spec: sem esta cópia a edição de biomas não mudava um único texel.
+    if let Some(mut splat) = world.get_resource_mut::<crate::terrain::runtime::TerrainSplat>() {
+        splat.params.biomes = biomes;
+    }
     let repainted = crate::terrain::runtime::rebake_chunk_splats(world, tuning);
     info!(
         target: "viber::scene",
@@ -422,6 +427,11 @@ fn push_biomes(world: &mut World) {
 /// Copia a camada de pintura do documento para o runtime e repinta os chunks
 /// tocados (in-place, mesmos handles) — o efeito vivo da op `terrain_paint`.
 fn push_paint(world: &mut World, rect: super::terrain::CellRect) {
+    // `cols/rows == 0` fazia `i0 + cols - 1` underflow (panic em debug,
+    // coordenada gigante em release) e um rebake inútil.
+    if rect.cols == 0 || rect.rows == 0 {
+        return;
+    }
     let window = crate::terrain::paint::CellWindow {
         i0: rect.i0,
         j0: rect.j0,

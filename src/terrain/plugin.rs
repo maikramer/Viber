@@ -387,12 +387,6 @@ fn update_voxel_columns(
     let max_cx = last(max_cx_v);
     let min_cz = first(min_cz_v);
     let max_cz = last(max_cz_v);
-    // Fora da pegada (ou sem interseção) → nenhuma coluna desejada.
-    let window_empty = min_cx_v > rows as f32 - 1.0
-        || max_cx_v < 0.0
-        || min_cz_v > rows as f32 - 1.0
-        || max_cz_v < 0.0;
-
     // 1. Campo de LOD de toda a janela visível, ANTES de tocar em nada.
     //
     // As faces de transição do transvoxel são geometria da coluna GROSSEIRA
@@ -403,7 +397,11 @@ fn update_voxel_columns(
     // Colunas ainda por nascer entram com o LOD cru: a vizinha ao lado tem de
     // ver o LOD que ela VAI ter, não a ausência dela.
     let mut lod_field = LodField::new(rows);
-    for cz in (if window_empty { 1 } else { min_cz })..=(if window_empty { 0 } else { max_cz }) {
+    // Preenche SEMPRE a janela clampada. O caso "vazia" deixava o campo sem
+    // nenhuma entrada enquanto o cull/respawn continuavam a correr na orla:
+    // `neighbours()` devolvia NO_NEIGHBOUR em tudo e as colunas da borda
+    // ficavam com LODs diferentes sem células de transição (buracos).
+    for cz in min_cz..=max_cz {
         for cx in min_cx..=max_cx {
             let coords = UVec2::new(cx, cz);
             let dist = center_of(coords).distance(cam_xz);
@@ -509,7 +507,13 @@ fn update_voxel_columns(
                     let Some(box_spec) = b.remaining.pop() else {
                         break;
                     };
-                    let Some(data) = super::voxel::build_box_mesh(spec, &base, voxel, &box_spec)
+                    let Some(data) = super::voxel::build_box_mesh(
+                        spec,
+                        &base,
+                        voxel,
+                        &box_spec,
+                        matches!(material, crate::terrain::runtime::ChunkMaterialHandle::Layer(_)),
+                    )
                     else {
                         // Provou-se vazio depois de tudo — sem custo de
                         // orçamento, segue para a próxima caixa.
