@@ -1294,6 +1294,11 @@ pub fn apply_ui_commands(
                     {
                         commands.entity(entity).insert(UiStyleDirty);
                     }
+                } else {
+                    // Focar um nó que não é input tira o foco visual; sem
+                    // limpar `focus.0` o teclado continuava a ir para o input
+                    // antigo (e `viber.ui.focused()` mentia).
+                    focus.0 = None;
                 }
             }
             UiCommand::SelectTab { .. }

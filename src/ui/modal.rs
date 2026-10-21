@@ -269,6 +269,10 @@ pub fn drive_ui_modals(
 ) {
     let escape = typing.0.is_none() && keys.just_pressed(KeyCode::Escape);
     let mut anonymous = 0usize;
+    // Ids de modais ainda VIVOS. O estado `open` era reconciliado só a partir
+    // dos componentes: um modal destruído (`viber.ui.destroy`, unload de
+    // cena) deixava o id na lista e `menu_open()` ficava true para sempre.
+    let mut live = std::collections::HashSet::new();
     for (mut modal, mut visibility, id) in &mut modals {
         let toggled = typing.0.is_none() && keys.just_pressed(modal.key);
         // Escape only ever closes: opening every modal with one key would be a
@@ -289,6 +293,7 @@ pub fn drive_ui_modals(
             anonymous += 1;
         }
         if let Some(id) = id {
+            live.insert(id.0.clone());
             let listed = open.open.iter().position(|o| *o == id.0);
             match (modal.open, listed) {
                 (true, None) => open.open.push(id.0.clone()),
@@ -299,6 +304,7 @@ pub fn drive_ui_modals(
             }
         }
     }
+    open.open.retain(|id| live.contains(id));
     // Modais sem id não entram em `open`, mas um menu em ecrã inteiro rouba
     // input ao gameplay seja qual for o id — contam em `any`.
     open.anonymous = anonymous;
@@ -373,13 +379,16 @@ pub fn drive_ui_tabs(
 #[allow(clippy::type_complexity)]
 pub fn sync_tab_pages(tabs: Res<UiTabs>, mut pages: Query<(&UiTabPage, &mut Node)>) {
     for (page, mut node) in &mut pages {
-        let wanted = if tabs.selected(&page.group) == Some(page.tab.as_str()) {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        if node.display != wanted {
-            node.display = wanted;
+        let selected = tabs.selected(&page.group) == Some(page.tab.as_str());
+        if selected {
+            // Só desfaz o `none` das páginas inativas. Forçar `Flex` em toda
+            // a página ativa sobrepunha-se ao `display: grid/block` (e a um
+            // `display:none` vindo de uma classe) escrito no CSS.
+            if node.display == Display::None {
+                node.display = Display::Flex;
+            }
+        } else if node.display != Display::None {
+            node.display = Display::None;
         }
     }
 }

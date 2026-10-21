@@ -132,7 +132,7 @@ mod tests {
         assert!(uhd > hd);
         // Small windows shrink but never vanish.
         let tiny = hud_scale_for_height(360.0);
-        assert!(tiny >= MIN_SCALE && tiny < 1.0, "360p scale = {tiny}");
+        assert!((MIN_SCALE..1.0).contains(&tiny), "360p scale = {tiny}");
     }
 
     #[test]

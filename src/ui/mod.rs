@@ -152,6 +152,10 @@ impl bevy::app::Plugin for UiPlugin {
                     bind::apply_bind_classes,
                     fade::drive_ui_fades,
                     script::publish_ui_script_view,
+                    // Publica e SÓ DEPOIS limpa. A limpeza estava em Last e
+                    // apagava eventos emitidos em `UiSet::Style` (tween_done)
+                    // antes de chegarem aos scripts no frame seguinte.
+                    events::clear_ui_events,
                 )
                     .chain()
                     .in_set(UiSet::Bind),
@@ -159,10 +163,12 @@ impl bevy::app::Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (
-                    script::apply_ui_commands,
-                    // Criação de elementos: EXCLUSIVA (o construtor da árvore
-                    // lê recursos do World e spawna diretamente).
+                    // Creates PRIMEIRO: `viber.ui.create` seguido de
+                    // `set_text`/`add_class` no mesmo frame perdia o segundo
+                    // comando ("unknown element") porque o registry só
+                    // recebia o nó no sistema seguinte.
                     script::apply_ui_creates,
+                    script::apply_ui_commands,
                     script::apply_ui_script_binds,
                     // Ações → fila de eventos dos scripts (`viber.events()`).
                     actions::forward_ui_actions,
@@ -229,9 +235,10 @@ impl bevy::app::Plugin for UiPlugin {
                     .in_set(UiSet::StyleLate),
             );
         // Cliques sintéticos e reais acumulam DURANTE o frame (o luau_update
-        // pode correr antes ou depois da UI) e limpa no FIM — ver
-        // collect::clear_ui_clicks. O mesmo contrato para a fila de eventos.
-        app.add_systems(Last, (runtime::clear_ui_clicks, events::clear_ui_events));
+        // pode correr antes ou depois da UI) e limpam no FIM. Os eventos de
+        // UI são limpos no `UiSet::Bind` (depois de publicados), para os
+        // `tween_done` emitidos em `Style` sobreviverem um frame.
+        app.add_systems(Last, runtime::clear_ui_clicks);
     }
 }
 

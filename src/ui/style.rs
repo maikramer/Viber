@@ -319,13 +319,14 @@ fn parse_keyframe_offset(text: &str) -> Option<f32> {
 
 /// Tempo de motion: `0.3s`, `300ms`, número nu = segundos.
 fn parse_time(word: &str) -> Option<f32> {
+    let finite = |v: f32| v.is_finite().then_some(v);
     if let Some(ms) = word.strip_suffix("ms") {
-        return ms.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+        return ms.trim().parse::<f32>().ok().and_then(finite).map(|v| v / 1000.0);
     }
     if let Some(seconds) = word.strip_suffix('s') {
-        return seconds.trim().parse().ok();
+        return seconds.trim().parse::<f32>().ok().and_then(finite);
     }
-    word.parse().ok()
+    word.parse::<f32>().ok().and_then(finite)
 }
 
 /// `transition: width .3s ease-out, opacity 1s` — propriedade + duração
@@ -2660,7 +2661,9 @@ fn parse_radial_gradient_args(args: &[&str]) -> Option<GradientSpec> {
             || shape.starts_with("ellipse ")
             || shape.starts_with("at ");
         if is_shape {
-            farthest = !(shape.contains("closest") || shape == "circle" || shape == "ellipse");
+            // CSS: uma forma nua (`circle`/`ellipse`) usa farthest-corner;
+            // só `closest-*` pede o lado mais perto.
+            farthest = !shape.contains("closest");
             stops_text = &args[1..];
         }
     }
@@ -2802,14 +2805,30 @@ pub fn parse_val(value: &str) -> Option<Val> {
         ("vh", Val::Vh as fn(f32) -> Val),
     ] {
         if let Some(number) = lower.strip_suffix(suffix) {
-            return number.trim().parse().ok().map(make);
+            return number
+                .trim()
+                .parse()
+                .ok()
+                .filter(|v: &f32| v.is_finite())
+                .map(make);
         }
     }
     if let Some(pct) = lower.strip_suffix('%') {
-        return pct.trim().parse().ok().map(Val::Percent);
+        return pct
+            .trim()
+            .parse()
+            .ok()
+            .filter(|v: &f32| v.is_finite())
+            .map(Val::Percent);
     }
     let number = lower.strip_suffix("px").unwrap_or(lower.as_str()).trim();
-    number.parse().ok().map(Val::Px)
+    // `f32::from_str` aceita "nan"/"inf": nenhum dos dois pode entrar no
+    // layout (largura infinita) nem na cor (opacidade NaN).
+    number
+        .parse()
+        .ok()
+        .filter(|v: &f32| v.is_finite())
+        .map(Val::Px)
 }
 
 fn parse_number(value: &str) -> Option<f32> {
@@ -2820,6 +2839,7 @@ fn parse_number(value: &str) -> Option<f32> {
         .trim()
         .parse()
         .ok()
+        .filter(|v: &f32| v.is_finite())
 }
 
 /// CSS box shorthand: 1 value (all), 2 (vertical horizontal), 3 (top h bottom)
