@@ -131,7 +131,7 @@ pub fn shortest_angle_delta_deg(from: f32, to: f32) -> f32 {
 /// side rays fan out to `full_dist + radius` so geometry just off-axis still
 /// pulls the camera in.
 pub fn terrain_safe_distance(
-    terrain_y: impl Fn(f32, f32) -> f32,
+    terrain_y: impl Fn(Vec3) -> f32,
     eye: Vec3,
     dir: Vec3,
     full_dist: f32,
@@ -142,7 +142,7 @@ pub fn terrain_safe_distance(
         for step in 1..=RAY_STEPS {
             let t = length * step as f32 / RAY_STEPS as f32;
             let p = eye + ray_dir * t;
-            if p.y < terrain_y(p.x, p.z) + min_dist {
+            if p.y < terrain_y(p) + min_dist {
                 return Some(t);
             }
         }
@@ -440,20 +440,32 @@ pub fn third_person_camera(
     mut shake: ResMut<CameraShake>,
     mut kick: ResMut<CameraKick>,
     mut cameras: Query<(&mut Transform, &mut OrbitCamera)>,
-    players: Query<(&GlobalTransform, &Player), With<Player>>,
+    players: Query<(&GlobalTransform, &Player, Option<&crate::lockon::LockOn>), With<Player>>,
+    lock_targets: Query<&GlobalTransform, Without<Player>>,
     runtime: Option<Res<TerrainRuntime>>,
     interior: Option<Res<crate::worldsys::InteriorSceneConfig>>,
+    a11y: Option<Res<crate::a11y::A11y>>,
 ) {
-    let Some((target, player)) = players.iter().next() else {
+    let Some((target, player, lock)) = players.iter().next() else {
         return;
     };
+    let lock_yaw = lock.and_then(|lock| {
+        lock_targets.get(lock.target).ok().and_then(|xf| {
+            crate::lockon::lock_camera_yaw(target.translation(), xf.translation())
+        })
+    });
     let target_pos = target.translation();
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
     // Shake decora em tempo REAL (não-escalado): durante o hit-stop a câmara
     // continua a tremer — é o slow-motion pushback da referência.
     shake.trauma = (shake.trauma - SHAKE_DECAY * real.delta_secs()).max(0.0);
-    let (shake_off, shake_roll) = shake_offset_roll(shake.trauma, real.elapsed_secs());
+    let shake_mul = a11y
+        .as_deref()
+        .map(crate::a11y::shake_scale)
+        .unwrap_or(1.0);
+    let (mut shake_off, shake_roll) = shake_offset_roll(shake.trauma, real.elapsed_secs());
+    shake_off *= shake_mul;
     // Solavanco direcional: mola subamortecida em dt virtual (no hit-stop
     // quase não anda — o shake cobre essa janela em tempo real).
     let (kick_off, kick_vel) = kick_spring_step(kick.offset, kick.vel, dt);
@@ -464,6 +476,11 @@ pub fn third_person_camera(
     let interior_room = interior
         .as_deref()
         .filter(|scene| scene.contains(target_pos.x, target_pos.z));
+    let view_distance_scale = if lock_yaw.is_some() {
+        crate::lockon::LOCK_DISTANCE_SCALE
+    } else {
+        1.0
+    };
     for (mut transform, mut cam) in &mut cameras {
         if cam.target.is_some() {
             continue; // named-target camera: rigid follow owns it
@@ -502,18 +519,22 @@ pub fn third_person_camera(
         let facing = target.rotation() * Vec3::Z;
         let behind_facing = behind_yaw_deg(facing.x, facing.z);
         let settle_allowed = player.last_moving_time.is_finite();
-        cam.yaw_deg = auto_camera_yaw(
-            cam.yaw_deg,
-            AutoCameraInput {
-                heading,
-                speed,
-                heading_alignment: alignment,
-                behind_facing_yaw: behind_facing,
-                settle_allowed,
-                seconds_since_steer: now - player.last_steer_time,
-            },
-            dt,
-        );
+        if lock_yaw.is_none() {
+            cam.yaw_deg = auto_camera_yaw(
+                cam.yaw_deg,
+                AutoCameraInput {
+                    heading,
+                    speed,
+                    heading_alignment: alignment,
+                    behind_facing_yaw: behind_facing,
+                    settle_allowed,
+                    seconds_since_steer: now - player.last_steer_time,
+                },
+                dt,
+            );
+        } else if let Some(yaw) = lock_yaw {
+            cam.yaw_deg = yaw;
+        }
         // First frame: snap the smoothed state onto the target (no startup
         // swoop from the world origin).
         if !cam.initialized {
@@ -523,7 +544,7 @@ pub fn third_person_camera(
                 + camera_offset(
                     cam.smooth_yaw_deg,
                     cam.pitch_state_deg,
-                    cam.distance,
+                    cam.distance * view_distance_scale,
                     cam.height,
                 );
             cam.initialized = true;
@@ -548,7 +569,7 @@ pub fn third_person_camera(
             + camera_offset(
                 cam.smooth_yaw_deg,
                 cam.pitch_state_deg,
-                cam.distance,
+                cam.distance * view_distance_scale,
                 cam.height,
             );
 
@@ -565,7 +586,10 @@ pub fn third_person_camera(
                 let dir = delta / full_dist;
                 let radius = cam.min_terrain_distance.max(0.5);
                 let hit = terrain_safe_distance(
-                    |x, z| rt.sample(x, z),
+                    // O chão SOB a sonda, não o telhado da coluna. `sample`
+                    // é o topo: debaixo de uma ponte o primeiro passo já
+                    // contava como colisão e a câmara colava-se ao herói.
+                    |p| rt.surface_below(p.x, p.z, p.y).unwrap_or(f32::NEG_INFINITY),
                     eye,
                     dir,
                     full_dist,
@@ -709,7 +733,7 @@ mod tests {
     fn test_terrain_safe_distance_flat_ray_clear() {
         // Flat ground at y=0, eye 3 m up, horizontal ray: the whole ray
         // keeps 3 m of clearance → None → the system uses the fallback clamp.
-        let hit = terrain_safe_distance(|_, _| 0.0, Vec3::Y * 3.0, Vec3::NEG_Z, 3.3, 1.0, 1.0);
+        let hit = terrain_safe_distance(|_| 0.0, Vec3::Y * 3.0, Vec3::NEG_Z, 3.3, 1.0, 1.0);
         assert_eq!(hit, None);
     }
 
@@ -717,7 +741,13 @@ mod tests {
     fn test_terrain_safe_distance_pulls_in_before_hill() {
         // Wall of terrain (y=8) starting 4 m ahead; the ray at y=0 from the
         // ground plane violates clearance immediately on any ray crossing it.
-        let terrain = |_x: f32, z: f32| if (-6.0..=-4.0).contains(&z) { 8.0 } else { 0.0 };
+        let terrain = |p: Vec3| {
+            if (-6.0..=-4.0).contains(&p.z) {
+                8.0
+            } else {
+                0.0
+            }
+        };
         let eye = Vec3::ZERO;
         let dir = Vec3::NEG_Z;
         let hit = terrain_safe_distance(terrain, eye, dir, 3.3, 1.0, 1.0);
@@ -735,9 +765,12 @@ mod tests {
         // Camera high above a flat field with a raised plateau ahead: center
         // ray at y=5 clears plateau (y=2) everywhere → no center hit, and
         // side rays at the same height also clear → None → fallback clamp.
-        let terrain = |x: f32, z: f32| {
-            let _ = x;
-            if (-8.0..=-2.0).contains(&z) { 2.0 } else { 0.0 }
+        let terrain = |p: Vec3| {
+            if (-8.0..=-2.0).contains(&p.z) {
+                2.0
+            } else {
+                0.0
+            }
         };
         let hit = terrain_safe_distance(terrain, Vec3::Y * 5.0, Vec3::NEG_Z, 10.0, 1.0, 1.0);
         assert_eq!(

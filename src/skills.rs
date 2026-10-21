@@ -252,6 +252,60 @@ pub fn apply_passive_delta(
     }
 }
 
+/// Substitui as passivas aprendidas. `None` = a lista (já filtrada e
+/// ordenada) é a mesma — o herói não se mexe. Ids desconhecidos caem fora.
+/// Não gasta pontos: o jogo é quem cobra.
+pub fn sync_learned(tree: &mut SkillTree, ids: &[String]) -> Option<(PlayerStats, PlayerStats)> {
+    let mut next_ids = Vec::new();
+    for id in ids {
+        if SKILLS.iter().any(|s| s.id == id) && !next_ids.iter().any(|known| known == id) {
+            next_ids.push(id.clone());
+        }
+    }
+    next_ids.sort_by_key(|id| SKILLS.iter().position(|s| s.id == id).unwrap_or(usize::MAX));
+    if tree.learned == next_ids {
+        return None;
+    }
+    let previous = stats_from_learned(&tree.learned);
+    tree.learned = next_ids;
+    Some((previous, stats_from_learned(&tree.learned)))
+}
+
+/// Aplica [`sync_learned`] ao mundo: árvore, bónus vivos e delta no herói
+/// (HP máximo + velocidade). Sem `Health` ainda, cria o default antes do delta
+/// para a vitalidade não se perder no primeiro frame.
+pub fn apply_skill_sync(world: &mut World, ids: &[String]) {
+    let changed = {
+        let Some(mut tree) = world.get_resource_mut::<SkillTree>() else {
+            return;
+        };
+        sync_learned(&mut tree, ids)
+    };
+    let Some((previous, new_stats)) = changed else {
+        return;
+    };
+    if let Some(mut stats) = world.get_resource_mut::<PlayerStatsResource>() {
+        stats.0 = new_stats;
+    }
+    let hero = {
+        let mut heroes = world.query_filtered::<Entity, With<Player>>();
+        heroes.iter(world).next()
+    };
+    let Some(hero) = hero else {
+        return;
+    };
+    if world.get::<Health>(hero).is_none() {
+        world.entity_mut(hero).insert(Health::default());
+    }
+    let Ok((mut health, mut player)) = world
+        .query::<(&mut Health, &mut Player)>()
+        .get_mut(world, hero)
+    else {
+        return;
+    };
+    apply_passive_delta(&mut health, &mut player, &previous, &new_stats);
+}
+
 // ── estado de combate ───────────────────────────────────────────────────
 
 /// Cooldowns das abilities (s restantes).
@@ -1014,8 +1068,11 @@ fn level_system(
                     level.points += gained;
                 }
                 Err(_) => {
+                    // O herói nasce no nível 1 (`XpLevel`). `gained` é o
+                    // delta: o primeiro salto (1→2) gravava o componente em 1
+                    // enquanto o toast dizia 2, e os seguintes herdavam o desvio.
                     commands.entity(entity).insert(LevelState {
-                        level: gained,
+                        level: 1 + gained,
                         points: gained,
                     });
                 }
@@ -1042,6 +1099,22 @@ mod tests {
         }
         assert!(SKILLS.iter().any(|s| s.requires.is_empty()));
         assert!(SKILLS.iter().all(|s| SKILLS.iter().any(|p| p.id == s.id)));
+    }
+
+    #[test]
+    fn test_sync_learned_applies_once_and_reverts() {
+        let mut tree = SkillTree::default();
+        let changed = sync_learned(
+            &mut tree,
+            &["nope".into(), "vitality1".into(), "vitality1".into()],
+        )
+        .expect("primeira lista muda a árvore");
+        assert!((changed.1.max_hp_bonus - 20.0).abs() < 1e-4);
+        assert_eq!(tree.learned, vec!["vitality1".to_string()]);
+        assert!(sync_learned(&mut tree, &["vitality1".into()]).is_none());
+        let cleared = sync_learned(&mut tree, &[]).expect("lista vazia esquece");
+        assert!(cleared.1.max_hp_bonus.abs() < 1e-4);
+        assert!(tree.learned.is_empty());
     }
 
     #[test]

@@ -108,7 +108,7 @@ notify = "8"
 bevy_rerecast = { path = "vendor/bevy_rerecast", default-features = false, features = ["bevy_mesh"] }
 bevy_landmass = { path = "vendor/bevy_landmass" }
 landmass_rerecast = { path = "vendor/landmass_rerecast" }
-bevy_kira_audio = { version = "0.27.1", features = ["ogg"] }
+bevy_kira_audio = { version = "0.27.1", features = ["ogg", "spatial"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

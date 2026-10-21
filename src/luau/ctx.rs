@@ -77,6 +77,10 @@ pub struct ScriptCtx {
     pub groups: std::collections::HashMap<String, Vec<i64>>,
     /// Id da cinemática a tocar (`viber.cinematic_playing()`), snapshot do frame.
     pub cinematic: Option<String>,
+    /// Último sentido deste frame (`viber.sense()`): `"see"` ou `"hear"`.
+    pub sense: Option<String>,
+    /// Ações do mapa de input que dispararam neste frame (`viber.action`).
+    pub action_pressed: std::collections::HashMap<String, bool>,
     /// `MenusOpen::any()` neste frame (`viber.menu_open`): menu, mapa,
     /// viagem rápida ou cinemática estão a roubar o input.
     pub menu_open: bool,

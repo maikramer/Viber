@@ -100,17 +100,20 @@ impl ScriptFx<'_> {
         z: f32,
         radius: f32,
         color: Option<[f32; 3]>,
+        y: f32,
     ) {
         let (Some(meshes), Some(materials)) =
             (self.meshes.as_deref_mut(), self.materials.as_deref_mut())
         else {
             return;
         };
+        // `y` é a superfície (0 se não há terreno). O torus fica 8 cm acima,
+        // como o anel nativo — y=0 enterrava o anel no chão da vila.
         crate::impact::spawn_impact_ring(
             commands,
             meshes,
             materials,
-            Vec3::new(x, 0.0, z),
+            Vec3::new(x, y + 0.08, z),
             radius,
             color
                 .map(|[r, g, b]| Color::srgb(r, g, b))

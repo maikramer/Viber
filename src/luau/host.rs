@@ -649,4 +649,78 @@ impl LuaScriptHost {
     fn install_viber_api(&self) -> mlua::Result<()> {
         super::api::install(&self.lua)
     }
+
+    /// JSON do `viber.state()` desta entidade (números, strings, bools e
+    /// tabelas de um nível). `None` se ainda não há estado.
+    pub fn dump_entity_state(&self, entity: Entity) -> Option<String> {
+        let states: Table = self.lua.named_registry_value("viber_states").ok()?;
+        let table: Table = states.raw_get(entity.to_bits() as i64).ok()?;
+        let value = lua_table_to_json(&table);
+        serde_json::to_string(&value).ok()
+    }
+
+    /// Repõe o `viber.state()` gravado por [`Self::dump_entity_state`] na
+    /// entidade nova (o id muda quando o streaming a volta a spawnar).
+    pub fn restore_entity_state(&self, entity: Entity, json: &str) -> mlua::Result<()> {
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+        let states: Table = self.lua.named_registry_value("viber_states")?;
+        let table = json_to_lua_table(&self.lua, &value)?;
+        states.raw_set(entity.to_bits() as i64, table)?;
+        Ok(())
+    }
+}
+
+fn lua_table_to_json(table: &Table) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        let Ok((key, value)) = pair else { continue };
+        let key = match key {
+            mlua::Value::String(text) => text.to_string_lossy(),
+            mlua::Value::Integer(n) => n.to_string(),
+            _ => continue,
+        };
+        if let Some(json) = lua_value_to_json(value) {
+            map.insert(key, json);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+fn lua_value_to_json(value: mlua::Value) -> Option<serde_json::Value> {
+    match value {
+        mlua::Value::Nil => Some(serde_json::Value::Null),
+        mlua::Value::Boolean(v) => Some(serde_json::Value::Bool(v)),
+        mlua::Value::Integer(v) => Some(serde_json::Value::from(v)),
+        mlua::Value::Number(v) => serde_json::Number::from_f64(v).map(serde_json::Value::Number),
+        mlua::Value::String(text) => Some(serde_json::Value::String(text.to_string_lossy())),
+        mlua::Value::Table(table) => Some(lua_table_to_json(&table)),
+        _ => None,
+    }
+}
+
+fn json_to_lua_table(lua: &mlua::Lua, value: &serde_json::Value) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    let Some(map) = value.as_object() else {
+        return Ok(table);
+    };
+    for (key, value) in map {
+        match value {
+            serde_json::Value::Null => table.raw_set(key.as_str(), mlua::Value::Nil)?,
+            serde_json::Value::Bool(v) => table.raw_set(key.as_str(), *v)?,
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    table.raw_set(key.as_str(), i)?;
+                } else if let Some(f) = n.as_f64() {
+                    table.raw_set(key.as_str(), f)?;
+                }
+            }
+            serde_json::Value::String(text) => table.raw_set(key.as_str(), text.as_str())?,
+            serde_json::Value::Object(_) => {
+                table.raw_set(key.as_str(), json_to_lua_table(lua, value)?)?;
+            }
+            serde_json::Value::Array(_) => {}
+        }
+    }
+    Ok(table)
 }

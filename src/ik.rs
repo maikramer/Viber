@@ -1,0 +1,406 @@
+//! IK de dois ossos (pés) e look-at da cabeça.
+//!
+//! A função [`solve_two_bone`] é pura. O sistema só corre em rigs com
+//! [`FootIk`] que não estão congelados ([`crate::animation::FrozenAnimation`]):
+//! é o mesmo corte que já evita animar criaturas longe.
+
+use bevy::prelude::*;
+
+use crate::animation::{AnimState, CharacterAnimator, FrozenAnimation};
+use crate::lockon::LockOn;
+
+/// Folga (m) entre a planta do pé e a superfície amostrada.
+pub const FOOT_CLEARANCE: f32 = 0.02;
+/// Quanto o pé pode descer/subir (m) antes do IK desistir (não estica o joelho ao infinito).
+pub const FOOT_MAX_ERROR: f32 = 0.45;
+/// Peso do look-at da cabeça para o alvo de lock.
+pub const HEAD_LOOK_WEIGHT: f32 = 0.35;
+/// Ângulo máximo (rad) que a cabeça pode rodar para o alvo.
+pub const HEAD_LOOK_MAX: f32 = 40.0_f32.to_radians();
+
+/// Marca um personagem cujos pés assentam no terreno.
+#[derive(Component, Debug, Default)]
+pub struct FootIk;
+
+/// Peso do IK de pés para um estado de locomoção. No ar e em one-shots é 0.
+pub fn foot_ik_weight(state: Option<AnimState>, busy: bool) -> f32 {
+    if busy {
+        return 0.0;
+    }
+    match state {
+        Some(AnimState::Idle | AnimState::Walk) => 1.0,
+        Some(AnimState::Run) => 0.65,
+        _ => 0.0,
+    }
+}
+
+/// Alvo vertical do pé: a superfície, se o erro couber em [`FOOT_MAX_ERROR`].
+pub fn plant_foot_y(animated_y: f32, surface_y: f32) -> Option<f32> {
+    let target = surface_y + FOOT_CLEARANCE;
+    ((animated_y - target).abs() <= FOOT_MAX_ERROR).then_some(target)
+}
+
+/// Dois ossos: `root` fica, devolve as novas posições de `mid` e `end`.
+///
+/// Comprimentos dos ossos preservados. `target` fora do alcance é clampado.
+/// O polo é a projecção do joelho actual, para o joelho não virar para trás.
+pub fn solve_two_bone(root: Vec3, mid: Vec3, end: Vec3, target: Vec3) -> (Vec3, Vec3) {
+    let len_ab = mid.distance(root).max(1e-4);
+    let len_bc = end.distance(mid).max(1e-4);
+    let mut to_target = target - root;
+    let reach = to_target.length();
+    if reach < 1e-5 {
+        to_target = (end - root).normalize_or_zero() * (len_ab - len_bc).abs().max(1e-3);
+    }
+    let max_reach = (len_ab + len_bc) * 0.999;
+    let min_reach = (len_ab - len_bc).abs() + 1e-4;
+    let dist = to_target.length().clamp(min_reach, max_reach.max(min_reach));
+    let dir = to_target.normalize_or_zero();
+    let cos_a = ((len_ab * len_ab + dist * dist - len_bc * len_bc) / (2.0 * len_ab * dist))
+        .clamp(-1.0, 1.0);
+    let sin_a = (1.0 - cos_a * cos_a).max(0.0).sqrt();
+    let mut pole = {
+        let n = dir.normalize_or_zero();
+        let v = mid - root;
+        v - n * v.dot(n)
+    };
+    if pole.length_squared() < 1e-8 {
+        let helper = if dir.dot(Vec3::Y).abs() > 0.9 {
+            Vec3::X
+        } else {
+            Vec3::Y
+        };
+        pole = dir.cross(helper);
+    }
+    let pole = pole.normalize_or_zero();
+    let new_mid = root + dir * (len_ab * cos_a) + pole * (len_ab * sin_a);
+    let new_end = root + dir * dist;
+    (new_mid, new_end)
+}
+
+/// Nome normalizado casa com um osso (`leftfoot`, `mixamorig:LeftFoot`, …).
+pub fn bone_matches(name: &str, needles: &[&str]) -> bool {
+    let n = crate::animation::normalize_clip_name(name);
+    needles.iter().any(|needle| n == *needle || n.ends_with(needle))
+}
+
+pub fn is_left_foot(name: &str) -> bool {
+    bone_matches(name, &["leftfoot", "footl", "lfoot", "lefttoe"])
+        && !bone_matches(name, &["leftfootik", "ik"])
+}
+
+pub fn is_right_foot(name: &str) -> bool {
+    bone_matches(name, &["rightfoot", "footr", "rfoot", "righttoe"])
+}
+
+pub fn is_left_knee(name: &str) -> bool {
+    bone_matches(name, &["leftleg", "leftcalf", "leftshin", "leftlowerleg"])
+}
+
+pub fn is_right_knee(name: &str) -> bool {
+    bone_matches(name, &["rightleg", "rightcalf", "rightshin", "rightlowerleg"])
+}
+
+pub fn is_left_hip(name: &str) -> bool {
+    bone_matches(name, &["leftupleg", "leftthigh", "leftupperleg"])
+}
+
+pub fn is_right_hip(name: &str) -> bool {
+    bone_matches(name, &["rightupleg", "rightthigh", "rightupperleg"])
+}
+
+pub fn is_head(name: &str) -> bool {
+    let n = crate::animation::normalize_clip_name(name);
+    n == "head" || n.ends_with("head") && !n.contains("headtop")
+}
+
+pub fn is_jaw(name: &str) -> bool {
+    bone_matches(name, &["jaw", "chin"])
+}
+
+/// Rotação local que alinha o osso de `from_world` para `to_world`.
+pub fn local_rotation_toward(
+    parent_world_rot: Quat,
+    bone_world_rot: Quat,
+    from_world: Vec3,
+    to_world: Vec3,
+) -> Quat {
+    let from = from_world.normalize_or_zero();
+    let to = to_world.normalize_or_zero();
+    if from.length_squared() < 1e-8 || to.length_squared() < 1e-8 {
+        return parent_world_rot.inverse() * bone_world_rot;
+    }
+    let delta = Quat::from_rotation_arc(from, to);
+    parent_world_rot.inverse() * (delta * bone_world_rot)
+}
+
+/// Abertura da mandíbula (rad) a partir de um envelope 0..1.
+pub fn jaw_pitch(envelope: f32) -> f32 {
+    -0.35 * envelope.clamp(0.0, 1.0)
+}
+
+fn walk_bones(
+    root: Entity,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+    out: &mut Vec<(Entity, String)>,
+) {
+    let Ok(kids) = children.get(root) else {
+        return;
+    };
+    for child in kids.iter() {
+        if let Ok(name) = names.get(child) {
+            out.push((child, name.as_str().to_string()));
+        }
+        walk_bones(child, children, names, out);
+    }
+}
+
+fn world_of(entity: Entity, globals: &Query<&GlobalTransform>) -> Option<Vec3> {
+    globals.get(entity).ok().map(|g| g.translation())
+}
+
+fn apply_aim(
+    entity: Entity,
+    parent: Entity,
+    from: Vec3,
+    to: Vec3,
+    transforms: &mut Query<&mut Transform>,
+    globals: &Query<&GlobalTransform>,
+) {
+    let (Ok(parent_g), Ok(self_g)) = (globals.get(parent), globals.get(entity)) else {
+        return;
+    };
+    let local = local_rotation_toward(
+        parent_g.rotation(),
+        self_g.rotation(),
+        from,
+        to,
+    );
+    if let Ok(mut tf) = transforms.get_mut(entity) {
+        tf.rotation = local;
+    }
+}
+
+/// Assenta os pés e, com lock-on, vira a cabeça. Corre depois da animação.
+pub fn foot_ik_system(
+    mut characters: Query<(&CharacterAnimator, &GlobalTransform, Option<&LockOn>), With<FootIk>>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut transforms: Query<&mut Transform>,
+    rigs: Query<Has<FrozenAnimation>>,
+    targets: Query<&GlobalTransform, Without<FootIk>>,
+    terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
+) {
+    let Some(terrain) = terrain.as_deref() else {
+        return;
+    };
+    for (animator, xform, lock) in &mut characters {
+        if rigs.get(animator.player).unwrap_or(false) {
+            continue;
+        }
+        let weight = foot_ik_weight(animator.state, animator.is_busy());
+        let mut bones = Vec::new();
+        walk_bones(animator.player, &children, &names, &mut bones);
+        if weight > 0.0 {
+            plant_pair(
+                &bones,
+                is_left_hip,
+                is_left_knee,
+                is_left_foot,
+                terrain,
+                weight,
+                &parents,
+                &globals,
+                &mut transforms,
+            );
+            plant_pair(
+                &bones,
+                is_right_hip,
+                is_right_knee,
+                is_right_foot,
+                terrain,
+                weight,
+                &parents,
+                &globals,
+                &mut transforms,
+            );
+        }
+        if let Some(lock) = lock
+            && let Some(head_entity) = bones.iter().find(|(_, n)| is_head(n)).map(|(e, _)| *e)
+            && let Ok(target) = targets.get(lock.target)
+        {
+            let Some(head_pos) = world_of(head_entity, &globals) else {
+                continue;
+            };
+            let to = target.translation() + Vec3::Y * 1.4 - head_pos;
+            let forward = xform.rotation() * Vec3::Z;
+            let to_dir = to.normalize_or_zero();
+            if to_dir.length_squared() < 1e-8 {
+                continue;
+            }
+            let aimed = forward.slerp(to_dir, HEAD_LOOK_WEIGHT);
+            let parent = parents
+                .get(head_entity)
+                .map(|c| c.parent())
+                .unwrap_or(animator.player);
+            let from = forward * 0.2;
+            apply_aim(
+                head_entity,
+                parent,
+                head_pos + from,
+                head_pos + aimed * 0.2,
+                &mut transforms,
+                &globals,
+            );
+        }
+    }
+}
+
+fn plant_pair(
+    bones: &[(Entity, String)],
+    hip_pred: fn(&str) -> bool,
+    knee_pred: fn(&str) -> bool,
+    foot_pred: fn(&str) -> bool,
+    terrain: &crate::terrain::runtime::TerrainRuntime,
+    weight: f32,
+    parents: &Query<&ChildOf>,
+    globals: &Query<&GlobalTransform>,
+    transforms: &mut Query<&mut Transform>,
+) {
+    let Some((hip, _)) = bones.iter().find(|(_, n)| hip_pred(n)) else {
+        return;
+    };
+    let Some((knee, _)) = bones.iter().find(|(_, n)| knee_pred(n)) else {
+        return;
+    };
+    let Some((foot, _)) = bones.iter().find(|(_, n)| foot_pred(n)) else {
+        return;
+    };
+    let (Some(hip_p), Some(knee_p), Some(foot_p)) = (
+        world_of(*hip, globals),
+        world_of(*knee, globals),
+        world_of(*foot, globals),
+    ) else {
+        return;
+    };
+    let surface = terrain.sample(foot_p.x, foot_p.z);
+    let Some(y) = plant_foot_y(foot_p.y, surface).map(|target| {
+        foot_p.y + (target - foot_p.y) * weight
+    }) else {
+        return;
+    };
+    let goal = Vec3::new(foot_p.x, y, foot_p.z);
+    let (new_knee, new_foot) = solve_two_bone(hip_p, knee_p, foot_p, goal);
+    let hip_parent = parents.get(*hip).map(|c| c.parent()).unwrap_or(*hip);
+    let knee_parent = parents.get(*knee).map(|c| c.parent()).unwrap_or(*hip);
+    apply_aim(*hip, hip_parent, knee_p, new_knee, transforms, globals);
+    apply_aim(*knee, knee_parent, foot_p, new_foot, transforms, globals);
+}
+
+/// Envelope de voz que abre a mandíbula enquanto o clip toca.
+#[derive(Resource, Default)]
+pub struct VoiceEnvelope {
+    pub level: f32,
+}
+
+pub fn decay_voice_envelope(time: Res<Time>, mut env: ResMut<VoiceEnvelope>) {
+    let dt = time.delta_secs();
+    env.level = (env.level - dt * 1.6).max(0.0);
+}
+
+pub fn jaw_system(
+    env: Res<VoiceEnvelope>,
+    animators: Query<&CharacterAnimator>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut transforms: Query<&mut Transform>,
+) {
+    if env.level <= 0.01 {
+        return;
+    }
+    let pitch = jaw_pitch(env.level);
+    for animator in &animators {
+        let mut bones = Vec::new();
+        walk_bones(animator.player, &children, &names, &mut bones);
+        let Some((jaw, _)) = bones.into_iter().find(|(_, n)| is_jaw(n)) else {
+            continue;
+        };
+        let parent = parents.get(jaw).map(|c| c.parent()).unwrap_or(animator.player);
+        let Ok(parent_g) = globals.get(parent) else {
+            continue;
+        };
+        let Ok(self_g) = globals.get(jaw) else {
+            continue;
+        };
+        let extra = Quat::from_rotation_x(pitch);
+        if let Ok(mut tf) = transforms.get_mut(jaw) {
+            tf.rotation = parent_g.rotation().inverse() * (self_g.rotation() * extra);
+        }
+    }
+}
+
+pub struct IkPlugin;
+
+impl Plugin for IkPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<VoiceEnvelope>().add_systems(
+            PostUpdate,
+            (foot_ik_system, decay_voice_envelope, jaw_system)
+                .chain()
+                .after(bevy::app::AnimationSystems)
+                .before(bevy::transform::TransformSystems::Propagate),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_bone_keeps_lengths_and_reaches() {
+        let root = Vec3::ZERO;
+        let mid = Vec3::new(0.0, -0.5, 0.1);
+        let end = Vec3::new(0.0, -1.0, 0.0);
+        let target = Vec3::new(0.3, -0.8, 0.2);
+        let (new_mid, new_end) = solve_two_bone(root, mid, end, target);
+        let len_ab = mid.distance(root);
+        let len_bc = end.distance(mid);
+        assert!((new_mid.distance(root) - len_ab).abs() < 1e-3);
+        assert!((new_end.distance(new_mid) - len_bc).abs() < 1e-3);
+        assert!(new_end.distance(target) < 0.05 || new_end.distance(root) <= len_ab + len_bc);
+    }
+
+    #[test]
+    fn foot_weight_is_zero_in_the_air_and_full_when_walking() {
+        assert_eq!(foot_ik_weight(Some(AnimState::Walk), false), 1.0);
+        assert_eq!(foot_ik_weight(Some(AnimState::Jump), false), 0.0);
+        assert_eq!(foot_ik_weight(Some(AnimState::Walk), true), 0.0);
+    }
+
+    #[test]
+    fn plant_rejects_a_foot_floating_far_above_the_ground() {
+        assert!(plant_foot_y(1.0, 0.9).is_some());
+        assert!(plant_foot_y(3.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn bone_names_match_mixamo_and_plain() {
+        assert!(is_left_foot("mixamorig:LeftFoot"));
+        assert!(is_right_knee("RightLeg"));
+        assert!(is_head("mixamorig:Head"));
+        assert!(is_jaw("Jaw"));
+        assert!(!is_left_foot("RightFoot"));
+    }
+
+    #[test]
+    fn jaw_opens_down_with_the_envelope() {
+        assert_eq!(jaw_pitch(0.0), 0.0);
+        assert!(jaw_pitch(1.0) < -0.3);
+    }
+}

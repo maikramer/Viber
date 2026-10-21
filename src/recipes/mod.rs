@@ -513,8 +513,10 @@ pub enum EntityKind {
     },
     /// `<MusicLayer layer sound base-volume>` — looped BGM bus layer; the
     /// driver crossfades layers by player zone (`src/music.rs`).
+    /// `sound` vazio = o ficheiro tem o nome da layer.
     MusicLayer {
         layer: String,
+        sound: String,
         base_volume: f32,
     },
     /// `<DayCycle>` — advances minute-of-day and drives the ambient light
@@ -1664,6 +1666,17 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
             "name" => common.name = Some(value.clone()),
             "tag" => common.tag = Some(value.clone()),
             "script" => common.script = Some(value.clone()),
+            "ragdoll" => {
+                if values::parse_bool(value, &ctx_tag).unwrap_or(false) {
+                    common.props.push(("__ragdoll".into(), "1".into()));
+                }
+            }
+            "stream" if value.trim() == "resident" => {
+                common.props.push(("__resident".into(), "1".into()));
+            }
+            "stream" if value.trim() == "cold" => {
+                common.props.push(("__stream".into(), "cold".into()));
+            }
             key if crate::luau::exports::prop_name(key).is_some() => {
                 let name = crate::luau::exports::prop_name(key).unwrap_or_default();
                 common.props.push((name.to_owned(), value.clone()));
@@ -2910,7 +2923,7 @@ fn finish_music_layer(node: &XmlNode, layer: &str, ctx: &mut ParseCtx) -> Result
     let (common, rest) = parse_common(node, ctx)?;
     let ctx_tag = format!("<{}>", node.tag);
     let layer = layer.to_string();
-    let sound = node.attr("sound").map(str::trim).unwrap_or("");
+    let sound = node.attr("sound").map(str::trim).unwrap_or("").to_string();
     let mut base_volume = 0.2;
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
@@ -2923,7 +2936,6 @@ fn finish_music_layer(node: &XmlNode, layer: &str, ctx: &mut ParseCtx) -> Result
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
         }
     }
-    let _ = sound;
     Ok(EntitySpec {
         prototype_instance: None,
         name: common.name,
@@ -2934,7 +2946,11 @@ fn finish_music_layer(node: &XmlNode, layer: &str, ctx: &mut ParseCtx) -> Result
         transform: common.transform,
         physics: common.physics,
         destructible: common.destructible,
-        kind: EntityKind::MusicLayer { layer, base_volume },
+        kind: EntityKind::MusicLayer {
+            layer,
+            sound,
+            base_volume,
+        },
         children: Vec::new(),
         source: None,
     })
@@ -5994,10 +6010,16 @@ mod tests {
         ))
         .unwrap();
         assert!(w.is_empty(), "{w:?}");
-        let EntityKind::MusicLayer { layer, base_volume } = spec.kind else {
+        let EntityKind::MusicLayer {
+            layer,
+            sound,
+            base_volume,
+        } = spec.kind
+        else {
             panic!("expected music layer");
         };
         assert_eq!(layer, "explore");
+        assert_eq!(sound, "bgm-explore");
         assert_eq!(base_volume, 0.18);
     }
 

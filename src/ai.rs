@@ -169,8 +169,33 @@ pub enum EnemyState {
     /// Patrol around `home`; the [`Default`].
     #[default]
     Wander,
-    /// Run at the player while inside the aggro radius.
+    /// Viu ou ouviu: vira-se para o ponto, ainda sem correr.
+    Alert,
+    /// Run at the player while it can see them.
     Chase,
+    /// Perdeu o alvo: vai ao último ponto e desiste.
+    Search,
+}
+
+impl EnemyState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wander => "wander",
+            Self::Alert => "alert",
+            Self::Chase => "chase",
+            Self::Search => "search",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "wander" => Some(Self::Wander),
+            "alert" => Some(Self::Alert),
+            "chase" => Some(Self::Chase),
+            "search" => Some(Self::Search),
+            _ => None,
+        }
+    }
 }
 
 /// A spawned creature: authored stats plus its current behaviour state.
@@ -283,9 +308,11 @@ pub fn split_due(queue: &mut Vec<RespawnEntry>, now: f32) -> Vec<RespawnEntry> {
     due
 }
 
-/// Criaturas sem script não perseguem nem patrulham. O movimento pedido
-/// por `viber.move_towards` continua em [`apply_ai_locomotion`].
-pub fn enemy_ai() {}
+/// Criaturas sem script: visão, audição e a FSM Alert/Chase/Search.
+/// Sem estímulo ficam no sítio (não há perseguição por distância plana).
+pub fn enemy_ai(world: &mut World) {
+    crate::senses::sense_ai(world);
+}
 
 /// System set of [`apply_ai_locomotion`], so anything that has to write the
 /// locomotion ask (the navigation bridge) can order itself before the single

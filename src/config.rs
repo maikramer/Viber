@@ -95,6 +95,15 @@ pub struct SaveConfig {
     pub dir: PathBuf,
 }
 
+/// Stem do ficheiro em `bgm_dir`. O atributo `sound` é `bgm-<stem>` (o nome
+/// do clip no formato antigo) ou o stem cru; vazio cai na layer.
+pub fn bgm_stem<'a>(layer: &'a str, sound: &'a str) -> &'a str {
+    let sound = sound.trim();
+    let sound = sound.strip_suffix(".ogg").unwrap_or(sound);
+    let sound = sound.strip_prefix("bgm-").unwrap_or(sound);
+    if sound.is_empty() { layer } else { sound }
+}
+
 impl GameConfig {
     /// Asset roots em ordem de precedência: a pasta do jogo SEMPRE primeiro
     /// (overrides por-mundo + shaders especializados), depois as extras do
@@ -134,7 +143,16 @@ impl GameConfig {
 
     /// `<MusicLayer layer>` → path AssetServer (contra as roots).
     pub fn bgm_path(&self, layer: &str) -> String {
-        Self::asset_string(&self.assets.bgm_dir, &format!("{layer}.ogg"))
+        self.bgm_file(layer, "")
+    }
+
+    /// `<MusicLayer sound="bgm-x">` ganha ao nome da layer. `bgm-explore` e
+    /// `explore.ogg` caem ambos em `explore.ogg`; sound vazio usa a layer.
+    pub fn bgm_file(&self, layer: &str, sound: &str) -> String {
+        Self::asset_string(
+            &self.assets.bgm_dir,
+            &format!("{}.ogg", bgm_stem(layer, sound)),
+        )
     }
 
     /// Clip SFX (`combat/swing.ogg`, relativo ao `sfx_dir`) → path
@@ -361,6 +379,13 @@ mod tests {
         let config = load(dir.path()).unwrap();
         assert_eq!(config.title.as_deref(), Some("Jogo Teste"));
         assert_eq!(config.bgm_path("explore"), "assets/audio/bgm/explore.ogg");
+        assert_eq!(bgm_stem("explore", "bgm-explore"), "explore");
+        assert_eq!(bgm_stem("battle", "bgm-boss.ogg"), "boss");
+        assert_eq!(bgm_stem("race", ""), "race");
+        assert_eq!(
+            config.bgm_file("battle", "bgm-boss"),
+            "assets/audio/bgm/boss.ogg"
+        );
         assert_eq!(
             config.sfx_path("combat/swing.ogg"),
             "assets/audio/sfx/combat/swing.ogg"

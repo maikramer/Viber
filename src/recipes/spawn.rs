@@ -1533,12 +1533,32 @@ fn spawn_entity(
         }
     }
     // Script Luau da entidade: o runtime executa `on_update(dt)` por frame.
+    if spec
+        .props
+        .iter()
+        .any(|(key, value)| key == "__ragdoll" && value == "1")
+    {
+        entity.insert(crate::ragdoll::RagdollDeath);
+    }
+    if spec.props.iter().any(|(key, _)| key == "__resident") {
+        entity.insert(crate::streaming::Resident);
+    } else if spec
+        .props
+        .iter()
+        .any(|(key, value)| key == "__stream" && value == "cold")
+    {
+        entity.insert(crate::streaming::Streamable);
+    }
     if let Some(path) = &spec.script {
         entity.insert(crate::luau::LuaScriptRef { path: path.clone() });
-        if !spec.props.is_empty() {
-            entity.insert(crate::luau::ScriptProps(std::sync::Arc::new(
-                spec.props.clone(),
-            )));
+        let authored: Vec<_> = spec
+            .props
+            .iter()
+            .filter(|(key, _)| !key.starts_with("__"))
+            .cloned()
+            .collect();
+        if !authored.is_empty() {
+            entity.insert(crate::luau::ScriptProps(std::sync::Arc::new(authored)));
         }
         // `tag="always-active"`: o script NUNCA congela pelo LOD de ativação
         // (mesma política dos scripts de UI). Para CONTROLLERS de jogo que
@@ -1899,15 +1919,20 @@ fn spawn_entity(
                 sfx: sfx.clamp(0.0, 1.0),
             }));
         }
-        EntityKind::MusicLayer { layer, base_volume } => {
+        EntityKind::MusicLayer {
+            layer,
+            sound,
+            base_volume,
+        } => {
             // O playback é do backend kira — o `audio_loop_starter`
             // (crate::music) arranca o loop no bus de música quando o
             // componente pendente aparece; os buses do mixer aplicam-se ao
-            // vivo, no canal. O path é `{bgm_dir}/{layer}.ogg` com o dir do
-            // config.yaml do jogo.
+            // vivo, no canal. `sound="bgm-explore"` resolve
+            // `{bgm_dir}/explore.ogg`; sem sound, o nome é o da layer.
+            let stem = crate::config::bgm_stem(layer, sound);
             let url = match &ctx.game_config {
-                Some(config) => config.bgm_path(layer),
-                None => format!("{layer}.ogg"),
+                Some(config) => config.bgm_path(stem),
+                None => format!("{stem}.ogg"),
             };
             entity.insert((
                 crate::music::MusicLayerTag {

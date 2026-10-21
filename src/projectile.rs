@@ -363,6 +363,7 @@ fn push_hit(out: &mut ImpactOut, entity: Entity, amount: f32, faction: &str, at:
 }
 
 fn impact_burst(commands: &mut Commands, at: Vec3) {
+    commands.spawn(crate::senses::NoisePing(at));
     crate::particles::spawn_burst(commands, &crate::combat::hit_sparks_spec(), at, 8);
 }
 
@@ -388,14 +389,18 @@ fn step_projectiles(
         .next()
         .map(|(entity, transform)| (entity, transform.translation()));
     for (entity, mut transform, mut shot) in &mut projectiles {
-        shot.life -= dt;
-        if shot.life <= 0.0 {
+        // O último instante ainda viaja e ainda pode acertar. Descartá-lo
+        // quando `life < dt` fazia a seta desaparecer no ar, a um passo do alvo.
+        let step = dt.min(shot.life);
+        if step <= 0.0 {
             commands.entity(entity).try_despawn();
             continue;
         }
+        shot.life -= step;
+        let expired = shot.life <= 0.0;
         let prev = transform.translation;
-        shot.vel.y -= shot.gravity * dt;
-        let pos = prev + shot.vel * dt;
+        shot.vel.y -= shot.gravity * step;
+        let pos = prev + shot.vel * step;
         transform.translation = pos;
         if let Some(dir) = shot.vel.try_normalize() {
             transform.look_to(dir, Vec3::Y);
@@ -427,8 +432,8 @@ fn step_projectiles(
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 if let Some((target, along)) = hit {
                     let at = prev.lerp(pos, along);
-                    if let Ok((target, t, _)) = creatures.get(target) {
-                        push_hit(&mut out, target, shot.damage, "player", t.translation());
+                    if let Ok((target, _, _)) = creatures.get(target) {
+                        push_hit(&mut out, target, shot.damage, "player", at);
                     }
                     impact_burst(&mut commands, at);
                     commands.entity(entity).try_despawn();
@@ -447,6 +452,8 @@ fn step_projectiles(
                 .is_some_and(|ground| pos.y <= ground)
         {
             impact_burst(&mut commands, pos);
+            commands.entity(entity).try_despawn();
+        } else if expired {
             commands.entity(entity).try_despawn();
         }
     }

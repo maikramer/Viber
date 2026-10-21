@@ -172,6 +172,10 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub save_request: Option<bevy::ecs::system::ResMut<'w, crate::save::SaveRequest>>,
     /// Sistemas nativos reclamados por scripts (`viber.own_system`).
     pub system_owners: Option<bevy::ecs::system::ResMut<'w, super::ownership::ScriptSystemOwners>>,
+    /// Sentidos deste frame (`viber.sense` / `on_sense`).
+    pub sense: Option<bevy::ecs::system::Res<'w, crate::senses::SenseInbox>>,
+    /// Mapa de ações (`viber.action`).
+    pub actions: Option<bevy::ecs::system::Res<'w, crate::input_map::ActionState>>,
     /// Balão de diálogo do HUD — mesma query do diálogo nativo (`viber.say`).
     pub balloons: Query<
         'w,
@@ -211,6 +215,13 @@ pub struct LuauRuntimeLocals<'w, 's> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// Cura: um `amount` negativo não tira vida (isso é `entity_damage`) e o
+/// resultado nunca sai de `[0, max]`. Sem o chão, `current + (-grande)`
+/// ficava negativo e a entidade deixava de poder morrer.
+fn apply_heal(current: f32, max: f32, amount: f32) -> f32 {
+    (current + amount.max(0.0)).clamp(0.0, max.max(0.0))
+}
+
 pub fn luau_update(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -601,12 +612,47 @@ pub fn luau_update(
             // cap — ver `entity_names`).
             ctx.self_name = locals.entity_names.get(entity).ok().map(Name::to_string);
             ctx.self_props = locals.script_props.get(entity).ok().map(|p| p.0.clone());
+            ctx.sense = locals
+                .sense
+                .as_deref()
+                .and_then(|inbox| inbox.pulses.get(&entity).map(|kind| kind.as_str().to_string()));
+            ctx.action_pressed = locals
+                .actions
+                .as_deref()
+                .map(|state| {
+                    [
+                        crate::input_map::Action::Jump,
+                        crate::input_map::Action::Sprint,
+                        crate::input_map::Action::Attack,
+                        crate::input_map::Action::Interact,
+                        crate::input_map::Action::Lock,
+                        crate::input_map::Action::Menu,
+                    ]
+                    .into_iter()
+                    .map(|action| (action.as_str().to_string(), state.pressed(action)))
+                    .collect()
+                })
+                .unwrap_or_default();
         }
         // Secção "scripts" do profiler: um escopo por ficheiro (igual ao
         // `script/<file>` antigo). record_script auto-gateia em freeze.
         let script_t0 = std::time::Instant::now();
         if let Err(e) = host.run_update(entity, &lref.path, dt, origin, player_pos, elapsed) {
             host.warn_once(&lref.path, &e);
+        }
+        let sensed = locals
+            .sense
+            .as_deref()
+            .and_then(|inbox| inbox.pulses.get(&entity).copied());
+        if let Some(kind) = sensed
+            && let Ok(text) = host.lua.create_string(kind.as_str())
+        {
+            let args = mlua::MultiValue::from_vec(vec![mlua::Value::String(text)]);
+            if let Err(error) =
+                host.run_method(entity, &lref.path, origin, "on_sense", args, None)
+            {
+                host.warn_once(&lref.path, &error);
+            }
         }
         crate::profiler::timed::record_script(
             &lref.path,
@@ -1122,12 +1168,22 @@ pub fn luau_update(
                     if !known {
                         if from_collect {
                             vault.item_add(&kind, amount);
-                        } else if locals.once_warned.insert(format!("vault_add:{kind}")) {
-                            warn!(target: "viber::luau",
-                                "viber.vault_add: recurso desconhecido '{kind}' — nada depositado (itens usam viber.item_add)");
+                        } else {
+                            // O aviso é 1×, mas TODAS as chamadas têm de sair:
+                            // senão a segunda dispara `collect` e soma no
+                            // snapshot sem ter depositado nada.
+                            if locals.once_warned.insert(format!("vault_add:{kind}")) {
+                                warn!(target: "viber::luau",
+                                    "viber.vault_add: recurso desconhecido '{kind}' — nada depositado (itens usam viber.item_add)");
+                            }
                             continue;
                         }
                     }
+                    let stored = if known {
+                        vault.resource(&kind)
+                    } else {
+                        vault.item_count(&kind)
+                    };
                     // Evento collect: qualquer entrada no vault (recurso ou
                     // item) chega a `viber.events()` — quests em Lua sem
                     // tocar no Rust.
@@ -1137,20 +1193,22 @@ pub fn luau_update(
                             amount,
                         });
                     }
-                    // Snapshot fresco (mesma razão do ItemAdd acima).
+                    // Snapshot fresco (mesma razão do ItemAdd acima). O valor
+                    // é o que FICOU no cofre, não o pedido — a pilha trava em 99.
                     if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
                         let key = if known {
                             kind.to_ascii_lowercase()
                         } else {
                             crate::economy::normalize_item(&kind)
                         };
-                        *ctx.vault.entry(key).or_insert(0) += amount;
+                        ctx.vault.insert(key, stored);
                     }
                 }
             }
             ScriptCommand::ItemAdd { id, amount } => {
                 if let Some(vault) = vault.as_deref_mut() {
                     vault.item_add(&id, amount);
+                    let stored = vault.item_count(&id);
                     if let Some(events) = locals.events.as_deref_mut() {
                         events.push(ScriptGameEvent::Collect {
                             item: id.clone(),
@@ -1163,9 +1221,10 @@ pub fn luau_update(
                     // sistema — armadilha clássica de change detection), e o
                     // `viber.vault_get` dos scripts ficava preso no valor do
                     // arranque (correções reutilizáveis → engine).
+                    // O valor é o da pilha (teto 99), não `+= amount`.
                     if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
                         let key = crate::economy::normalize_item(&id);
-                        *ctx.vault.entry(key).or_insert(0) += amount;
+                        ctx.vault.insert(key, stored);
                     }
                 }
             }
@@ -1304,16 +1363,16 @@ pub fn luau_update(
             }
             ScriptCommand::EntityHeal { entity, amount } => {
                 if let Ok((_, mut health, _)) = locals.healths.get_mut(entity) {
-                    health.current = (health.current + amount).min(health.max);
+                    health.current = apply_heal(health.current, health.max, amount);
                 } else if player_components
                     .as_ref()
                     .is_some_and(|(id, _, health, _)| *id == entity && health.is_some())
                 {
                     if let Some((_, _, Some(health), _)) = player_components.as_mut() {
-                        health.current = (health.current + amount).min(health.max);
+                        health.current = apply_heal(health.current, health.max, amount);
                     }
                 } else if let Some((cur, max)) = locals.fresh_health.get_mut(&entity) {
-                    let next = (*cur + amount).min(*max);
+                    let next = apply_heal(*cur, *max, amount);
                     *cur = next;
                     commands.entity(entity).try_insert(crate::vitals::Health {
                         current: next,
@@ -1411,7 +1470,11 @@ pub fn luau_update(
                 radius,
                 color,
             } => {
-                locals.fx.ring(&mut commands, x, z, radius, color);
+                let y = terrain
+                    .as_deref()
+                    .map(|rt| rt.sample_mesh_surface(x, z))
+                    .unwrap_or(0.0);
+                locals.fx.ring(&mut commands, x, z, radius, color, y);
             }
             ScriptCommand::Shake(amount) => locals.fx.shake(amount),
             ScriptCommand::CameraKick(impulse) => locals.fx.kick(impulse),
@@ -1580,6 +1643,41 @@ pub fn luau_update(
                     markers.waypoint = waypoint
                         .map(|(position, label)| crate::hud::markers::HudPoint { position, label });
                 }
+            }
+            ScriptCommand::SyncSkills(ids) => {
+                commands.queue(move |world: &mut World| {
+                    crate::skills::apply_skill_sync(world, &ids);
+                });
+            }
+            ScriptCommand::LockTarget(target) => {
+                commands.queue(move |world: &mut World| {
+                    let Some(mut requests) = world.get_resource_mut::<crate::lockon::LockRequests>()
+                    else {
+                        return;
+                    };
+                    requests.set = Some(target);
+                });
+            }
+            ScriptCommand::CycleLock => {
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut requests) =
+                        world.get_resource_mut::<crate::lockon::LockRequests>()
+                    {
+                        requests.cycle = true;
+                    }
+                });
+            }
+            ScriptCommand::Noise { pos, loudness } => {
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut bus) = world.get_resource_mut::<crate::senses::SenseBus>() {
+                        bus.events.push(crate::senses::SenseEvent {
+                            kind: crate::senses::SenseKind::Hear,
+                            pos,
+                            loudness,
+                            from: None,
+                        });
+                    }
+                });
             }
             ScriptCommand::AddSkillPoints(amount) => {
                 commands.queue(move |world: &mut World| {

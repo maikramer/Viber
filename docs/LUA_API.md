@@ -348,7 +348,12 @@ As mesmas máquinas da engine (`src/ai.rs`), expostas para os scripts comporem.
 | Função | Devolve | Notas |
 |--------|---------|-------|
 | `viber.wander_target(radius)` | `x, z` | ponto determinístico ao redor do `home`; incrementa `state.picks`. O `home` é gravado pela engine na **ativação** da entidade (`activate_at` usa a posição de spawn) — não é preciso chamar `viber.state()` antes |
-| `viber.next_state(cur, dist, aggro, deaggro)` | `"wander"` \| `"chase"` | FSM wander↔chase com histerese (`cur` é `"wander"` ou `"chase"`) |
+| `viber.next_state(cur, dist, aggro, deaggro)` | `"wander"` \| `"chase"` \| `"alert"` \| `"search"` | FSM por distância (sem sentidos). `cur` desconhecido conta como wander |
+| `viber.lock_target(id\|nil)` | | fixa ou limpa o lock-on (câmara atrás do alvo, strafe). Idempotente |
+| `viber.cycle_lock()` | | próximo hostil em 18 m com linha de visão |
+| `viber.noise(loudness)` | | som que as criaturas sem script ouvem (`loudness / distância`) |
+| `viber.sense()` | `"see"` \| `"hear"` \| `nil` | último sentido deste frame |
+| `viber.action(nome)` | bool | `jump` `sprint` `attack` `interact` `lock` `menu` — teclado ou gamepad |
 
 ## Gesto & som
 
@@ -600,7 +605,8 @@ Um NPC/dador pode conduzir o seu PRÓPRIO diálogo em Lua:
 | `viber.say(texto [, segundos])` | escreve no **balão nativo** do HUD (o mesmo do diálogo de quests); sem `<DialogueBalloon>` no mundo = no-op com warn 1×; `\n` faz multi-linha; default 4 s |
 | `viber.quest_def(id)` | tabela da definição autoral (`id/title/npc/biome/kind/target/count/radius/gold/xp/items/lines_intro/lines_progress/lines_complete`) ou `nil` — lê o MESMO `<mundo>/quests/*.json` da engine |
 | `viber.quest_defs()` | lista com todas as definições do mundo |
-| `viber.own_system(nome)` | **reclama um sistema nativo** para Lua: o handler da engine cala e a lógica passa a ser do script. Nomes: `dialogue` (o `[E]` dos `<DialogueNPC>` **com script** — os NPCs sem script continuam no diálogo nativo; era global e um único NPC em Lua emudecia todos os dadores do mundo), `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J). Sem posse, o comportamento nativo é o de sempre |
+| `viber.own_system(nome)` | **reclama um sistema nativo** para Lua: o handler da engine cala e a lógica passa a ser do script. Nomes: `dialogue` (o `[E]` dos `<DialogueNPC>` **com script** — os NPCs sem script continuam no diálogo nativo; era global e um único NPC em Lua emudecia todos os dadores do mundo), `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J), `locomotion` (o corpo do herói). Sem posse, o comportamento nativo é o de sempre |
+| `viber.sync_skills(ids)` | a lista é a fonte da verdade das passivas (`vitality1`, `strength1`, …). Aplica o delta de HP máximo e velocidade e actualiza dano/crítico do melee. A mesma lista não mexe no herói. Não gasta pontos — o jogo já os cobrou |
 
 Exemplo completo: `../Vael/scripts/npc/forest-wolves.lua` (Hald —
 linhas do JSON, `say` no balão, `quest_accept`/`quest_turn_in`).

@@ -167,6 +167,15 @@ pub struct SaveGame {
     /// carregar replantava a floresta e a pedra com o loot ainda no cofre.
     #[serde(default)]
     pub harvested: Vec<String>,
+    /// Nó corrente de cada diálogo com grafo (`dialogue id → node`).
+    #[serde(default)]
+    pub dialogue_nodes: std::collections::HashMap<String, String>,
+    /// Recortes de terreno editados em jogo.
+    #[serde(default)]
+    pub terrain_patches: Vec<crate::terrain::delta::DeltaPatch>,
+    /// Rebinds do mapa de ações (`ação → tecla`).
+    #[serde(default)]
+    pub action_keys: std::collections::HashMap<String, String>,
 }
 
 /// Versão do schema [`SaveGame`] que ESTA engine escreve. Incrementar ao
@@ -279,6 +288,8 @@ fn options_system(
         Commands,
         Option<Res<crate::scene_loader::CurrentScene>>,
         Option<Res<crate::terrain::runtime::TerrainRuntime>>,
+        Option<Res<crate::dialogue::DialogueSessions>>,
+        Option<Res<crate::input_map::ActionMap>>,
     ),
     mut heroes: Query<(Entity, &mut Transform, &mut Player), With<Player>>,
     mut toasts: MessageWriter<ScriptToast>,
@@ -354,6 +365,24 @@ fn options_system(
             if let Some(host) = host.as_mut() {
                 game.world_kv = crate::luau::game::game_to_json(&host.lua);
             }
+            if let Some(book) = world_save_host_request.7.as_deref() {
+                game.dialogue_nodes = book.node.clone();
+            }
+            if let Some(terrain) = world_save_host_request.6.as_deref() {
+                game.terrain_patches = terrain.deltas.export_patches();
+            }
+            if let Some(map) = world_save_host_request.8.as_deref() {
+                game.action_keys = map
+                    .bindings
+                    .iter()
+                    .filter_map(|(action, binding)| {
+                        binding
+                            .key
+                            .as_ref()
+                            .map(|key| (action.as_str().to_string(), key.clone()))
+                    })
+                    .collect();
+            }
             if let Some(scene) = world_save_host_request
                 .5
                 .as_deref()
@@ -395,6 +424,28 @@ fn options_system(
                     );
                 }
                 apply_save(&game, &mut mixer);
+                let patches = game.terrain_patches.clone();
+                let nodes = game.dialogue_nodes.clone();
+                let keys = game.action_keys.clone();
+                world_save_host_request.4.queue(move |world: &mut World| {
+                    if let Some(mut sessions) =
+                        world.get_resource_mut::<crate::dialogue::DialogueSessions>()
+                    {
+                        sessions.node = nodes;
+                    }
+                    if let Some(mut map) = world.get_resource_mut::<crate::input_map::ActionMap>() {
+                        for (name, key) in keys {
+                            if let Some(action) = crate::input_map::Action::parse(&name) {
+                                map.rebind_key(action, &key);
+                            }
+                        }
+                    }
+                    if let Some(mut terrain) =
+                        world.get_resource_mut::<crate::terrain::runtime::TerrainRuntime>()
+                    {
+                        std::sync::Arc::make_mut(&mut terrain.deltas).import_patches(&patches);
+                    }
+                });
                 if let Some(host) = host.as_mut() {
                     crate::luau::game::json_to_game(&host.lua, &game.world_kv);
                 }

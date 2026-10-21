@@ -1569,12 +1569,7 @@ fn ai_info(e: &bevy::ecs::world::EntityRef) -> Option<AiInfo> {
         crate::nav::NavProfile::Wild => "wild",
     });
     (fsm.is_some() || loco.is_some() || profile.is_some()).then(|| AiInfo {
-        state: fsm
-            .map(|f| match f.state {
-                crate::ai::EnemyState::Wander => "wander",
-                crate::ai::EnemyState::Chase => "chase",
-            })
-            .map(str::to_string),
+        state: fsm.map(|f| f.state.as_str().to_string()),
         speed: fsm.map(|f| f.speed).unwrap_or(0.0),
         aggro_radius: fsm.map(|f| f.aggro_radius).unwrap_or(0.0),
         attack_radius: fsm.map(|f| f.attack_radius).unwrap_or(0.0),
@@ -5211,13 +5206,11 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             true
         }
         DebugOp::AiState(entity, state) => {
-            let state = match state.as_str() {
-                "wander" => crate::ai::EnemyState::Wander,
-                "chase" => crate::ai::EnemyState::Chase,
-                other => {
-                    warnings.push(format!("ai_state: '{other}' inválido (wander|chase)"));
-                    return false;
-                }
+            let Some(state) = crate::ai::EnemyState::parse(&state) else {
+                warnings.push(format!(
+                    "ai_state: '{state}' inválido (wander|alert|chase|search)"
+                ));
+                return false;
             };
             let applied = with_entity(world, entity, warnings, |e| {
                 e.get_mut::<crate::ai::EnemyCreature>()
@@ -5361,13 +5354,18 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 .get_resource::<super::FrameStepper>()
                 .map(|stepper| stepper.restore)
                 .unwrap_or(current);
+            // O handler corre em RemoteLast, DEPOIS do PostUpdate deste frame.
+            // `skip: true` comia o PostUpdate do frame seguinte (n+1 Updates)
+            // e a speed 0 fazia os N frames avançarem com delta 0.
+            // Com `frames > 0` a speed fica 1 até o orçamento acabar; `step(0)`
+            // só pausa.
             world.insert_resource(super::FrameStepper {
                 remaining: frames,
                 restore,
-                skip: true,
-                active: true,
+                skip: false,
+                active: frames > 0,
             });
-            set_time_scale_value(world, 0.0);
+            set_time_scale_value(world, if frames > 0 { 1.0 } else { 0.0 });
             true
         }
         DebugOp::ResumePlay => {

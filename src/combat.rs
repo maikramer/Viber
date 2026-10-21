@@ -1068,7 +1068,11 @@ pub fn hit_stop_system(
     base: Res<BaseTimeScale>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut was_active: Local<bool>,
+    a11y: Option<Res<crate::a11y::A11y>>,
 ) {
+    if a11y.as_deref().is_some_and(|a| !crate::a11y::hitstop_allowed(a)) {
+        stop.timer = 0.0;
+    }
     let active = stop.timer > 0.0;
     if active {
         stop.timer -= real.delta_secs();
@@ -1284,29 +1288,80 @@ pub const WEAPON_TABLE: [(&str, [f32; 3], [f32; 3], f32, &str); 3] = [
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub fn cycle_weapon(
-    mut commands: Commands,
+    commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     asset_server: Res<AssetServer>,
     heroes: Query<Entity, With<Player>>,
     names: Query<&Name>,
     children: Query<&Children>,
-    mut held: ResMut<HeldWeapon>,
-    // Colheita nativa com alvo: o [V] fica bloqueado — a mão pertence à
-    // ferramenta de colheita (harvest.rs restaura a arma ao sair do alcance).
+    held: ResMut<HeldWeapon>,
     harvest: Res<crate::harvest::HarvestContext>,
 ) {
-    let cycle = keys.just_pressed(KeyCode::KeyV);
+    sync_held_weapon(
+        commands,
+        asset_server,
+        heroes,
+        names,
+        children,
+        held,
+        harvest,
+        keys.just_pressed(KeyCode::KeyV),
+    );
+}
+
+/// Espada na mão, sem o ciclo do [V].
+///
+/// O app do jogo não regista o [`CombatPlugin`] (as regras de combate
+/// vivem em Lua, e o [V] lá cicla o alvo). Sem este sistema a mão nasce
+/// vazia: o osso existe, a malha nunca é filha dele.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_held_weapon(
+    commands: Commands,
+    asset_server: Res<AssetServer>,
+    heroes: Query<Entity, With<Player>>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    held: ResMut<HeldWeapon>,
+    harvest: Res<crate::harvest::HarvestContext>,
+) {
+    sync_held_weapon(
+        commands,
+        asset_server,
+        heroes,
+        names,
+        children,
+        held,
+        harvest,
+        false,
+    );
+}
+
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+fn sync_held_weapon(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    heroes: Query<Entity, With<Player>>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    mut held: ResMut<HeldWeapon>,
+    // Colheita nativa com alvo: a mão pertence à ferramenta
+    // (harvest.rs restaura a arma ao sair do alcance).
+    harvest: Res<crate::harvest::HarvestContext>,
+    cycle: bool,
+) {
     if held.bone.is_none() && !held.searched {
         let Ok(hero) = heroes.single() else { return };
         held.bone = find_hand_bone(hero, &children, &names);
-        // Só para de procurar quando a cena do herói JÁ carregou (tem
-        // filhos): no primeiro frame o GLB ainda está a chegar e uma busca
-        // única enterrava a espada — a arma nunca anexava, em mundo nenhum.
-        held.searched = held.bone.is_some() || children.get(hero).is_ok_and(|c| !c.is_empty());
+        // O GLB chega depois do primeiro frame. Parar na primeira criança
+        // (ainda sem o esqueleto) enterrava a espada: o [V] não tinha osso
+        // e a arma nunca aparecia. Só desiste quando a mão existe.
+        held.searched = held.bone.is_some();
     }
     let Some(bone) = held.bone else { return };
-    // Guard do [V] DEPOIS da descoberta do osso (a colheita precisa dele
-    // para anexar as ferramentas) e ANTES de qualquer troca.
+    // Guard DEPOIS da descoberta do osso (a colheita precisa dele para
+    // anexar as ferramentas) e ANTES de qualquer troca.
     if harvest.target.is_some() {
         return;
     }
@@ -1343,14 +1398,16 @@ pub(crate) fn find_hand_bone(
     children: &Query<&Children>,
     names: &Query<&Name>,
 ) -> Option<Entity> {
-    let name = names.get(root).ok()?.to_ascii_lowercase();
-    let is_hand = matches!(
-        name.as_str(),
-        "hand_r" | "righthand" | "right_hand" | "right hand"
-    ) || (name.contains("hand_r") && !name.contains("finger"))
-        || (name.contains("righthand") && !name.contains("finger"));
-    if is_hand {
-        return Some(root);
+    if let Ok(name) = names.get(root) {
+        let name = name.to_ascii_lowercase();
+        let is_hand = matches!(
+            name.as_str(),
+            "hand_r" | "righthand" | "right_hand" | "right hand"
+        ) || (name.contains("hand_r") && !name.contains("finger"))
+            || (name.contains("righthand") && !name.contains("finger"));
+        if is_hand {
+            return Some(root);
+        }
     }
     for child in children.get(root).ok()?.iter() {
         if let Some(found) = find_hand_bone(child, children, names) {
@@ -1508,23 +1565,28 @@ fn fireball_step(
 ) {
     let dt = time.delta_secs();
     for (entity, mut transform, mut ball) in &mut balls {
-        ball.life -= dt;
-        if ball.life <= 0.0 {
+        let step = dt.min(ball.life);
+        if step <= 0.0 {
             commands.entity(entity).try_despawn();
             continue;
         }
+        ball.life -= step;
         let previous = transform.translation;
-        transform.translation += ball.vel * dt;
-        // Impacto: qualquer inimigo VIVO num raio de contato — um morto neste
-        // frame (0 HP, `Corpse` ainda pendente) absorvia a bola e era
-        // re-morto (XP e Kill em dobro).
-        let mut impact: Option<Vec3> = None;
+        let next = previous + ball.vel * step;
+        transform.translation = next;
+        // Impacto no segmento, não só no ponto final: um passo longo
+        // atravessava o corpo, e o primeiro da query ganhava ao mais próximo.
+        let mut impact: Option<(f32, Vec3)> = None;
         for (_, t, health, _, _) in &enemies {
-            if health.current > 0.0 && t.translation().distance(transform.translation) < 1.2 {
-                impact = Some(t.translation());
-                break;
+            if health.current <= 0.0 {
+                continue;
+            }
+            let (gap, along) = segment_gap(previous, next, t.translation());
+            if gap < 1.2 && impact.is_none_or(|(best, _)| along < best) {
+                impact = Some((along, previous.lerp(next, along)));
             }
         }
+        let mut impact = impact.map(|(_, at)| at);
         // O terreno também detona (entrar em rocha — colina, parede, teto
         // de gruta): sem isto a bola atravessava relevo e acertava inimigos
         // do outro lado. Detona no último ponto em AR.
@@ -1611,8 +1673,22 @@ fn fireball_step(
                 );
             }
             commands.entity(entity).try_despawn();
+        } else if ball.life <= 0.0 {
+            commands.entity(entity).try_despawn();
         }
     }
+}
+
+/// Distância do ponto `p` ao segmento `a → b`, e a fração 0..1 do ponto mais próximo.
+fn segment_gap(a: Vec3, b: Vec3, p: Vec3) -> (f32, f32) {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let along = if len2 <= 1e-8 {
+        0.0
+    } else {
+        ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+    };
+    ((a + ab * along).distance(p), along)
 }
 
 #[cfg(test)]

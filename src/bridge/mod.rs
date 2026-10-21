@@ -289,9 +289,10 @@ impl Plugin for BridgePlugin {
     }
 }
 
-/// QA determinístico frame a frame (`viber.debug.step(n)`): pausa o jogo e
-/// avança EXATAMENTE N frames à speed 1. O flag `skip` consome o PostUpdate
-/// do frame em que a op aplicou (esse frame já correu com a speed antiga).
+/// QA determinístico frame a frame (`viber.debug.step(n)`): avança
+/// EXATAMENTE N frames à speed 1 e fica pausado. A op aplica-se em
+/// `RemoteLast`, depois do `PostUpdate` desse frame, por isso o orçamento
+/// começa no Update seguinte — `skip` fica desligado.
 #[derive(Debug, Default, Resource)]
 pub struct FrameStepper {
     pub remaining: u32,

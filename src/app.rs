@@ -27,9 +27,10 @@ use crate::profiler::{Group, timed};
 use crate::recipes::ParsedWorld;
 use crate::recipes::spawn::{self, PendingWorld};
 use crate::{
-    ai, ambient, animation, camera, combat, editor_camera, grass, hud, impact, luau, menus,
-    meshopt, music, nav, particles, physics, physics_fx, player, postfx, profiler, prop_tint,
-    quests, recipes, render_lod, save, skills, sky, spawner, terrain, textures, trail, ui, vitals,
+    a11y, ai, ambient, animation, audio_space, camera, combat, dialogue, editor_camera, foliage,
+    grass, hud, ik, impact, input_map, locale, lockon, luau, menus, meshopt, music, nav, netplay,
+    particles, physics, physics_fx, player, postfx, profiler, prop_tint, quests, ragdoll, recipes,
+    render_lod, save, senses, skills, sky, spawner, streaming, terrain, textures, trail, ui,
     worldsys, xml,
 };
 
@@ -516,6 +517,21 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         terrain::layer_material::TerrainChunkMaterial,
     >::default());
     app.add_plugins(animation::AnimationPlugin);
+    app.add_plugins(ik::IkPlugin);
+    app.add_plugins(lockon::LockOnPlugin);
+    app.add_plugins(ragdoll::RagdollPlugin);
+    app.add_plugins(input_map::InputMapPlugin);
+    app.add_plugins(a11y::A11yPlugin);
+    app.add_plugins(audio_space::AudioSpacePlugin);
+    app.add_plugins(dialogue::DialoguePlugin {
+        dir: world_dir_pre.join("dialogues"),
+    });
+    app.add_plugins(locale::LocalePlugin {
+        dir: world_dir_pre.join("locale"),
+    });
+    app.add_plugins(streaming::StreamingPlugin);
+    app.add_plugins(foliage::FoliagePlugin);
+    app.add_plugins(netplay::NetPlayPlugin);
     app.add_plugins(physics::PhysicsPlugin {
         debug: std::env::var_os("VIBER_PHYSICS_DEBUG").is_some(),
     });
@@ -561,13 +577,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.init_resource::<music::CombatMusicState>();
     app.init_resource::<hud::markers::HudMarkers>();
     app.init_resource::<music::ScriptSoundLoops>();
-    // Latch de input (remote desktop / taps): renova "held" para
-    // player_movement/vehicle_movement — ver `input_latch.rs`.
-    app.init_resource::<crate::input_latch::KeyLatches>();
-    app.add_systems(
-        bevy::app::Update,
-        crate::input_latch::key_latch_system.before(player::player_movement),
-    );
     app.add_plugins(menus::MenusPlugin);
     // Save/load & opções: serviço de ENGINE (grava `world_kv`/posição/vitais
     // em qualquer preset; os campos RPG só entram quando os recursos existem).
@@ -585,6 +594,12 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.init_resource::<combat::HitStop>();
     app.init_resource::<combat::BaseTimeScale>();
     app.add_systems(bevy::app::Update, combat::hit_stop_system);
+    // Mão do herói. O CombatPlugin ficou de fora (regras em Lua), mas a
+    // espada no osso `hand_r` e o ciclo [V] (espada → machado → lança)
+    // são da engine. Sem isto a mão nasce vazia e o [V] não faz nada.
+    app.init_resource::<combat::HeldWeapon>();
+    app.init_resource::<crate::harvest::HarvestContext>();
+    app.add_systems(bevy::app::Update, combat::cycle_weapon);
 
     // Mundo vivo (loop 9): fog/tint por BiomeRegion, orçamento de luzes,
     // gestos idle de NPC, SFX.
@@ -616,6 +631,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // aqui — sem este plugin nasciam estátuas eternas e a RespawnQueue
     // nunca drenava.
     app.add_plugins(ai::AiPlugin);
+    app.add_plugins(senses::SensesPlugin);
     // Navegação: navmesh Recast num tile que segue o herói, A* + evitamento
     // RVO (bevy_landmass) e preferência por estradas via custo por tipo de
     // polígono. Sem isto a IA volta à linha recta de sempre — o que é
@@ -634,6 +650,38 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // UI declarativa (XML + folha de estilo + `viber.ui` no Luau): o HUD do
     // mundo é autoria, não código.
     app.add_plugins(ui::UiPlugin);
+    // Combate, colheita, veneno e respawn saíram com o preset RPG, mas o
+    // Vael ainda depende deles: sem isto o [J] não fere, a árvore não parte,
+    // o veneno não dói e a morte não renasce. Abilities [C]/[E]/[R]/[B] e a
+    // hotbar continuam em Lua — não voltar a registar SkillsPlugin/EconomyPlugin
+    // (disparavam por cima dos scripts).
+    app.init_resource::<crate::economy::Vault>();
+    app.init_resource::<crate::skills::PlayerStatsResource>();
+    app.init_resource::<crate::skills::SkillTree>();
+    app.init_resource::<crate::skills::ComboState>();
+    app.init_resource::<combat::SwingClock>();
+    app.init_resource::<combat::AttackChain>();
+    app.init_resource::<combat::AttackBuffer>();
+    app.init_resource::<combat::PendingSwing>();
+    app.add_plugins(crate::feedback::FeedbackPlugin);
+    app.add_plugins(crate::harvest::HarvestPlugin);
+    app.add_systems(
+        bevy::app::Update,
+        (combat::ensure_player_vitals, combat::ensure_creature_vitals).before(luau::luau_update),
+    );
+    app.add_systems(
+        bevy::app::Update,
+        (
+            combat::player_melee_attack.after(crate::harvest::HarvestSet),
+            combat::swing_track_system
+                .after(player::player_movement)
+                .before(camera::third_person_camera),
+            combat::play_death_animation,
+            combat::tick_corpses,
+            combat::corpse_fade_setup,
+            combat::corpse_fade_tick,
+        ),
+    );
     // A instalação de `viber.ui` tem de ganhar ao runtime Luau: sem ordem,
     // um script activado no frame 1 via `luau_on_add` podia ver `viber.ui`
     // nil (morria — `Added` dispara 1×) ou queimar o warn-once.

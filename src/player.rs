@@ -138,8 +138,8 @@ pub const JUMP_COOLDOWN: f32 = 0.2;
 /// Time constant to REACH the input velocity (acceleration feel). Larger =
 /// heavier, more inertia ramping up.
 pub const ACCEL_TAU: f32 = 0.08;
-/// Time constant to bleed the velocity back to zero when input stops
-/// (drag / skid feel). Larger = more drift on release.
+/// Kept so airborne classification stays explicit. Grounded release does
+/// not use it: the hero stops the frame the key goes up.
 pub const DECEL_TAU: f32 = 0.14;
 /// Time constant while airborne: jumps keep their momentum (drifty arcs)
 /// instead of tracking input instantly.
@@ -191,6 +191,29 @@ pub fn movement_tau(grounded: bool, input_active: bool) -> f32 {
     } else {
         DECEL_TAU
     }
+}
+
+/// Horizontal velocity for this frame.
+///
+/// On the ground with no input the hero stops the same frame the key goes
+/// up. Starting a step still ramps through [`ACCEL_TAU`]; airborne arcs keep
+/// [`AIR_TAU`].
+pub fn integrate_horizontal(
+    vel_x: f32,
+    vel_z: f32,
+    desired: Vec3,
+    grounded: bool,
+    input_active: bool,
+    dt: f32,
+) -> (f32, f32) {
+    if grounded && !input_active {
+        return (0.0, 0.0);
+    }
+    let a = low_pass_factor(dt, movement_tau(grounded, input_active));
+    (
+        vel_x + (desired.x - vel_x) * a,
+        vel_z + (desired.z - vel_z) * a,
+    )
 }
 
 /// Whether gravity integrates this frame. Never while resting on the ground:
@@ -341,7 +364,6 @@ pub fn player_movement(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     menus: Res<crate::menus::MenusOpen>,
-    latches: Res<crate::input_latch::KeyLatches>,
     locomotion: Option<Res<crate::luau::ownership::ScriptSystemOwners>>,
     time: Res<Time>,
     runtime: Option<Res<TerrainRuntime>>,
@@ -350,6 +372,9 @@ pub fn player_movement(
     interior_state: Option<Res<crate::worldsys::InteriorLighting>>,
     mut cameras: Query<&mut OrbitCamera>,
     mut sfx: MessageWriter<crate::ambient::SfxEvent>,
+    actions: Option<Res<crate::input_map::ActionState>>,
+    locks: Query<&crate::lockon::LockOn>,
+    lock_targets: Query<&GlobalTransform, Without<Player>>,
     mut players: Query<
         (
             Entity,
@@ -401,30 +426,43 @@ pub fn player_movement(
     let now = time.elapsed_secs();
     // Há chão de collider carregado sob o herói? (streaming de colunas)
     let terrain_ready = collision.is_some_and(|status| status.ready);
-    // Latch de input: teclas de remote desktop/virtuais chegam como
-    // down+up instantâneos — o piso de hold torna-as utilizáveis
-    // (`input_latch.rs`; mesmo recurso que o vehicle_movement usa).
-    let (w, s, a, d) = (
-        latches.down(&keys, KeyCode::KeyW) || latches.down(&keys, KeyCode::ArrowUp),
-        latches.down(&keys, KeyCode::KeyS) || latches.down(&keys, KeyCode::ArrowDown),
-        latches.down(&keys, KeyCode::KeyA) || latches.down(&keys, KeyCode::ArrowLeft),
-        latches.down(&keys, KeyCode::KeyD) || latches.down(&keys, KeyCode::ArrowRight),
-    );
-    let move_x = (d as i32 - a as i32) as f32;
-    let move_forward = (w as i32 - s as i32) as f32;
-    let sprint =
-        latches.down(&keys, KeyCode::ShiftLeft) || latches.down(&keys, KeyCode::ShiftRight);
-    let jump_held = latches.down(&keys, KeyCode::Space);
+    // Estado cru da tecla: soltar corta o input no mesmo frame. Um piso de
+    // hold depois do release fazia o herói continuar a andar.
+    let (move_x, move_forward, sprint, jump_pressed) = if let Some(actions) = actions.as_deref() {
+        (
+            actions.move_x,
+            actions.forward,
+            actions.sprint
+                || keys.pressed(KeyCode::ShiftLeft)
+                || keys.pressed(KeyCode::ShiftRight),
+            actions.jump_just || keys.just_pressed(KeyCode::Space),
+        )
+    } else {
+        let (w, s, a, d) = (
+            keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp),
+            keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown),
+            keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft),
+            keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight),
+        );
+        (
+            (d as i32 - a as i32) as f32,
+            (w as i32 - s as i32) as f32,
+            keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight),
+            keys.just_pressed(KeyCode::Space),
+        )
+    };
+    // Borda, não nível: o buffer é de 100 ms. `pressed` renovava o relógio
+    // em todo o frame com a barra premida e o herói saltava em cada aterragem.
 
     for (entity, mut transform, mut player, mut controller, output, mut settle, dying, knockback) in
         &mut players
     {
         // Herói a cair em combate: sem andar, rodar a câmara nem saltar até
         // ao respawn — a gravidade e o chão continuam (o corpo assenta).
-        let (move_x, move_forward, jump_held) = if dying.is_some() {
+        let (move_x, move_forward, jump_pressed) = if dying.is_some() {
             (0.0, 0.0, false)
         } else {
-            (move_x, move_forward, jump_held)
+            (move_x, move_forward, jump_pressed)
         };
         // Tutela pós-teleporte: enquanto dura, o chão ANALÍTICO manda mesmo
         // que já exista collider algures — a coluna de destino pode estar a
@@ -472,7 +510,18 @@ pub fn player_movement(
         let interior_floor = (interior_mode
             && interior_state.as_deref().is_some_and(|state| state.active))
         .then_some(crate::worldsys::INTERIOR_FLOOR_Y);
-        let (dir, input_mag) = if interior_mode {
+        let lock_dir = locks.get(entity).ok().and_then(|lock| {
+            lock_targets.get(lock.target).ok().and_then(|target| {
+                crate::lockon::lock_flat_dir(transform.translation, target.translation())
+            })
+        });
+        let (dir, input_mag) = if let Some(flat) = lock_dir {
+            let cam_yaw = crate::camera::behind_yaw_deg(flat.x, flat.z);
+            (
+                process_input(move_forward, move_x, cam_yaw),
+                input_magnitude(move_forward, move_x),
+            )
+        } else if interior_mode {
             let yaw = interior
                 .as_deref()
                 .map(|scene| scene.camera_yaw_deg)
@@ -508,13 +557,19 @@ pub fn player_movement(
         };
         let desired = dir * player.speed * sprint_mult * input_mag;
 
-        // Inertia & drag: the actual velocity chases the input velocity
-        // through a state-dependent low-pass (accel ramp, release skid,
-        // drifty airborne arcs) — instant velocity reads as "stiff".
-        let tau = movement_tau(player.grounded, dir.length_squared() > 0.0);
-        let a = low_pass_factor(dt, tau);
-        player.vel_x += (desired.x - player.vel_x) * a;
-        player.vel_z += (desired.z - player.vel_z) * a;
+        // Arranque ainda rampa; no chão, soltar a tecla zera a velocidade
+        // no mesmo frame. No ar o arco mantém o momento.
+        let input_active = dir.length_squared() > 0.0;
+        let (vel_x, vel_z) = integrate_horizontal(
+            player.vel_x,
+            player.vel_z,
+            desired,
+            player.grounded,
+            input_active,
+            dt,
+        );
+        player.vel_x = vel_x;
+        player.vel_z = vel_z;
         if player.vel_x * player.vel_x + player.vel_z * player.vel_z > 0.5 * 0.5 {
             player.last_moving_time = now;
         }
@@ -526,16 +581,19 @@ pub fn player_movement(
             motion += knockback.velocity.with_y(0.0) * dt;
         }
 
-        // Facing: slerp toward the move heading at `rotation_speed` rad/s,
+        // Facing: com lock-on o herói olha o alvo mesmo parado. Sem lock,
+        // slerp toward the move heading at `rotation_speed` rad/s,
         // only while moving (rotation mode 1 — idle keeps facing).
-        if dir.length_squared() > 0.0 {
-            let target = facing_rotation(dir);
+        let face = lock_dir.map(facing_rotation).or_else(|| {
+            (dir.length_squared() > 0.0).then(|| facing_rotation(dir))
+        });
+        if let Some(target) = face {
             let factor = facing_slerp_factor(transform.rotation, target, player.rotation_speed, dt);
             transform.rotation = transform.rotation.slerp(target, factor);
         }
 
         // Jump: buffered press, coyote grace, cooldown gate.
-        if jump_held {
+        if jump_pressed {
             player.jump_buffer_time = now;
         }
         // Sem pulo dentro de um interior: a câmara é de sala e o soalho é
@@ -1021,20 +1079,9 @@ mod tests {
             (10..=14).contains(&frames_to_90),
             "90 % speed after {frames_to_90} frames"
         );
-        // Drag on release: ~10 % left after tau·ln(10) ≈ 0.32 s (≈ 19 frames)
-        // — a skid, not a stop.
-        let mut v = 4.0f32;
-        let mut frames_to_10 = 0u32;
-        for i in 1..=120 {
-            v += (0.0 - v) * low_pass_factor(dt, movement_tau(true, false));
-            if frames_to_10 == 0 && v <= 0.4 {
-                frames_to_10 = i;
-            }
-        }
-        assert!(
-            (17..=22).contains(&frames_to_10),
-            "10 % speed after {frames_to_10} frames"
-        );
+        // Soltar no chão para no mesmo frame — sem skid.
+        let (vx, vz) = integrate_horizontal(4.0, 0.0, Vec3::ZERO, true, false, dt);
+        assert_eq!((vx, vz), (0.0, 0.0));
         // Airborne: much floatier (momentum through jump arcs).
         assert!(movement_tau(false, true) > movement_tau(true, true) * 2.0);
     }
@@ -1052,6 +1099,45 @@ mod tests {
         assert!(!can_perform_jump(now, now - 0.02, now - 0.5, true, false));
         // Cooldown gate (can_jump false) blocks even a fresh press.
         assert!(!can_perform_jump(now, now - 0.02, now, false, true));
+    }
+
+    /// Segurar Espaço não renova o buffer: só a borda da tecla conta.
+    #[test]
+    fn held_space_does_not_refresh_the_jump_buffer() {
+        use bevy::ecs::system::RunSystemOnce as _;
+        use std::time::Duration;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::menus::MenusOpen>()
+            .add_message::<crate::ambient::SfxEvent>();
+        let mut time = app.world_mut().remove_resource::<Time>().unwrap();
+        time.advance_by(Duration::from_secs_f32(5.0));
+        app.world_mut().insert_resource(time);
+        let hero = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                Player::default(),
+                hero_controller(),
+            ))
+            .id();
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::Space);
+            keys.clear();
+        }
+        app.world_mut()
+            .run_system_once(player_movement)
+            .expect("player_movement");
+        let player = app.world().get::<Player>(hero).expect("player");
+        assert!(
+            player.jump_buffer_time.is_infinite() && player.jump_buffer_time.is_sign_negative(),
+            "barra presa sem press novo não arma o salto: {}",
+            player.jump_buffer_time
+        );
+        assert_eq!(player.vel_y, 0.0);
     }
 
     #[test]
@@ -1148,7 +1234,6 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<crate::menus::MenusOpen>()
-            .init_resource::<crate::input_latch::KeyLatches>()
             .add_message::<crate::ambient::SfxEvent>()
             .insert_resource(crate::worldsys::InteriorSceneConfig {
                 min: [-30.0, -30.0],

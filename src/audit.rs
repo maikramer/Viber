@@ -355,7 +355,7 @@ fn collect_entities(
         if let Some(script) = &entity.script {
             refs.push(AssetRef {
                 kind: RefKind::Script,
-                path: world_dir.join("scripts").join(script),
+                path: config.scripts_dir_on(world_dir).join(script),
                 context: format!("<script=\"{script}\"> {label}"),
             });
         }
@@ -478,15 +478,15 @@ fn collect_entities(
                 if let Some(script) = &spec.template_script {
                     refs.push(AssetRef {
                         kind: RefKind::Script,
-                        path: world_dir.join("scripts").join(script),
+                        path: config.scripts_dir_on(world_dir).join(script),
                         context: format!("<GLTFLoader template script=\"{script}\"> {label}"),
                     });
                 }
             }
-            EntityKind::MusicLayer { layer, .. } => {
-                // Convenção do runtime (spawn.rs): {bgm_dir}/{layer}.ogg,
-                // com o dir do config do jogo.
-                let path = resolve_asset(asset_roots, &config.bgm_path(layer));
+            EntityKind::MusicLayer { layer, sound, .. } => {
+                // Convenção do runtime (spawn.rs): sound `bgm-x` →
+                // `{bgm_dir}/x.ogg`; sem sound, o nome é a layer.
+                let path = resolve_asset(asset_roots, &config.bgm_file(layer, sound));
                 refs.push(AssetRef {
                     kind: RefKind::Audio,
                     path,
@@ -1660,6 +1660,7 @@ mod tests {
                     "musica",
                     EntityKind::MusicLayer {
                         layer: "explore".into(),
+                        sound: "bgm-explore".into(),
                         base_volume: 0.2,
                     },
                     Default::default(),
@@ -1668,6 +1669,7 @@ mod tests {
                     "musica2",
                     EntityKind::MusicLayer {
                         layer: "inexistente".into(),
+                        sound: String::new(),
                         base_volume: 0.2,
                     },
                     Default::default(),

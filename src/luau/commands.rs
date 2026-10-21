@@ -248,6 +248,10 @@ pub enum ScriptCommand {
     /// incremental dos colecionáveis; aplica em `SkillTree.points` +
     /// `LevelState.points` quando os recursos existem (preset rpg).
     AddSkillPoints(u32),
+    /// Passivas aprendidas (`viber.sync_skills`). A lista é a fonte da
+    /// verdade: aplica o delta de HP/velocidade e actualiza o bónus de
+    /// dano/crítico. Não gasta pontos.
+    SyncSkills(Vec<String>),
     /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
     /// A escala fica. Com `own_system("locomotion")` o `player_movement` não
     /// disputa esta escrita no herói.
@@ -275,4 +279,10 @@ pub enum ScriptCommand {
         beacons: Vec<Vec3>,
         waypoint: Option<(Vec3, String)>,
     },
+    /// `viber.lock_target(id|nil)` — fixa ou limpa o lock-on do herói.
+    LockTarget(Option<Entity>),
+    /// `viber.cycle_lock()` — próximo hostil com linha de visão.
+    CycleLock,
+    /// `viber.noise(loudness)` — audição das criaturas sem script.
+    Noise { pos: Vec3, loudness: f32 },
 }

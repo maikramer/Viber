@@ -634,19 +634,70 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.lock_target(id|nil) — câmara e strafe presos ao hostil.
+    api.set(
+        "lock_target",
+        lua.create_function(|lua, id: Option<i64>| {
+            let target = match id {
+                Some(bits) => Some(super::entity::entity_from_id(bits)?),
+                None => None,
+            };
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx")
+                .commands
+                .push(ScriptCommand::LockTarget(target));
+            Ok(())
+        })?,
+    )?;
+    api.set(
+        "cycle_lock",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx")
+                .commands
+                .push(ScriptCommand::CycleLock);
+            Ok(())
+        })?,
+    )?;
+    api.set(
+        "noise",
+        lua.create_function(|lua, loudness: f32| {
+            let mut ctx = lua.app_data_mut::<ScriptCtx>().expect("ScriptCtx");
+            let pos = ctx.origin;
+            ctx.commands.push(ScriptCommand::Noise {
+                pos,
+                loudness: if loudness.is_finite() { loudness.max(0.0) } else { 0.0 },
+            });
+            Ok(())
+        })?,
+    )?;
+    api.set(
+        "sense",
+        lua.create_function(|lua, ()| {
+            let sense = lua
+                .app_data_ref::<ScriptCtx>()
+                .and_then(|ctx| ctx.sense.clone());
+            Ok(sense)
+        })?,
+    )?;
+    api.set(
+        "action",
+        lua.create_function(|lua, name: String| {
+            let pressed = lua
+                .app_data_ref::<ScriptCtx>()
+                .and_then(|ctx| ctx.action_pressed.get(&name).copied())
+                .unwrap_or(false);
+            Ok(pressed)
+        })?,
+    )?;
+
     // viber.next_state(cur, dist, aggro, deaggro) -> "wander"|"chase"
     // A máquina wander↔chase da engine, exposta para os scripts comporem.
     api.set(
         "next_state",
         lua.create_function(|_, (cur, dist, aggro, deaggro): (String, f32, f32, f32)| {
-            let state = match cur.as_str() {
-                "chase" => crate::ai::EnemyState::Chase,
-                _ => crate::ai::EnemyState::Wander,
-            };
-            match crate::ai::enemy_next_state(dist, state, aggro, deaggro) {
-                crate::ai::EnemyState::Chase => Ok("chase"),
-                crate::ai::EnemyState::Wander => Ok("wander"),
-            }
+            let state = crate::ai::EnemyState::parse(&cur).unwrap_or(crate::ai::EnemyState::Wander);
+            Ok(crate::ai::enemy_next_state(dist, state, aggro, deaggro).as_str())
         })?,
     )?;
     // viber.fire_projectile(id [, x, y, z]) — dispara um projétil do
@@ -1160,6 +1211,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
                 .push(ScriptCommand::OwnSystem(name));
+            Ok(())
+        })?,
+    )?;
+    // viber.sync_skills({ids}) — a lista é a fonte da verdade das passivas.
+    // O jogo cobra os pontos; aqui só se aplica o delta (HP, velocidade,
+    // dano, crítico). A mesma lista não mexe no herói.
+    api.set(
+        "sync_skills",
+        lua.create_function(|lua, ids: Vec<String>| {
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::SyncSkills(ids));
             Ok(())
         })?,
     )?;
