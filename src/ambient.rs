@@ -1360,7 +1360,10 @@ fn rain_ripple_spawner(
         let z = origin.z + disc.y;
         let y = runtime
             .as_ref()
-            .map(|r| r.sample(x, z))
+            .map(|r| {
+                r.surface_below(x, z, origin.y + crate::player::GROUND_PROBE)
+                    .unwrap_or_else(|| r.sample(x, z))
+            })
             .unwrap_or(origin.y - RAIN_EMITTER_HEIGHT);
         crate::particles::spawn_burst(&mut commands, &ripple_spec(), Vec3::new(x, y + 0.03, z), 2);
     }
