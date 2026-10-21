@@ -156,8 +156,14 @@ impl CombatMusicState {
     /// (Re)acende a música de combate; `boss` promove para a layer de boss
     /// (nunca desce de boss para battle enquanto o timer viver).
     pub fn engage(&mut self, now: f64, boss: bool) {
+        // Se o hold anterior JÁ expirou, este engagement define a layer; sem
+        // isto um `boss` velho (que só `active_layer` limpa) contaminava o
+        // combate normal durante os 8 s seguintes.
+        let expired = now >= self.until;
         self.until = (now + COMBAT_MUSIC_HOLD as f64).max(self.until);
-        if boss {
+        if expired {
+            self.boss = boss;
+        } else if boss {
             self.boss = true;
         }
     }
@@ -186,7 +192,13 @@ impl CombatMusicState {
 /// (music×master agora vivem no [`MusicBus`], aplicados pelo kira a tudo o
 /// que está a tocar).
 pub fn layer_target(layer: &str, zone: &str, base_volume: f32) -> f32 {
-    if layer == zone { base_volume } else { 0.0 }
+    if layer == zone {
+        // `base-volume` é linear 0..1; 2.0 dava +6 dB (clipping) e um valor
+        // negativo virava DB_SILENCE permanente.
+        base_volume.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Crossfade one step: move `current` toward `target` by `speed` per second.
