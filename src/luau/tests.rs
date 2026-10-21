@@ -464,6 +464,7 @@ fn test_animator(names: &[&str]) -> crate::animation::CharacterAnimator {
         air_time: 0.0,
         speed: 0.0,
         last_pos: None,
+        locomotion: None,
     }
 }
 
@@ -738,6 +739,8 @@ fn test_key_code_parser_covers_full_keyboard() {
     assert_eq!(key_code_from_str("numpad3"), Some(KeyCode::Numpad3));
     assert_eq!(key_code_from_str("lshift"), Some(KeyCode::ShiftLeft));
     assert_eq!(key_code_from_str("="), Some(KeyCode::Equal));
+    assert_eq!(key_code_from_str("\\"), Some(KeyCode::Backslash));
+    assert_eq!(key_code_from_str("`"), Some(KeyCode::Backquote));
     assert_eq!(key_code_from_str("f"), Some(KeyCode::KeyF));
     // Fóra do teclado = None.
     assert_eq!(key_code_from_str("zzz"), None);

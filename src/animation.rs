@@ -155,6 +155,38 @@ impl MotionSpeeds {
     }
 }
 
+/// Pesos contínuos idle/walk/run para a velocidade planar e os limiares do rig.
+///
+/// Entre o limiar de idle e o de corrida o peso passa de idle para walk e
+/// depois de walk para run, sem troca seca de clip.
+pub fn locomotion_weights(speed: f32, gates: MotionGates) -> (f32, f32, f32) {
+    let idle_edge = gates.idle.max(0.0);
+    let run_edge = gates.run.max(idle_edge + 1e-3);
+    if speed <= idle_edge {
+        return (1.0, 0.0, 0.0);
+    }
+    if speed >= run_edge {
+        return (0.0, 0.0, 1.0);
+    }
+    let t = (speed - idle_edge) / (run_edge - idle_edge);
+    if t < 0.5 {
+        let u = t / 0.5;
+        (1.0 - u, u, 0.0)
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (0.0, 1.0 - u, u)
+    }
+}
+
+/// Nós do blend 1D de locomoção, quando o ficheiro tem idle, walk e run distintos.
+#[derive(Debug, Clone, Copy)]
+pub struct LocomotionBlendNodes {
+    pub blend: AnimationNodeIndex,
+    pub idle: AnimationNodeIndex,
+    pub walk: AnimationNodeIndex,
+    pub run: AnimationNodeIndex,
+}
+
 /// The two speed thresholds that pick a locomotion state, as a unit.
 ///
 /// They used to be the module constants [`RUN_SPEED`] / [`IDLE_SPEED`] for
@@ -536,6 +568,8 @@ pub struct CharacterAnimator {
     pub speed: f32,
     /// Previous world position, for that measurement.
     pub last_pos: Option<Vec3>,
+    /// Blend idle/walk/run, quando o ficheiro tem os três clips.
+    pub locomotion: Option<LocomotionBlendNodes>,
 }
 
 impl CharacterAnimator {
@@ -613,8 +647,6 @@ pub fn bind_animations(
             continue; // the fresh subtree has not spawned its player yet
         };
 
-        let (graph, nodes) = AnimationGraph::from_clips(gltf.animations.iter().cloned());
-        let handle = graphs.add(graph);
         // `named_animations` is a map, so file order comes from `animations`
         // and the names are matched back by handle.
         let clip_names: Vec<String> = gltf
@@ -628,6 +660,8 @@ pub fn bind_animations(
                     .unwrap_or_default()
             })
             .collect();
+        let (graph, nodes, locomotion) = build_clip_graph(&gltf.animations, &clip_names);
+        let handle = graphs.add(graph);
         // Clip lengths: a one-shot has to hand the rig back exactly when the
         // clip ends, not on a hard-coded timer.
         let durations: Vec<f32> = gltf
@@ -672,13 +706,20 @@ pub fn bind_animations(
             air_time,
             speed,
             last_pos,
+            locomotion,
         };
         // Start the rig on `start` right away. Only the hero has a movement
         // driver, so without this the NPCs and creatures would stand in their
         // bind pose forever — the same T-pose the hero used to have.
+        // Com blend, os três clips de marcha ficam a tocar e os pesos é que
+        // mudam — um `play` único voltava a ser uma troca seca.
         let mut transitions = AnimationTransitions::new();
         let mut player = AnimationPlayer::default();
-        if let Some(node) = start {
+        if let Some(loco) = locomotion {
+            player.play(loco.idle).repeat();
+            player.play(loco.walk).repeat();
+            player.play(loco.run).repeat();
+        } else if let Some(node) = start {
             transitions.play(&mut player, node, Duration::ZERO).repeat();
         }
         commands.entity(player_entity).insert((
@@ -690,7 +731,7 @@ pub fn bind_animations(
         commands
             .entity(entity)
             .remove::<AnimatedScene>()
-            .insert(animator);
+            .insert((animator, crate::ik::FootIk));
     }
 }
 
@@ -701,6 +742,98 @@ pub fn bind_animations(
 /// the hierarchy for a frame, and binding it again would re-create the
 /// dangling animator the swap just armed against. Descendants are still
 /// searched, so a fresh player nested below a dying one is found.
+fn build_clip_graph(
+    clips: &[Handle<AnimationClip>],
+    names: &[String],
+) -> (
+    AnimationGraph,
+    Vec<AnimationNodeIndex>,
+    Option<LocomotionBlendNodes>,
+) {
+    let mut graph = AnimationGraph::new();
+    let idle_i = resolve_with_fallback(names, AnimState::Idle);
+    let walk_i = resolve_with_fallback(names, AnimState::Walk);
+    let run_i = resolve_with_fallback(names, AnimState::Run);
+    let distinct = matches!(
+        (idle_i, walk_i, run_i),
+        (Some(a), Some(b), Some(c)) if a != b && b != c && a != c
+    );
+    let blend = distinct.then(|| graph.add_blend(1.0, graph.root));
+    let mut nodes = Vec::with_capacity(clips.len());
+    for (i, clip) in clips.iter().enumerate() {
+        let in_loco = distinct && matches!((idle_i, walk_i, run_i), (Some(a), Some(b), Some(c)) if i == a || i == b || i == c);
+        let parent = if in_loco { blend.unwrap() } else { graph.root };
+        let weight = if distinct && idle_i == Some(i) {
+            1.0
+        } else if in_loco {
+            0.0
+        } else {
+            1.0
+        };
+        nodes.push(graph.add_clip(clip.clone(), weight, parent));
+    }
+    let loco = if distinct {
+        Some(LocomotionBlendNodes {
+            blend: blend.unwrap(),
+            idle: nodes[idle_i.unwrap()],
+            walk: nodes[walk_i.unwrap()],
+            run: nodes[run_i.unwrap()],
+        })
+    } else {
+        None
+    };
+    (graph, nodes, loco)
+}
+
+fn drive_locomotion_blend(
+    animator: &mut CharacterAnimator,
+    players: &mut PlayerQuery,
+    graphs: &mut Assets<AnimationGraph>,
+    handle: &AnimationGraphHandle,
+    weights: (f32, f32, f32),
+    speeds: MotionSpeeds,
+    active: bool,
+) {
+    let Some(loco) = animator.locomotion else {
+        return;
+    };
+    let Some(mut graph) = graphs.get_mut(&handle.0) else {
+        return;
+    };
+    if let Some(node) = graph.get_mut(loco.blend) {
+        node.weight = if active { 1.0 } else { 0.0 };
+    }
+    if !active {
+        return;
+    }
+    let specs = [
+        (loco.idle, weights.0, 1.0_f32),
+        (
+            loco.walk,
+            weights.1,
+            (animator.speed / speeds.walk.max(1e-3)).clamp(speeds.scale_range.0, speeds.scale_range.1),
+        ),
+        (
+            loco.run,
+            weights.2,
+            (animator.speed / speeds.run.max(1e-3)).clamp(speeds.scale_range.0, speeds.scale_range.1),
+        ),
+    ];
+    for (node, weight, _) in specs {
+        if let Some(n) = graph.get_mut(node) {
+            n.weight = weight.max(0.0);
+        }
+    }
+    let Ok((mut player, _)) = players.get_mut(animator.player) else {
+        return;
+    };
+    for (node, _, scale) in specs {
+        player.play(node).repeat().set_speed(scale).set_weight(1.0);
+    }
+    animator.current = Some(loco.blend);
+    animator.state = animator.state.or(Some(AnimState::Idle));
+}
+
 fn find_animation_player(
     root: Entity,
     children: &Query<&Children>,
@@ -1031,6 +1164,8 @@ fn sync_clip_speed(
 pub fn drive_player_animation(
     mut heroes: Query<(&Transform, &crate::player::Player, &mut CharacterAnimator)>,
     mut players: PlayerQuery,
+    handles: Query<&AnimationGraphHandle>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().max(1e-4);
@@ -1046,7 +1181,26 @@ pub fn drive_player_animation(
             dt,
             MotionGates::HERO,
         );
-        play_state(&mut animator, &mut players, state);
+        let blended = animator.locomotion.is_some()
+            && !animator.is_busy()
+            && !matches!(state, AnimState::Jump | AnimState::Fall);
+        if let Ok(handle) = handles.get(animator.player) {
+            let weights = locomotion_weights(animator.speed, MotionGates::HERO);
+            drive_locomotion_blend(
+                &mut animator,
+                &mut players,
+                &mut graphs,
+                handle,
+                weights,
+                MotionSpeeds::HERO,
+                blended,
+            );
+        }
+        if !blended {
+            play_state(&mut animator, &mut players, state);
+        } else {
+            animator.state = Some(state);
+        }
         // Aterragem: one-shot `jumpland` após voo real (rigs sem o clip fazem
         // no-op silencioso). Não interrompe one-shots em curso (um swing a
         // terminar tem prioridade sobre o "poussada") e não toca a histerese
@@ -1057,7 +1211,9 @@ pub fn drive_player_animation(
         {
             play_action(&mut animator, &mut players, node, ACTION_BLEND, false);
         }
-        sync_clip_speed(&animator, &mut players, state, MotionSpeeds::HERO);
+        if animator.locomotion.is_none() {
+            sync_clip_speed(&animator, &mut players, state, MotionSpeeds::HERO);
+        }
     }
 }
 
@@ -1081,6 +1237,8 @@ pub fn drive_character_animation(
     >,
     hero: Query<&GlobalTransform, With<crate::player::Player>>,
     mut players: PlayerQuery,
+    handles: Query<&AnimationGraphHandle>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().max(1e-4);
@@ -1110,8 +1268,27 @@ pub fn drive_character_animation(
         // Creatures are always grounded as far as the clip picker is concerned;
         // none of the rigs in the pipeline ship airborne clips for them.
         let state = advance_motion(&mut animator, position, true, 0.0, dt, gates);
-        play_state(&mut animator, &mut players, state);
-        sync_clip_speed(&animator, &mut players, state, speeds);
+        let blended = animator.locomotion.is_some() && !animator.is_busy();
+        if let Ok(handle) = handles.get(animator.player) {
+            let weights = locomotion_weights(animator.speed, gates);
+            drive_locomotion_blend(
+                &mut animator,
+                &mut players,
+                &mut graphs,
+                handle,
+                weights,
+                speeds,
+                blended,
+            );
+        }
+        if !blended {
+            play_state(&mut animator, &mut players, state);
+        } else {
+            animator.state = Some(state);
+        }
+        if animator.locomotion.is_none() {
+            sync_clip_speed(&animator, &mut players, state, speeds);
+        }
     }
 }
 
@@ -1133,7 +1310,7 @@ const ANIM_FREEZE_HYSTERESIS: f32 = 0.9;
 /// nothing: its targets bail on the first lookup and the player's clock
 /// stops, so the clip resumes where it left off when the handle comes back.
 #[derive(Debug, Component)]
-pub struct FrozenAnimation(AnimationGraphHandle);
+pub struct FrozenAnimation(pub AnimationGraphHandle);
 
 /// Distance past which a character's rig stops animating.
 fn freeze_distance(activation: Option<&crate::luau::ScriptActivation>) -> f32 {
@@ -1213,6 +1390,31 @@ pub fn freeze_distant_animation(
     }
 }
 
+/// Animator mínimo para testes de outros módulos (ragdoll).
+#[cfg(test)]
+pub fn test_animator(player: Entity) -> CharacterAnimator {
+    CharacterAnimator {
+        clip_names: vec!["idle".into()],
+        nodes: vec![AnimationNodeIndex::new(1)],
+        durations: vec![1.0],
+        player,
+        state: Some(AnimState::Idle),
+        current: None,
+        action_time: 0.0,
+        locked: false,
+        air_time: 0.0,
+        speed: 0.0,
+        last_pos: None,
+        locomotion: None,
+    }
+}
+
+/// Delta horizontal de root motion entre duas amostras do osso raiz.
+pub fn root_motion_delta(previous: Vec3, current: Vec3) -> Vec3 {
+    let d = current - previous;
+    Vec3::new(d.x, 0.0, d.z)
+}
+
 /// Registers clip binding, action arbitration and the motion drivers.
 #[derive(Default)]
 pub struct AnimationPlugin;
@@ -1243,6 +1445,26 @@ impl bevy::app::Plugin for AnimationPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locomotion_blend_is_continuous_between_idle_and_run() {
+        let gates = MotionGates::HERO;
+        let (i, w, r) = locomotion_weights(0.0, gates);
+        assert_eq!((i, w, r), (1.0, 0.0, 0.0));
+        let (i, w, r) = locomotion_weights(gates.run, gates);
+        assert_eq!((i, w, r), (0.0, 0.0, 1.0));
+        let mid = (gates.idle + gates.run) * 0.5;
+        let (i, w, r) = locomotion_weights((gates.idle + mid) * 0.5, gates);
+        assert!(i > 0.0 && w > 0.0 && r == 0.0);
+        let (i2, w2, r2) = locomotion_weights((mid + gates.run) * 0.5, gates);
+        assert!(i2 == 0.0 && w2 > 0.0 && r2 > 0.0);
+    }
+
+    #[test]
+    fn root_motion_keeps_only_the_horizontal_step() {
+        let d = root_motion_delta(Vec3::ZERO, Vec3::new(0.2, 0.5, -0.1));
+        assert_eq!(d, Vec3::new(0.2, 0.0, -0.1));
+    }
 
     #[test]
     fn test_freeze_distance_never_drops_below_the_floor() {
@@ -1670,6 +1892,7 @@ mod tests {
             air_time: 0.0,
             speed: 0.0,
             last_pos: None,
+            locomotion: None,
         }
     }
 
@@ -2306,6 +2529,7 @@ mod tests {
                 air_time: 0.0,
                 speed: 0.0,
                 last_pos: None,
+                locomotion: None,
             }
         }
 
