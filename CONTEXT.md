@@ -44,7 +44,7 @@ make test-viber                                 # atalho monorepo
 Sem caminho, `run`/`analyze`/`scene`/`tool` descobrem o mundo por ordem:
 `world.xml` → `worlds/*.xml`.
 
-CLI instalado (`./install.sh viber` na raiz do monorepo): `viber create |
+CLI instalado (`./install.sh` neste checkout): `viber create |
 analyze | run | bake <world.xml> [--verify] | scene (ls/get/find/set/
 insert/rm/mv/dup/apply/undo/redo/catalog/add/drop/files) | terrain (sample/
 brush/paint) | tool (list/scatter/settle/canonicalize) | debug … | session …`.

@@ -153,9 +153,9 @@ document.
 ## Usage
 
 ```bash
-cd ViberEditor
-cargo run                                 # Viber's simple-rpg demo
-cargo run -- path/to/world.xml            # a specific world
+# a partir da raiz do checkout Viber
+cargo run --manifest-path editor/Cargo.toml -- ../Vael/world.xml
+cargo run --manifest-path editor/Cargo.toml -- path/to/world.xml
 cargo run -- --screenshot out.png --frames 500   # capture the editor window and exit (QA)
 cargo run -- --select name=chapel --screenshot out.png   # select + frame a node first
 cargo run -- --tab files --screenshot out.png          # open a bottom-dock tab at startup

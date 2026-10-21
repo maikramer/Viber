@@ -332,13 +332,19 @@ A corrida não é um preset da engine. `scripts/lib/kart.lua` integra o kart,
 `scripts/game/rivals.lua` faz pure pursuit com `viber.road_at`. Os karts são
 entidades com `tag="player"` ou `groups="kart"`.
 
-### CLI instalado (`viber`, via instalador unificado)
+### CLI instalado (`viber`)
+
+O instalador vive neste checkout (o `./install.sh viber` da raiz do antigo
+monorepo saiu com a separação):
 
 ```bash
-./install.sh viber            # raiz do monorepo: cargo build --release + ~/.local/bin/viber
+./install.sh                  # cargo build --release + ~/.local/bin/viber
+./install.sh editor           # idem para o ViberEditor (crate `editor/`)
+./install.sh --debug          # perfil dev, mais rápido de compilar
 viber create <nome>           # scaffold <nome>/{world.xml,config.yaml} (falha se a pasta existe)
 viber analyze [world.xml]     # valida headless; sem caminho procura world.xml / worlds/*.xml
 viber run [world.xml]         # janela Bevy em RELEASE; `--debug` e `--no-cargo` disponíveis
+viber editor [world.xml]      # GUI; procura `editor/` deste checkout (ou `vibereditor` no PATH)
 viber prune [--debug]         # housekeeping manual do target/ (o mesmo do `run`)
 viber --version | help
 ```

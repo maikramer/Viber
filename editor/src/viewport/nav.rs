@@ -100,7 +100,9 @@ pub fn fly(
         return;
     };
     if !buttons.pressed(MouseButton::Right) {
-        fly.dragging = false;
+        // O mesmo `dragging` arma o orbit do botão do meio. Limpá-lo aqui
+        // sempre que o direito está solto cortava o arrasto no segundo frame.
+        // Quem limpa, quando nenhum dos dois botões está premido, é o orbit.
         return;
     }
     if buttons.just_pressed(MouseButton::Right) {

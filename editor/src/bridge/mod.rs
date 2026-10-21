@@ -166,6 +166,16 @@ fn poll_engine(mut bridge: ResMut<ViberBridge>, time: Res<Time>) {
         if let Ok(value) = result {
             match serde_json::from_value::<PingResponse>(value) {
                 Ok(info) if info.pong => {
+                    if let Some(child) = bridge.child.as_ref() {
+                        let expected = u64::from(child.id());
+                        if info.pid != expected {
+                            bridge.status = EngineStatus::Failed(format!(
+                                "porta {} ocupada pelo pid {} (o jogo lançado é {expected})",
+                                bridge.port, info.pid
+                            ));
+                            return;
+                        }
+                    }
                     info!(
                         "game bridge up on port {} (viber {}, pid {})",
                         bridge.port, info.version, info.pid
