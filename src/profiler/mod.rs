@@ -22,9 +22,12 @@
 //! `timed.rs`). `VIBER_PROF_LOG=1` liga o `LogDiagnosticsPlugin` nativo.
 
 pub mod audio_tab;
+pub mod frames_tab;
+pub mod mem;
 pub mod physics_tab;
 pub mod script;
 pub mod timed;
+pub mod trace;
 pub mod world_tab;
 
 use std::collections::VecDeque;
@@ -52,13 +55,20 @@ const OVERLAY_REFRESH: f32 = 0.25;
 
 /// Abas do profiler, por ordem — ids canónicos EN (o tab-group do XML, o
 /// `--tab` do CLI e `viber.ui.tab("prof")` falam nestes ids; os rótulos
-/// visíveis são PT no XML).
-pub const TABS: [&str; 5] = ["systems", "world", "physics", "audio", "extras"];
+/// visíveis são PT no XML). `frames` fecha a lista para não deslocar os
+/// índices históricos.
+pub const TABS: [&str; 6] = ["systems", "world", "physics", "audio", "extras", "frames"];
 pub const TAB_SYSTEMS: usize = 0;
 pub const TAB_WORLD: usize = 1;
 pub const TAB_PHYSICS: usize = 2;
 pub const TAB_AUDIO: usize = 3;
 pub const TAB_EXTRAS: usize = 4;
+pub const TAB_FRAMES: usize = 5;
+
+/// Hitches recentes guardados (o ring da aba FRAMES/CLI).
+pub const HITCH_CAPACITY: usize = 32;
+/// Limiar por omissão de um hitch (ms) — `VIBER_HITCH_MS` sobrepõe.
+pub const DEFAULT_HITCH_MS: f32 = 50.0;
 
 /// Marker da raiz do overlay (toggle de visibilidade).
 #[derive(Component)]
@@ -172,6 +182,12 @@ impl FrameStats {
         self.samples.len()
     }
 
+    /// Amostras da janela, da mais antiga para a mais recente (gráfico da
+    /// aba FRAMES / sparkline do painel).
+    pub fn history(&self) -> Vec<f32> {
+        self.samples.iter().copied().collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }
@@ -265,6 +281,133 @@ pub fn collect_counters(world: &mut World) -> GameCounters {
         audio_sinks,
     }
 }
+
+/// Um frame acima do limiar, com a atribuição do que o compôs. É a peça que
+/// falta ao snapshot médio: `frame_ms.max` diz QUE houve um pico, `top` diz
+/// QUEM o fez.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hitch {
+    pub frame: u64,
+    pub frame_ms: f32,
+    pub uptime_s: f32,
+    /// Topo do frame (sistemas + scripts), por ms desc.
+    pub top: Vec<timed::FrameHotspot>,
+    pub entities: usize,
+    pub scripts_total: usize,
+    pub scripts_active: usize,
+    pub particle_emitters: usize,
+    pub terrain_chunks: usize,
+    pub colliders: usize,
+    pub shadow_lights: usize,
+    pub audio_sinks: usize,
+}
+
+/// Ring dos últimos hitches + limiar configurável.
+#[derive(Resource)]
+pub struct HitchLog {
+    /// Acima disto o frame entra no ring (`VIBER_HITCH_MS`, default 50 ms).
+    pub threshold_ms: f32,
+    /// Total desde o arranque (o ring só guarda [`HITCH_CAPACITY`]).
+    pub total: u64,
+    pub recent: VecDeque<Hitch>,
+}
+
+impl Default for HitchLog {
+    fn default() -> Self {
+        Self {
+            threshold_ms: std::env::var("VIBER_HITCH_MS")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<f32>().ok())
+                .filter(|ms| ms.is_finite() && *ms > 0.0)
+                .unwrap_or(DEFAULT_HITCH_MS),
+            total: 0,
+            recent: VecDeque::with_capacity(HITCH_CAPACITY),
+        }
+    }
+}
+
+impl HitchLog {
+    fn push(&mut self, hitch: Hitch) {
+        self.total += 1;
+        if self.recent.len() == HITCH_CAPACITY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(hitch);
+    }
+}
+
+/// JSON do ring para o snapshot/aba FRAMES/CLI.
+pub fn hitch_json(log: &HitchLog) -> serde_json::Value {
+    json!({
+        "threshold_ms": log.threshold_ms,
+        "count": log.total,
+        "recent": log.recent.iter().collect::<Vec<_>>(),
+    })
+}
+
+fn counters_json(counters: &GameCounters) -> serde_json::Value {
+    json!({
+        "entities": counters.entities,
+        "scripts_total": counters.scripts_total,
+        "scripts_active": counters.scripts_active,
+        "particle_emitters": counters.particle_emitters,
+        "terrain_chunks": counters.terrain_chunks,
+        "colliders": counters.colliders,
+        "shadow_lights": counters.shadow_lights,
+        "audio_sinks": counters.audio_sinks,
+    })
+}
+
+/// Fim do frame: alimenta a janela de frame-times, o ring de hitches (com
+/// atribuição) e o gravador de traces. Corre no `Last` — depois do
+/// `PostUpdate`, com todos os sistemas instrumentados do frame já medidos.
+fn end_frame(world: &mut World) {
+    let frame_ms = world.resource::<Time>().delta_secs() * 1000.0;
+    let frame = world.resource::<FrameCounter>().0;
+    let uptime_s = world.resource::<Time>().elapsed_secs();
+    world.resource_mut::<FrameStats>().push(frame_ms);
+
+    let threshold = world
+        .get_resource::<HitchLog>()
+        .map(|log| log.threshold_ms)
+        .unwrap_or(DEFAULT_HITCH_MS);
+    let is_hitch = frame_ms >= threshold;
+    // Contadores são caros (varrem scripts/luzes/colisores): só em hitches e
+    // numa amostra a cada ~0,5 s para o trace.
+    let sampled = if is_hitch || frame <= 1 || frame % 30 == 0 {
+        Some(collect_counters(world))
+    } else {
+        None
+    };
+
+    let mut hitch_top: Option<serde_json::Value> = None;
+    if is_hitch {
+        let top = timed::frame_hotspots(8, frame_ms);
+        hitch_top = serde_json::to_value(&top).ok();
+        if let Some(counters) = sampled.as_ref()
+            && let Some(mut log) = world.get_resource_mut::<HitchLog>()
+        {
+            log.push(Hitch {
+                frame,
+                frame_ms,
+                uptime_s,
+                top,
+                entities: counters.entities,
+                scripts_total: counters.scripts_total,
+                scripts_active: counters.scripts_active,
+                particle_emitters: counters.particle_emitters,
+                terrain_chunks: counters.terrain_chunks,
+                colliders: counters.colliders,
+                shadow_lights: counters.shadow_lights,
+                audio_sinks: counters.audio_sinks,
+            });
+        }
+    }
+
+    let counters = sampled.as_ref().map(counters_json);
+    trace::record_frame(frame, frame_ms, hitch_top, counters);
+}
+
 
 /// FPS/frame-time suavizados do `DiagnosticsStore` (`None` sem o plugin).
 fn diagnostics_snapshot(store: &DiagnosticsStore) -> (Option<f64>, Option<f64>) {
@@ -411,6 +554,12 @@ pub fn snapshot(world: &mut World) -> serde_json::Value {
         .get_resource::<ProfilerState>()
         .map(|s| s.frozen)
         .unwrap_or(false);
+    let hitches = world
+        .get_resource::<HitchLog>()
+        .map(hitch_json)
+        .unwrap_or_else(|| json!({ "threshold_ms": DEFAULT_HITCH_MS, "count": 0, "recent": [] }));
+    let memory = mem::snapshot();
+    let trace = trace::status();
 
     let frame_avg_f32 = avg.unwrap_or(0.0);
     let limit = systems_limit();
@@ -456,6 +605,12 @@ pub fn snapshot(world: &mut World) -> serde_json::Value {
         "frame_count": frames,
         "frozen": frozen,
         "groups": groups,
+        // Picos recentes com o topo do frame que os causou (`--hitches`).
+        "hitches": hitches,
+        // Processo: RSS/pico/threads (Linux; null noutras plataformas).
+        "memory": memory,
+        // Gravação de trace em curso / último trace disponível.
+        "trace": trace,
         // Passes do render graph (CPU+GPU). Vazio sem `VIBER_PROF_GPU=1`.
         "gpu": gpu,
         "systems": systems,
@@ -501,6 +656,7 @@ pub fn tab_snapshot(world: &mut World, tab: &str) -> serde_json::Value {
         }
         "physics" => physics_tab::json(&physics_tab::snapshot(world, frame_avg_ms)),
         "audio" => audio_tab::json(&audio_tab::snapshot(world)),
+        "frames" => frames_tab::snapshot(world),
         _ => snapshot(world),
     }
 }
@@ -508,7 +664,7 @@ pub fn tab_snapshot(world: &mut World, tab: &str) -> serde_json::Value {
 /// JSON completo para exportação: todos os tabs + metadados.
 pub fn export_snapshot(world: &mut World) -> serde_json::Value {
     let mut all = serde_json::Map::new();
-    for tab in ["systems", "world", "physics", "audio"] {
+    for tab in ["systems", "world", "physics", "audio", "frames"] {
         all.insert(tab.to_string(), tab_snapshot(world, tab));
     }
     let extras: Vec<serde_json::Value> = extras_snapshot(world);
@@ -800,6 +956,7 @@ impl Plugin for ProfilerPlugin {
         app.init_resource::<FrameStats>()
             .init_resource::<FrameCounter>()
             .init_resource::<ProfilerState>()
+            .init_resource::<HitchLog>()
             .init_resource::<script::ProfilerScriptState>()
             .init_resource::<script::PublishThrottle>()
             .insert_resource(extras)
@@ -824,22 +981,22 @@ impl Plugin for ProfilerPlugin {
                 script::apply_profiler_commands.after(crate::luau::luau_update),
             )
             .add_systems(Update, script::profiler_keys_system)
-            .add_systems(Update, (record_frame_time, profiler_overlay_update).chain());
+            .add_systems(Update, profiler_overlay_update)
+            // Fim do frame: janela de frame-times, hitches e trace.
+            .add_systems(Last, end_frame);
     }
 }
 
 fn count_frames(mut counter: ResMut<FrameCounter>) {
     counter.0 += 1;
+    // Abre a captura por frame antes dos sistemas instrumentados do frame.
+    timed::begin_frame(counter.0);
 }
 
 /// Espelha `ProfilerState.frozen` no átomo do `timed` (corre no `First`,
 /// antes de qualquer sistema instrumentado registar amostras).
 fn sync_frozen_state(state: Res<ProfilerState>) {
     timed::set_frozen(state.frozen);
-}
-
-fn record_frame_time(time: Res<Time>, mut stats: ResMut<FrameStats>) {
-    stats.push(time.delta_secs() * 1000.0);
 }
 
 fn spawn_overlay(mut commands: Commands) {
@@ -881,6 +1038,7 @@ fn profiler_overlay_update(
     mut q_root: Query<&mut Visibility, With<ProfilerOverlay>>,
     stats: Res<FrameStats>,
     diagnostics: Option<Res<DiagnosticsStore>>,
+    hitches: Option<Res<HitchLog>>,
     players: Query<&GlobalTransform, With<Player>>,
     scripts: Query<(Option<&GlobalTransform>, Option<&ScriptActivation>), With<LuaScriptRef>>,
     entities: Query<Entity>,
@@ -915,6 +1073,15 @@ fn profiler_overlay_update(
         .map(diagnostics_snapshot)
         .and_then(|(fps, _)| fps);
     let frame_stats = (stats.avg_ms(), stats.max_ms(), stats.min_fps());
+    let frame_p95 = stats.window().3;
+    let frame_avg = stats.avg_ms().unwrap_or(0.0);
+    let top: Vec<(String, f32)> = timed::systems_snapshot(frame_avg)
+        .into_iter()
+        .take(3)
+        .map(|row| (row.name, row.avg_ms))
+        .collect();
+    let hitch_count = hitches.as_deref().map(|log| log.total).unwrap_or(0);
+    let rss_mb = mem::snapshot().rss_mb;
 
     let player_pos = players.iter().next().map(GlobalTransform::translation);
     let rows: Vec<ScriptRow> = scripts
@@ -929,18 +1096,32 @@ fn profiler_overlay_update(
         terrain_chunks: chunks.iter().count(),
         ..Default::default()
     };
-    let body = overlay_body(fps, frame_stats, &counters, time.elapsed_secs());
+    let body = overlay_body(
+        fps,
+        frame_stats,
+        &counters,
+        time.elapsed_secs(),
+        frame_p95,
+        &top,
+        hitch_count,
+        rss_mb,
+    );
     if let Ok(mut text) = q_text.single_mut() {
         *text = Text::new(body);
     }
 }
 
 /// Corpo do overlay — pura para os testes (uma linha por métrica).
+#[allow(clippy::too_many_arguments)]
 pub fn overlay_body(
     fps: Option<f64>,
     stats: (Option<f32>, Option<f32>, Option<f32>),
     counters: &GameCounters,
     uptime_s: f32,
+    p95_ms: Option<f32>,
+    top: &[(String, f32)],
+    hitch_count: u64,
+    rss_mb: Option<f64>,
 ) -> String {
     let fps_text = fps
         .map(|v| format!("FPS {v:.0}"))
@@ -957,14 +1138,50 @@ pub fn overlay_body(
         .1
         .map(|v| format!("  pico {v:.1}"))
         .unwrap_or_default();
+    let p95_text = p95_ms
+        .map(|v| format!("  p95 {v:.1}"))
+        .unwrap_or_default();
+    let top_text = if top.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = top
+            .iter()
+            .map(|(name, ms)| format!("{} {ms:.1}", short_system_name(name)))
+            .collect();
+        format!("\ntopo {}", items.join(" · "))
+    };
+    let hitch_text = if hitch_count > 0 {
+        format!("hitches {hitch_count}")
+    } else {
+        String::new()
+    };
+    let mem_text = rss_mb
+        .map(|mb| format!("rss {mb:.0} MiB"))
+        .unwrap_or_default();
+    let extra = [hitch_text, mem_text]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let extra_text = if extra.is_empty() {
+        String::new()
+    } else {
+        format!("\n{extra}")
+    };
     format!(
-        "{fps_text}{min_text}\n{frame_text}{max_text}\nentidades {}\nscripts {} (ativos {})\npartículas {} emissores\nterreno {} chunks\nuptime {uptime_s:.0} s\nF3 esconde",
+        "{fps_text}{min_text}\n{frame_text}{p95_text}{max_text}{top_text}{extra_text}\nentidades {}\nscripts {} (ativos {})\npartículas {} emissores\nterreno {} chunks\nuptime {uptime_s:.0} s\nF3 esconde",
         counters.entities,
         counters.scripts_total,
         counters.scripts_active,
         counters.particle_emitters,
         counters.terrain_chunks,
     )
+}
+
+/// Nome curto de um sistema para o overlay: o último segmento do caminho
+/// (`viber::combat::melee` → `melee`), para três nomes caberem numa linha.
+fn short_system_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
 }
 
 #[cfg(test)]
@@ -1055,10 +1272,18 @@ mod tests {
             (Some(16.6), Some(32.1), Some(41.3)),
             &counters,
             123.4,
+            Some(19.8),
+            &[("viber::combat::melee".into(), 1.2), ("ai::chase".into(), 0.4)],
+            2,
+            Some(512.0),
         );
         assert!(body.contains("FPS 60"), "{body}");
         assert!(body.contains("pior 41"), "{body}");
         assert!(body.contains("frame 16.6 ms"), "{body}");
+        assert!(body.contains("p95 19.8"), "{body}");
+        assert!(body.contains("topo melee 1.2 · chase 0.4"), "{body}");
+        assert!(body.contains("hitches 2"), "{body}");
+        assert!(body.contains("rss 512 MiB"), "{body}");
         assert!(body.contains("entidades 15432"), "{body}");
         assert!(body.contains("scripts 96 (ativos 12)"), "{body}");
         assert!(body.contains("F3"), "{body}");

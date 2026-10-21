@@ -26,6 +26,7 @@ pub mod skills;
 pub mod travel;
 pub mod feedback;
 pub mod foliage;
+pub mod draw_diag;
 pub mod editor_camera;
 pub mod fx_specs;
 pub mod graphics;

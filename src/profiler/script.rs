@@ -165,6 +165,48 @@ pub fn run_profiler_cmd(world: &mut World, cmd: &str) -> String {
         }
         return format!("aba desconhecida: {tab}");
     }
+    if let Some(rest) = cmd.strip_prefix("trace:") {
+        let (action, arg) = match rest.split_once(':') {
+            Some((action, arg)) => (action, Some(arg)),
+            None => (rest, None),
+        };
+        return match action {
+            "start" => {
+                let seconds = arg
+                    .and_then(|raw| raw.trim().parse::<f32>().ok())
+                    .unwrap_or(10.0);
+                let status = super::trace::start(seconds, super::trace::DEFAULT_MAX_EVENTS);
+                format!(
+                    "trace a gravar {:.0}s ({} eventos/limite)",
+                    seconds.max(0.0),
+                    status["max_events"].as_u64().unwrap_or(0)
+                )
+            }
+            "stop" => {
+                let status = super::trace::stop();
+                format!(
+                    "trace fechado: {} frames, {} eventos",
+                    status["last"]["frames"].as_u64().unwrap_or(0),
+                    status["last"]["events"].as_u64().unwrap_or(0)
+                )
+            }
+            "export" => match super::trace::export(None, "chrome") {
+                Ok(result) => format!("trace → {}", result.path),
+                Err(error) => format!("trace falhou: {error}"),
+            },
+            other => format!("comando trace desconhecido: {other}"),
+        };
+    }
+    if let Some(raw) = cmd.strip_prefix("hitch:") {
+        let ms: f32 = raw.trim().parse().unwrap_or(0.0);
+        if ms.is_finite() && ms > 0.0 {
+            if let Some(mut log) = world.get_resource_mut::<super::HitchLog>() {
+                log.threshold_ms = ms;
+                return format!("hitch ≥ {ms:.0} ms");
+            }
+        }
+        return "limiar de hitch inválido".into();
+    }
     match cmd {
         "freeze" => {
             if let Some(mut state) = world.get_resource_mut::<ProfilerState>() {
@@ -212,7 +254,7 @@ pub fn run_profiler_cmd(world: &mut World, cmd: &str) -> String {
 /// Teclas engine-side do profiler: **F12**/**Pause** (congelar),
 /// **Backquote** (exportar), **PageUp/PageDown** (raio). O **P** é do modal
 /// declarativo (`key="p"`) e as ABAS têm teclado nativo do modal
-/// (`]`/`.` próxima, `[`/`,` anterior, dígitos 1–5 saltam) — o driver Luau
+/// (`]`/`.` próxima, `[`/`,` anterior, dígitos 1–6 saltam) — o driver Luau
 /// espelha a aba escolhida para a engine (fonte única: a UI). Corre mesmo
 /// com menus abertos — a janela do profiler É um menu.
 pub fn profiler_keys_system(world: &mut World) {
@@ -288,6 +330,9 @@ mod tests {
 
     #[test]
     fn test_run_profiler_cmd_reset() {
+        // O reset limpa globais partilhados com os testes do `timed` — a
+        // mesma lock evita que ele corra a meio de uma atribuição por frame.
+        let _guard = super::super::timed::TEST_LOCK.lock();
         let mut world = World::new();
         world.init_resource::<ProfilerState>();
         super::super::timed::set_frozen(false);

@@ -1,5 +1,35 @@
 # Performance — o que domina o frame no Viber
 
+## Profiling para agentes pelo CLI (2026-10-21)
+
+O painel **P** continua a ser a leitura humana, mas o CLI cobre o ciclo
+completo — uma IA mede, atribui e exporta sem screenshots:
+
+| Pergunta | Comando |
+|----------|---------|
+| como está o frame agora? | `viber debug prof --tab frames` (janela avg/p95/max, topo do frame, memória) |
+| o que causou o pico? | `viber debug prof --hitches` (cada frame ≥ limiar + top 8 sistemas/scripts com ms e %) |
+| o frame piora ao longo do tempo? | `viber debug prof --record 30 --hz 2 -o perf.jsonl` (série JSONL + resumo: frame médio/pior, hitches novos, RSS máx, sistemas mais caros) |
+| quero a linha do tempo completa | `viber debug trace 10 -o trace.json` (Chrome Trace Format → `ui.perfetto.dev`) |
+| quero correlacionar um evento | `viber debug trace --seconds 0` → `viber debug mark "entrei na vila"` → `viber debug trace --stop -o trace.json` |
+| quero o dump bruto | `viber debug prof --tab all --json` ou `--export` |
+
+O trace regista cada sistema instrumentado, as âncoras de schedule/render e
+cada script Luau (duração real; o `Instant` de fim mantém sistemas paralelos
+sobrepostos), mais contadores por frame (entidades, scripts activos,
+partículas, chunks, colisores, luzes com sombra, sinks) a ~0,5 s. O resumo
+calculado no `finish` (devolvido por `trace --status`/`--stop` e impresso no
+fim) traz `frame_ms` avg/min/max/p50/p95/p99, `over_budget` (16.7/33.3/50 ms),
+`top_systems` (total, max, calls, avg, % do wall), `top_max`, `groups`,
+`hitches` com topo e `counters` first→last — é o que se lê antes de abrir o
+Perfetto.
+
+O detector de hitches corre sempre (barato: soma por frame); o limiar é
+`VIBER_HITCH_MS` (default **50 ms**) e também se muda ao vivo com
+`viber debug prof --hitch-ms 33` ou `viber.profiler.config`. A memória é o
+RSS/VmHWM/threads do processo (`/proc/self/status`; `null` fora do Linux) —
+a `wgpu` não expõe VRAM portátil.
+
 > **Onde o DLSS deixou de dar (estudo 2026-10-10):** depois do +29 % do DLSS,
 > o frame do `simple-rpg` (equilibrado, 720p) ficou preso em ~20,8 ms NÃO por
 > GPU — por **CPU do pipeline de render do bevy**. Provas interleaved na

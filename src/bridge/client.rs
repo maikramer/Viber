@@ -326,6 +326,53 @@ impl BridgeClient {
         self.call("viber.profiler.export", params)
     }
 
+    /// Configura o profiler ao vivo (`viber.profiler.config`); devolve
+    /// `{hitch_ms}`.
+    pub fn prof_config(&self, hitch_ms: Option<f32>) -> Result<Value> {
+        let mut params = json!({});
+        if let Some(ms) = hitch_ms {
+            params["hitch_ms"] = json!(ms);
+        }
+        self.call("viber.profiler.config", params)
+    }
+
+    /// Começa a gravar um trace (`viber.profiler.trace_start`).
+    pub fn trace_start(&self, seconds: f64, max_events: usize) -> Result<Value> {
+        self.call(
+            "viber.profiler.trace_start",
+            json!({ "seconds": seconds, "max_events": max_events }),
+        )
+    }
+
+    /// Fecha o trace actual (`viber.profiler.trace_stop`).
+    pub fn trace_stop(&self) -> Result<Value> {
+        self.call("viber.profiler.trace_stop", json!({}))
+    }
+
+    /// Estado da gravação (`viber.profiler.trace_status`).
+    pub fn trace_status(&self) -> Result<Value> {
+        self.call("viber.profiler.trace_status", json!({}))
+    }
+
+    /// Exporta o trace (`viber.profiler.trace_export`) e devolve
+    /// `{path, bytes, frames, events, truncated}`.
+    pub fn trace_export(
+        &self,
+        path: Option<&std::path::Path>,
+        format: &str,
+    ) -> Result<Value> {
+        let mut params = json!({ "format": format });
+        if let Some(path) = path {
+            params["path"] = json!(path.display().to_string());
+        }
+        self.call("viber.profiler.trace_export", params)
+    }
+
+    /// Marca um instante no trace (`viber.profiler.mark`).
+    pub fn prof_mark(&self, label: &str) -> Result<Value> {
+        self.call("viber.profiler.mark", json!({ "label": label }))
+    }
+
     /// Executa Luau na engine (`viber.lua`) — devolve
     /// `{ ok, result|error, applied, warnings }`.
     pub fn lua(&self, code: &str) -> Result<Value> {

@@ -50,6 +50,12 @@ pub const METHOD_PROFILER: &str = "viber.profiler";
 pub const METHOD_PROFILER_TAB: &str = "viber.profiler.tab";
 pub const METHOD_PROFILER_EXPORT: &str = "viber.profiler.export";
 pub const METHOD_PROFILER_EXTRA_TOGGLE: &str = "viber.profiler.extra_toggle";
+pub const METHOD_PROFILER_CONFIG: &str = "viber.profiler.config";
+pub const METHOD_PROFILER_TRACE_START: &str = "viber.profiler.trace_start";
+pub const METHOD_PROFILER_TRACE_STOP: &str = "viber.profiler.trace_stop";
+pub const METHOD_PROFILER_TRACE_STATUS: &str = "viber.profiler.trace_status";
+pub const METHOD_PROFILER_TRACE_EXPORT: &str = "viber.profiler.trace_export";
+pub const METHOD_PROFILER_MARK: &str = "viber.profiler.mark";
 pub const METHOD_LUA: &str = "viber.lua";
 pub const METHOD_KEY: &str = "viber.input.key";
 pub const METHOD_TEXT: &str = "viber.input.text";
@@ -203,6 +209,12 @@ impl Plugin for BridgePlugin {
                     .with_method_main(METHOD_PROFILER_TAB, profiler_tab)
                     .with_method_main(METHOD_PROFILER_EXPORT, profiler_export)
                     .with_method_main(METHOD_PROFILER_EXTRA_TOGGLE, profiler_extra_toggle)
+                    .with_method_main(METHOD_PROFILER_CONFIG, profiler_config)
+                    .with_method_main(METHOD_PROFILER_TRACE_START, profiler_trace_start)
+                    .with_method_main(METHOD_PROFILER_TRACE_STOP, profiler_trace_stop)
+                    .with_method_main(METHOD_PROFILER_TRACE_STATUS, profiler_trace_status)
+                    .with_method_main(METHOD_PROFILER_TRACE_EXPORT, profiler_trace_export)
+                    .with_method_main(METHOD_PROFILER_MARK, profiler_mark)
                     .with_method_main(METHOD_LUA, lua::eval)
                     .with_method_main(METHOD_KEY, input_key)
                     .with_method_main(METHOD_TEXT, input_text)
@@ -262,7 +274,6 @@ impl Plugin for BridgePlugin {
             .add_message::<crate::feedback::DamageNumberEvent>()
             .add_message::<crate::vitals::LevelUpEvent>()
             .add_message::<crate::ui::actions::UiAction>()
-            .add_message::<crate::travel::TravelPing>()
             .add_message::<crate::luau::ScriptToast>()
             .init_resource::<events::BridgeEventLog>()
             .init_resource::<FrameStepper>()
@@ -319,7 +330,7 @@ fn frame_stepper_system(world: &mut World) {
         // Fica PAUSADO (speed 0); `viber.debug.play()` restaura
         // `stepper.restore` — o valor guardado na primeira chamada da cadeia.
         stepper.active = false;
-        if let Some(mut base) = world.get_resource_mut::<crate::combat::BaseTimeScale>() {
+        if let Some(mut base) = world.get_resource_mut::<crate::time_fx::BaseTimeScale>() {
             base.0 = 0.0;
         }
         world
@@ -1001,6 +1012,94 @@ fn profiler_extra_toggle(params: In<Option<Value>>, world: &mut World) -> BrpRes
         Some(on) => Ok(json!({ "id": params.id, "on": on })),
         None => Err(invalid(format!("extra desconhecido: {}", params.id))),
     }
+}
+
+/// Configura o profiler ao vivo (`viber.profiler.config`):
+/// `{"hitch_ms": 33}` muda o limiar do detector de hitches.
+fn profiler_config(params: In<Option<Value>>, world: &mut World) -> BrpResult {
+    #[derive(serde::Deserialize, Default)]
+    struct Params {
+        hitch_ms: Option<f32>,
+    }
+    let params: Option<Params> = parse_params(params.0)?;
+    let params = params.unwrap_or_default();
+    if let Some(ms) = params.hitch_ms {
+        if !ms.is_finite() || ms <= 0.0 {
+            return Err(invalid(format!(
+                "`hitch_ms` tem de ser > 0 (recebido {ms})"
+            )));
+        }
+        if let Some(mut log) = world.get_resource_mut::<crate::profiler::HitchLog>() {
+            log.threshold_ms = ms;
+        }
+    }
+    let hitch_ms = world
+        .get_resource::<crate::profiler::HitchLog>()
+        .map(|log| log.threshold_ms)
+        .unwrap_or(crate::profiler::DEFAULT_HITCH_MS);
+    Ok(json!({ "hitch_ms": hitch_ms }))
+}
+
+/// Começa a gravação de um trace (`viber.profiler.trace_start`):
+/// `{"seconds": 10, "max_events": 1000000}` (ambos opcionais).
+fn profiler_trace_start(params: In<Option<Value>>, _world: &mut World) -> BrpResult {
+    #[derive(serde::Deserialize, Default)]
+    struct Params {
+        seconds: Option<f32>,
+        max_events: Option<usize>,
+    }
+    let params: Option<Params> = parse_params(params.0)?;
+    let params = params.unwrap_or_default();
+    Ok(crate::profiler::trace::start(
+        params.seconds.unwrap_or(10.0),
+        params
+            .max_events
+            .unwrap_or(crate::profiler::trace::DEFAULT_MAX_EVENTS),
+    ))
+}
+
+/// Fecha o trace actual (`viber.profiler.trace_stop`).
+fn profiler_trace_stop(_params: In<Option<Value>>, _world: &mut World) -> BrpResult {
+    Ok(crate::profiler::trace::stop())
+}
+
+/// Estado da gravação + resumo do último trace (`viber.profiler.trace_status`).
+fn profiler_trace_status(_params: In<Option<Value>>, _world: &mut World) -> BrpResult {
+    Ok(crate::profiler::trace::status())
+}
+
+/// Exporta o trace (`viber.profiler.trace_export`):
+/// `{"path": "…", "format": "chrome|json"}`.
+fn profiler_trace_export(params: In<Option<Value>>, _world: &mut World) -> BrpResult {
+    #[derive(serde::Deserialize, Default)]
+    struct Params {
+        path: Option<String>,
+        format: Option<String>,
+    }
+    let params: Option<Params> = parse_params(params.0)?;
+    let params = params.unwrap_or_default();
+    match crate::profiler::trace::export(
+        params.path.map(PathBuf::from),
+        params.format.as_deref().unwrap_or("chrome"),
+    ) {
+        Ok(result) => Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({}))),
+        Err(error) => Err(invalid(format!("trace export falhou: {error}"))),
+    }
+}
+
+/// Marca um instante no trace (`viber.profiler.mark {"label": "…"}`).
+fn profiler_mark(params: In<Option<Value>>, _world: &mut World) -> BrpResult {
+    #[derive(serde::Deserialize)]
+    struct Params {
+        label: String,
+    }
+    let params: Params = parse_params(params.0)?;
+    let frame = crate::profiler::trace::mark(&params.label);
+    Ok(json!({
+        "ok": frame.is_some(),
+        "frame": frame,
+        "label": params.label,
+    }))
 }
 
 // ------------------------------------------------------- câmara de editor

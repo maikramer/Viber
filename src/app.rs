@@ -526,6 +526,8 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     });
     app.add_plugins(streaming::StreamingPlugin);
     app.add_plugins(foliage::FoliagePlugin);
+    // `VIBER_DRAW_DIAG=1`: malhas/triângulos por vista (câmara, cascatas, lanternas).
+    app.add_plugins(crate::draw_diag::DrawDiagPlugin);
     app.add_plugins(netplay::NetPlayPlugin);
     app.add_plugins(physics::PhysicsPlugin {
         debug: std::env::var_os("VIBER_PHYSICS_DEBUG").is_some(),

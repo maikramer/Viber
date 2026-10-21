@@ -1,12 +1,14 @@
 //! Viber CLI — runs and validates AiGameKit declarative world XML.
 
+use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use viber::app::{load_world, world_asset_dirs, world_base_dir};
 use viber::bridge::{self, client::BridgeClient};
@@ -308,6 +310,68 @@ enum DebugCommand {
         /// (default: $TMPDIR/viber-profiles/viber-profile-<epoch>.json).
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         export: Option<String>,
+        /// Imprime os hitches recentes (frame, ms, topo do frame) em vez do
+        /// resumo. O ring vive na engine (`VIBER_HITCH_MS`, default 50 ms).
+        #[arg(long)]
+        hitches: bool,
+        /// Muda o limiar do detector de hitches (ms) antes de ler.
+        #[arg(long)]
+        hitch_ms: Option<f32>,
+        /// Grava uma SÉRIE temporal do profiler durante N segundos. Sem
+        /// `-o`, imprime uma linha JSON por amostra (JSONL); com `-o`,
+        /// escreve o ficheiro e imprime só o resumo. É o perfil contínuo
+        /// para agentes: nada de screenshots.
+        #[arg(long, value_name = "SECONDS")]
+        record: Option<f64>,
+        /// Frequência de amostragem da série (Hz).
+        #[arg(long, default_value_t = 2.0)]
+        hz: f32,
+        /// Ficheiro JSONL da série (`--record`).
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+        /// Sistemas incluídos em cada amostra do `--record`.
+        #[arg(long, default_value_t = 8)]
+        top: usize,
+    },
+    /// Grava um trace de profiling na engine e exporta-o. O formato
+    /// `chrome` abre em `chrome://tracing`/Perfetto (`ui.perfetto.dev`);
+    /// `json` é o formato nativo (CI, diff de traces).
+    Trace {
+        /// Duração da gravação em segundos (0 = até `trace_stop`).
+        #[arg(default_value_t = 10.0)]
+        seconds: f64,
+        /// Ficheiro de saída (default: $TMPDIR/viber-traces/viber-trace-<epoch>.json)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// chrome|perfetto|json
+        #[arg(long, default_value = "chrome")]
+        format: String,
+        /// Teto de eventos (default 1 000 000); protege a RAM num trace longo.
+        #[arg(long)]
+        max_events: Option<usize>,
+        /// Em vez de gravar, FECHA o trace em curso e exporta-o (o par do
+        /// `--seconds 0`, que inicia uma gravação manual).
+        #[arg(long)]
+        stop: bool,
+        /// Em vez de gravar, imprime o estado do trace (gravação actual /
+        /// resumo do último).
+        #[arg(long)]
+        status: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        world: Option<PathBuf>,
+    },
+    /// Marca um instante no trace em curso (`viber.profiler.mark`) — o
+    /// marcador aparece no Chrome trace/Perfetto com o label dado.
+    Mark {
+        label: String,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        world: Option<PathBuf>,
     },
     /// Execute Luau na engine (`viber.lua`): mover/teleportar o player,
     /// desativar/despawnar entidades, dar itens… API completa: `viber.debug.*`
@@ -1931,9 +1995,518 @@ fn normalize_prof_tab(tab: &str) -> String {
         "fisica" | "física" | "physics" => "physics".into(),
         "audio" | "áudio" => "audio".into(),
         "extras" => "extras".into(),
+        "frames" | "quadros" => "frames".into(),
         "tudo" | "all" => "all".into(),
         other => other.into(),
     }
+}
+
+// ------------------------------------------------ perfil contínuo (--record)
+
+/// Formato do trace aceite pelo CLI (`chrome`/Perfetto ou `json` nativo).
+fn normalize_trace_format(raw: &str) -> Result<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "chrome" | "perfetto" | "trace" => Ok("chrome"),
+        "json" | "native" | "viber" => Ok("json"),
+        other => bail!("formato de trace desconhecido: {other} (chrome|json)"),
+    }
+}
+
+fn round3(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn min_of(values: &[f64]) -> Option<f64> {
+    values.iter().copied().reduce(f64::min)
+}
+
+fn max_of(values: &[f64]) -> Option<f64> {
+    values.iter().copied().reduce(f64::max)
+}
+
+#[derive(Default)]
+struct SeriesAgg {
+    group: String,
+    sum_avg: f64,
+    samples: u32,
+    max_p95: f64,
+}
+
+/// `--record`: amostra o profiler a N Hz e devolve uma série JSONL + resumo.
+/// É o caminho de profiling contínuo para um agente: sem screenshots e sem
+/// depender da UI.
+fn record_profile(
+    client: &BridgeClient,
+    seconds: f64,
+    hz: f32,
+    output: Option<&Path>,
+    top: usize,
+    json: bool,
+) -> Result<()> {
+    let seconds = seconds.max(0.1);
+    let hz = f64::from(hz.max(0.1));
+    let period = Duration::from_secs_f64(1.0 / hz);
+    let started = Instant::now();
+    let mut series: Vec<Value> = Vec::new();
+    let mut frame_avgs: Vec<f64> = Vec::new();
+    let mut frame_maxs: Vec<f64> = Vec::new();
+    let mut fps_values: Vec<f64> = Vec::new();
+    let mut rss_last = 0.0f64;
+    let mut rss_peak = 0.0f64;
+    let mut hitch_first: Option<u64> = None;
+    let mut hitch_total = 0u64;
+    let mut hitch_threshold = 50.0f64;
+    let mut last_hitches = Value::Null;
+    let mut systems: BTreeMap<String, SeriesAgg> = BTreeMap::new();
+
+    while started.elapsed().as_secs_f64() < seconds {
+        let tick = Instant::now();
+        let prof = client.prof()?;
+        let t = started.elapsed().as_secs_f64();
+        series.push(profile_sample(t, &prof, top));
+
+        if let Some(value) = prof.get("frame_ms_avg").and_then(Value::as_f64) {
+            frame_avgs.push(value);
+        }
+        if let Some(value) = prof
+            .get("frame_ms")
+            .and_then(|frame| frame.get("max"))
+            .and_then(Value::as_f64)
+        {
+            frame_maxs.push(value);
+        }
+        if let Some(value) = prof.get("fps").and_then(Value::as_f64) {
+            fps_values.push(value);
+        }
+        if let Some(rss) = prof
+            .get("memory")
+            .and_then(|memory| memory.get("rss_mb"))
+            .and_then(Value::as_f64)
+        {
+            rss_last = rss;
+            rss_peak = rss_peak.max(rss);
+        }
+        if let Some(hitches) = prof.get("hitches") {
+            if let Some(count) = hitches.get("count").and_then(Value::as_u64) {
+                hitch_first.get_or_insert(count);
+                hitch_total = count;
+            }
+            if let Some(threshold) = hitches.get("threshold_ms").and_then(Value::as_f64) {
+                hitch_threshold = threshold;
+            }
+            if let Some(recent) = hitches.get("recent") {
+                last_hitches = recent.clone();
+            }
+        }
+        if let Some(rows) = prof.get("systems").and_then(Value::as_array) {
+            for row in rows {
+                let name = row
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
+                let agg = systems.entry(name).or_insert_with(|| SeriesAgg {
+                    group: row
+                        .get("group")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                    ..Default::default()
+                });
+                agg.sum_avg += row.get("avg_ms").and_then(Value::as_f64).unwrap_or(0.0);
+                agg.samples += 1;
+                agg.max_p95 = agg.max_p95.max(
+                    row.get("p95_ms")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0),
+                );
+            }
+        }
+
+        let elapsed = tick.elapsed();
+        if elapsed < period {
+            std::thread::sleep(period - elapsed);
+        }
+    }
+
+    if let Some(path) = output {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        for line in &series {
+            serde_json::to_writer(&mut out, line)?;
+            out.write_all(b"\n")?;
+        }
+        out.flush()?;
+    }
+
+    let mut rows: Vec<(String, SeriesAgg)> = systems.into_iter().collect();
+    rows.sort_by(|a, b| {
+        let avg = |agg: &SeriesAgg| agg.sum_avg / f64::from(agg.samples.max(1));
+        avg(&b.1).total_cmp(&avg(&a.1))
+    });
+    let top_systems: Vec<Value> = rows
+        .iter()
+        .take(15)
+        .map(|(name, agg)| {
+            json!({
+                "name": name,
+                "group": agg.group,
+                "avg_ms": round3(agg.sum_avg / f64::from(agg.samples.max(1))),
+                "max_p95_ms": round3(agg.max_p95),
+                "samples": agg.samples,
+            })
+        })
+        .collect();
+
+    let summary = json!({
+        "samples": series.len(),
+        "seconds": round3(started.elapsed().as_secs_f64()),
+        "hz": hz,
+        "fps": { "avg": mean(&fps_values), "min": min_of(&fps_values), "max": max_of(&fps_values) },
+        "frame_ms": { "avg": mean(&frame_avgs), "worst": max_of(&frame_maxs) },
+        "hitches": {
+            "new": hitch_first.map(|first| hitch_total.saturating_sub(first)).unwrap_or(0),
+            "total": hitch_total,
+            "threshold_ms": hitch_threshold,
+            "recent": last_hitches,
+        },
+        "memory": {
+            "rss_last_mb": (rss_last > 0.0).then_some(round3(rss_last)),
+            "rss_peak_mb": (rss_peak > 0.0).then_some(round3(rss_peak)),
+        },
+        "top_systems": top_systems,
+        "series_file": output.map(|path| path.display().to_string()),
+    });
+
+    if json {
+        if output.is_some() {
+            println!("{}", json!({ "summary": summary }));
+        } else {
+            println!("{}", json!({ "series": series, "summary": summary }));
+        }
+    } else {
+        if output.is_none() {
+            for line in &series {
+                println!("{}", serde_json::to_string(line)?);
+            }
+        }
+        if let Some(path) = output {
+            println!("série → {}", path.display());
+        }
+        print_record_summary(&summary);
+    }
+    Ok(())
+}
+
+fn profile_sample(t: f64, prof: &Value, top: usize) -> Value {
+    let frame = &prof["frame_ms"];
+    let systems: Vec<Value> = prof["systems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(top)
+        .map(|row| {
+            json!({
+                "name": row["name"],
+                "group": row["group"],
+                "avg_ms": row["avg_ms"],
+                "p95_ms": row["p95_ms"],
+                "max_ms": row["max_ms"],
+            })
+        })
+        .collect();
+    let last_hitch = prof["hitches"]["recent"]
+        .as_array()
+        .and_then(|recent| recent.last())
+        .cloned()
+        .unwrap_or(Value::Null);
+    // Passes do render graph (só com VIBER_PROF_GPU=1) — top 8 por peso.
+    let gpu: Vec<Value> = prof["gpu"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(|row| {
+            json!({
+                "name": row["name"],
+                "gpu_ms": row["gpu_ms"],
+                "cpu_ms": row["cpu_ms"],
+            })
+        })
+        .collect();
+    json!({
+        "t": round3(t),
+        "fps": prof["fps"],
+        "frame_ms": { "avg": frame["avg"], "p95": frame["p95"], "max": frame["max"] },
+        "entities": prof["entities"],
+        "scripts": prof["scripts"],
+        "particles": prof["particle_emitters"],
+        "chunks": prof["terrain_chunks"],
+        "hitches": {
+            "count": prof["hitches"]["count"],
+            "threshold_ms": prof["hitches"]["threshold_ms"],
+            "last": last_hitch,
+        },
+        "memory": prof["memory"],
+        "render_lod": prof["render_lod"],
+        "gpu": gpu,
+        "top_systems": systems,
+    })
+}
+
+// ------------------------------------------------ impressão do profiler
+
+/// Resumo de um `prof --record` para humanos.
+fn print_record_summary(summary: &Value) {
+    let num = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let frame = &summary["frame_ms"];
+    let fps = &summary["fps"];
+    println!(
+        "— {} amostras em {:.1}s a {:.1} Hz",
+        summary["samples"].as_u64().unwrap_or(0),
+        num(summary, "seconds"),
+        summary["hz"].as_f64().unwrap_or(0.0),
+    );
+    println!(
+        "frame médio {:.1} ms · pior {:.1} ms · fps médio {:.1} (pior {:.1} / melhor {:.1})",
+        num(frame, "avg"),
+        num(frame, "worst"),
+        num(fps, "avg"),
+        num(fps, "min"),
+        num(fps, "max"),
+    );
+    let hitches = &summary["hitches"];
+    println!(
+        "hitches novos {} (total {}, limiar ≥ {:.0} ms)",
+        hitches["new"].as_u64().unwrap_or(0),
+        hitches["total"].as_u64().unwrap_or(0),
+        num(hitches, "threshold_ms"),
+    );
+    if let Some(rss) = summary["memory"]["rss_last_mb"].as_f64() {
+        println!(
+            "memória rss {rss:.0} MiB (pico {:.0} MiB)",
+            summary["memory"]["rss_peak_mb"].as_f64().unwrap_or(rss)
+        );
+    }
+    println!("sistemas mais caros (média das amostras):");
+    for row in summary["top_systems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(10)
+    {
+        println!(
+            "  {:<38} {:>7.2} ms  p95 máx {:>7.2}  {}",
+            row["name"].as_str().unwrap_or("?"),
+            num(row, "avg_ms"),
+            num(row, "max_p95_ms"),
+            row["group"].as_str().unwrap_or("?"),
+        );
+    }
+}
+
+/// Estado do gravador de traces (`trace --status`).
+fn print_trace_status(status: &Value) {
+    if status["recording"].as_bool() == Some(true) {
+        println!(
+            "● a gravar {:.1}/{:.0}s · {} frames · {} eventos · {} dropped",
+            status["elapsed_s"].as_f64().unwrap_or(0.0),
+            status["max_seconds"].as_f64().unwrap_or(0.0),
+            status["frames"].as_u64().unwrap_or(0),
+            status["events"].as_u64().unwrap_or(0),
+            status["dropped"].as_u64().unwrap_or(0),
+        );
+        return;
+    }
+    if status["available"].as_bool() == Some(true) {
+        if let Some(last) = status.get("last") {
+            print_trace_analysis(last);
+        }
+    } else {
+        println!("sem trace gravado — `viber debug trace` grava e exporta");
+    }
+}
+
+/// Análise do último trace (top sistemas, percentis, hitches, contadores).
+fn print_trace_analysis(last: &Value) {
+    let num = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let frame = &last["frame_ms"];
+    println!(
+        "  frame  avg {:.1} · p50 {:.1} · p95 {:.1} · p99 {:.1} · max {:.1} ms",
+        num(frame, "avg"),
+        num(frame, "p50"),
+        num(frame, "p95"),
+        num(frame, "p99"),
+        num(frame, "max"),
+    );
+    let budget = &last["over_budget"];
+    println!(
+        "  budget 60fps: {} >16.7 · 30fps: {} >33.3 · {} >50 ms",
+        budget["16_7_ms"].as_u64().unwrap_or(0),
+        budget["33_3_ms"].as_u64().unwrap_or(0),
+        budget["50_ms"].as_u64().unwrap_or(0),
+    );
+    println!(
+        "  frames {} · eventos {} · marcas {} · {:.1}s{}",
+        last["frames"].as_u64().unwrap_or(0),
+        last["events"].as_u64().unwrap_or(0),
+        last["marks"].as_u64().unwrap_or(0),
+        num(last, "duration_s"),
+        if last["truncated"].as_bool() == Some(true) {
+            " · TRUNCADO"
+        } else {
+            ""
+        },
+    );
+    if let Some(counters) = last["counters"].as_object() {
+        for (key, value) in counters {
+            println!("  {key}: {} → {}", value["first"], value["last"]);
+        }
+    }
+    if let Some(rows) = last["top_systems"].as_array() {
+        println!("  top sistemas (total · max · calls · avg · % wall):");
+        for row in rows.iter().take(12) {
+            println!(
+                "    {:<34} {:>8.2} ms  max {:>6.2}  {:>6} calls  avg {:>5.2}  {:>5.1}%",
+                row["name"].as_str().unwrap_or("?"),
+                num(row, "total_ms"),
+                num(row, "max_ms"),
+                row["calls"].as_u64().unwrap_or(0),
+                num(row, "avg_ms"),
+                num(row, "pct_wall"),
+            );
+        }
+    }
+    if let Some(hitches) = last["hitches"]["recent"].as_array() {
+        for hitch in hitches.iter().take(5) {
+            println!(
+                "  hitch #{} {:.1} ms — topo:",
+                hitch["frame"].as_u64().unwrap_or(0),
+                num(hitch, "ms"),
+            );
+            for row in hitch["top"].as_array().into_iter().flatten().take(3) {
+                println!(
+                    "    {:<34} {:>6.2} ms ({:.0}%)",
+                    row["name"].as_str().unwrap_or("?"),
+                    num(row, "ms"),
+                    num(row, "pct"),
+                );
+            }
+        }
+    }
+}
+
+fn print_hitch_summary(value: &Value) {
+    let Some(hitches) = value.get("hitches").filter(|hitches| hitches.is_object()) else {
+        return;
+    };
+    let count = hitches["count"].as_u64().unwrap_or(0);
+    let threshold = hitches["threshold_ms"].as_f64().unwrap_or(50.0);
+    let recent = hitches["recent"].as_array().cloned().unwrap_or_default();
+    println!(
+        "hitches {count} (limiar ≥ {threshold:.0} ms; {} no ring)",
+        recent.len()
+    );
+    for hitch in recent.iter().rev().take(8) {
+        println!(
+            "  #{} {:.1} ms @{:.0}s",
+            hitch["frame"].as_u64().unwrap_or(0),
+            hitch["frame_ms"].as_f64().unwrap_or(0.0),
+            hitch["uptime_s"].as_f64().unwrap_or(0.0),
+        );
+        for row in hitch["top"].as_array().into_iter().flatten().take(5) {
+            println!(
+                "    {:<34} {:>6.2} ms ({:.0}%)",
+                row["name"].as_str().unwrap_or("?"),
+                row["ms"].as_f64().unwrap_or(0.0),
+                row["pct"].as_f64().unwrap_or(0.0),
+            );
+        }
+    }
+}
+
+fn print_memory_summary(value: &Value) {
+    let Some(memory) = value.get("memory").filter(|memory| memory.is_object()) else {
+        return;
+    };
+    let Some(rss) = memory["rss_mb"].as_f64() else {
+        return;
+    };
+    let peak = memory["peak_rss_mb"].as_f64();
+    let threads = memory["threads"].as_u64();
+    let mut line = format!("memória rss {rss:.0} MiB");
+    if let Some(peak) = peak {
+        line.push_str(&format!(" (pico {peak:.0})"));
+    }
+    if let Some(threads) = threads {
+        line.push_str(&format!(" · {threads} threads"));
+    }
+    println!("{line}");
+}
+
+fn print_trace_summary(value: &Value) {
+    let Some(trace) = value.get("trace").filter(|trace| trace.is_object()) else {
+        return;
+    };
+    if trace["recording"].as_bool() == Some(true) {
+        println!(
+            "trace ● {:.1}s · {} frames · {} eventos",
+            trace["elapsed_s"].as_f64().unwrap_or(0.0),
+            trace["frames"].as_u64().unwrap_or(0),
+            trace["events"].as_u64().unwrap_or(0),
+        );
+        return;
+    }
+    if let Some(last) = trace.get("last").filter(|last| last.is_object()) {
+        println!(
+            "trace parado · {} frames · {} eventos · {:.1}s",
+            last["frames"].as_u64().unwrap_or(0),
+            last["events"].as_u64().unwrap_or(0),
+            last["duration_s"].as_f64().unwrap_or(0.0),
+        );
+        if let Some(top) = last["top_systems"].as_array().and_then(|rows| rows.first()) {
+            println!(
+                "  top: {} {:.1} ms (max {:.1})",
+                top["name"].as_str().unwrap_or("?"),
+                top["total_ms"].as_f64().unwrap_or(0.0),
+                top["max_ms"].as_f64().unwrap_or(0.0),
+            );
+        }
+    }
+}
+
+fn print_frames_tab(value: &Value) {
+    let num = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let frame = &value["frame_ms"];
+    println!(
+        "frame avg {:.1} · min {:.1} · p95 {:.1} · max {:.1} ms  ({} frames na janela)",
+        num(frame, "avg"),
+        num(frame, "min"),
+        num(frame, "p95"),
+        num(frame, "max"),
+        value["window_frames"].as_u64().unwrap_or(0),
+    );
+    print_hitch_summary(value);
+    println!("topo do frame (média · p95 · grupo):");
+    for row in value["top"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<38} {:>7.2} ms  p95 {:>7.2}  {}",
+            row["name"].as_str().unwrap_or("?"),
+            num(row, "avg_ms"),
+            num(row, "p95_ms"),
+            row["group"].as_str().unwrap_or("?"),
+        );
+    }
+    print_memory_summary(value);
+    print_trace_summary(value);
 }
 
 /// Impressão humana por tab (`viber debug prof --tab mundo` etc.).
@@ -2064,6 +2637,7 @@ fn print_prof_tab(tab: &str, value: &serde_json::Value) {
             }
         }
         "systems" => print_prof(value),
+        "frames" => print_frames_tab(value),
         _ => println!("{value:#}"),
     }
 }
@@ -2084,12 +2658,22 @@ fn print_prof(prof: &serde_json::Value) {
         .map(|v| format!("{v:.1} ms"))
         .unwrap_or_else(|| "—".into());
     println!("FPS {fps}   frame {frame}");
+    if let Some(p95) = prof
+        .get("frame_ms")
+        .and_then(|f| f.get("p95"))
+        .and_then(serde_json::Value::as_f64)
+    {
+        println!("p95 (janela ~3 s): {p95:.1} ms");
+    }
     println!(
         "entidades {}   partículas {}   terreno {}",
         count("entities"),
         count("particle_emitters"),
         count("terrain_chunks")
     );
+    print_hitch_summary(prof);
+    print_memory_summary(prof);
+    print_trace_summary(prof);
     let scripts = prof.get("scripts");
     let total = scripts
         .and_then(|s| s.get("total"))
@@ -2413,9 +2997,43 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             interval_ms,
             tab,
             export,
+            hitches,
+            hitch_ms,
+            record,
+            hz,
+            output,
+            top,
         } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
+            if let Some(ms) = hitch_ms {
+                let config = client.prof_config(Some(ms))?;
+                if !json {
+                    println!(
+                        "hitch ≥ {:.0} ms",
+                        config["hitch_ms"].as_f64().unwrap_or(f64::from(ms))
+                    );
+                }
+            }
+            if let Some(seconds) = record {
+                record_profile(&client, seconds, hz, output.as_deref(), top, json)?;
+                return Ok(());
+            }
+            if hitches {
+                let prof = client.prof()?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "hitches": prof.get("hitches").cloned().unwrap_or(Value::Null),
+                            "frame_ms": prof.get("frame_ms").cloned().unwrap_or(Value::Null),
+                        })
+                    );
+                } else {
+                    print_hitch_summary(&prof);
+                }
+                return Ok(());
+            }
             if let Some(path) = export {
                 let path = (!path.is_empty()).then(|| PathBuf::from(&path));
                 let result = client.prof_export(path.as_deref())?;
@@ -2445,6 +3063,116 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
                 }
             } else {
                 print_prof_samples(&client, samples, interval_ms, json)?;
+            }
+        }
+        DebugCommand::Trace {
+            seconds,
+            output,
+            format,
+            max_events,
+            stop,
+            status,
+            json,
+            port,
+            world,
+        } => {
+            let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
+            let client = BridgeClient::localhost(port);
+            let format = normalize_trace_format(&format)?;
+            if status {
+                let current = client.trace_status()?;
+                if json {
+                    println!("{current:#}");
+                } else {
+                    print_trace_status(&current);
+                }
+                return Ok(());
+            }
+            let max_events = max_events
+                .unwrap_or(viber::profiler::trace::DEFAULT_MAX_EVENTS)
+                .clamp(1, 10_000_000);
+            if !stop {
+                let started = client.trace_start(seconds.max(0.0), max_events)?;
+                if seconds <= 0.0 {
+                    if json {
+                        println!("{started:#}");
+                    } else {
+                        println!(
+                            "● trace iniciado (manual, limite {} eventos)",
+                            started["max_events"].as_u64().unwrap_or(0)
+                        );
+                        println!(
+                            "  marca: `viber debug mark \"…\"` · fecha+exporta: `viber debug trace --stop -o trace.json`"
+                        );
+                    }
+                    return Ok(());
+                }
+                if !json {
+                    println!(
+                        "● a gravar trace {seconds:.1}s (limite {} eventos)…",
+                        started["max_events"].as_u64().unwrap_or(0)
+                    );
+                }
+                loop {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let current = client.trace_status()?;
+                    if current["recording"].as_bool() != Some(true) {
+                        break;
+                    }
+                }
+            } else {
+                // `--stop`: fecha a gravação manual antes de exportar.
+                let stopped = client.trace_stop()?;
+                if stopped["available"].as_bool() != Some(true) {
+                    bail!("nenhum trace gravado — começa com `viber debug trace --seconds 0`");
+                }
+                if !json {
+                    println!("● trace fechado");
+                }
+            }
+            let result = client.trace_export(output.as_deref(), format)?;
+            let final_status = client.trace_status()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "export": result,
+                        "summary": final_status.get("last").cloned().unwrap_or(Value::Null),
+                    })
+                );
+                return Ok(());
+            }
+            println!(
+                "✓ trace → {} ({} frames, {} eventos, {} bytes{})",
+                result["path"].as_str().unwrap_or("?"),
+                result["frames"].as_u64().unwrap_or(0),
+                result["events"].as_u64().unwrap_or(0),
+                result["bytes"].as_u64().unwrap_or(0),
+                if result["truncated"].as_bool() == Some(true) {
+                    " — TRUNCADO"
+                } else {
+                    ""
+                },
+            );
+            if let Some(last) = final_status.get("last") {
+                print_trace_analysis(last);
+            }
+            println!(
+                "  abre com `chrome://tracing` ou https://ui.perfetto.dev (formato {format})"
+            );
+        }
+        DebugCommand::Mark {
+            label,
+            port,
+            world,
+        } => {
+            let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
+            let client = BridgeClient::localhost(port);
+            let result = client.prof_mark(&label)?;
+            if result["ok"].as_bool() == Some(true) {
+                println!("✓ marca `{label}` no frame {}", result["frame"]);
+            } else {
+                println!("sem trace a gravar — a marca não foi registada");
             }
         }
         DebugCommand::Key {

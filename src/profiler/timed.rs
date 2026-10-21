@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -175,6 +175,107 @@ static SYSTEM_RINGS: Mutex<BTreeMap<&'static str, (Group, Ring)>> = Mutex::new(B
 static SCRIPT_RINGS: Mutex<BTreeMap<String, Ring>> = Mutex::new(BTreeMap::new());
 static FROZEN: AtomicBool = AtomicBool::new(false);
 
+/// Frame actual (incrementado no `First`; lido pelos registos para atribuir
+/// cada amostra ao frame em que correu).
+static FRAME_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Uma entrada do acumulador por frame.
+#[derive(Debug, Clone, Copy)]
+struct AccEntry {
+    group: Group,
+    ms: f32,
+    calls: u32,
+}
+
+/// Soma por sistema/script DENTRO do frame actual. O anel de 120 amostras diz
+/// a média; isto diz o que compôs o frame que engasgou. O reset acontece no
+/// `First` (ver [`begin_frame`]).
+struct FrameAccum {
+    frame: u64,
+    systems: BTreeMap<&'static str, AccEntry>,
+    scripts: BTreeMap<String, AccEntry>,
+}
+
+impl FrameAccum {
+    const fn new() -> Self {
+        Self {
+            frame: 0,
+            systems: BTreeMap::new(),
+            scripts: BTreeMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.systems.clear();
+        self.scripts.clear();
+    }
+}
+
+static FRAME_ACCUM: Mutex<FrameAccum> = Mutex::new(FrameAccum::new());
+
+/// Abre um frame: limpa o acumulador e publica o id para os registos (no
+/// `First`, antes dos sistemas instrumentados).
+pub fn begin_frame(frame: u64) {
+    FRAME_ID.store(frame, Ordering::Relaxed);
+    if let Ok(mut acc) = FRAME_ACCUM.lock() {
+        acc.frame = frame;
+        acc.clear();
+    }
+}
+
+/// Id do frame actual (`trace::mark` e o export usam-no).
+pub fn current_frame() -> u64 {
+    FRAME_ID.load(Ordering::Relaxed)
+}
+
+/// Uma linha do "topo do frame": quanto um sistema/script somou no frame
+/// actual. `pct` é relativo ao frame medido (não à média da janela).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FrameHotspot {
+    pub name: String,
+    pub group: &'static str,
+    pub ms: f32,
+    pub calls: u32,
+    pub pct: f32,
+}
+
+/// Topo do frame actual (sistemas + scripts, por ms desc). Usado pelo
+/// detector de hitches e pela aba FRAMES.
+pub fn frame_hotspots(limit: usize, frame_ms: f32) -> Vec<FrameHotspot> {
+    let Ok(acc) = FRAME_ACCUM.lock() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<FrameHotspot> = acc
+        .systems
+        .iter()
+        .map(|(&name, entry)| FrameHotspot {
+            name: name.to_string(),
+            group: entry.group.as_str(),
+            ms: entry.ms,
+            calls: entry.calls,
+            pct: if frame_ms > 0.0 {
+                entry.ms / frame_ms * 100.0
+            } else {
+                0.0
+            },
+        })
+        .chain(acc.scripts.iter().map(|(name, entry)| FrameHotspot {
+            name: name.clone(),
+            group: Group::Scripts.as_str(),
+            ms: entry.ms,
+            calls: entry.calls,
+            pct: if frame_ms > 0.0 {
+                entry.ms / frame_ms * 100.0
+            } else {
+                0.0
+            },
+        }))
+        .collect();
+    rows.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+    rows.truncate(limit);
+    rows
+}
+
 /// Congela a aquisição (aneis ficam estáveis para leitura/exportação).
 pub fn set_frozen(frozen: bool) {
     FROZEN.store(frozen, Ordering::Relaxed);
@@ -186,7 +287,13 @@ pub fn is_frozen() -> bool {
 
 /// Registra a duração de um sistema estático (chamado por [`timed`]).
 pub fn record_system(group: Group, key: &'static str, ms: f32) {
-    if is_frozen() || !ms.is_finite() {
+    if !ms.is_finite() {
+        return;
+    }
+    // O trace é independente do freeze: quem manda gravar quer o trace mesmo
+    // com a tabela de médias congelada.
+    super::trace::record_system_event(group, key, ms);
+    if is_frozen() {
         return;
     }
     if let Ok(mut map) = SYSTEM_RINGS.lock() {
@@ -195,22 +302,56 @@ pub fn record_system(group: Group, key: &'static str, ms: f32) {
             .1
             .push(ms);
     }
+    let frame = current_frame();
+    if let Ok(mut acc) = FRAME_ACCUM.lock() {
+        if acc.frame == frame {
+            let entry = acc.systems.entry(key).or_insert(AccEntry {
+                group,
+                ms: 0.0,
+                calls: 0,
+            });
+            entry.ms += ms;
+            entry.calls += 1;
+        }
+    }
 }
 
 /// Registra um escopo dinâmico `script/<caminho>` — a secção "Entity scripts
 /// (per file)" do profiler. Zero alloc quando o caminho já é conhecido.
 pub fn record_script(path: &str, ms: f32) {
-    if is_frozen() || !ms.is_finite() {
+    if !ms.is_finite() {
+        return;
+    }
+    super::trace::record_script_event(path, ms);
+    if is_frozen() {
         return;
     }
     if let Ok(mut map) = SCRIPT_RINGS.lock() {
         if let Some(ring) = map.get_mut(path) {
             ring.push(ms);
-            return;
+        } else {
+            let mut ring = Ring::default();
+            ring.push(ms);
+            map.insert(path.to_string(), ring);
         }
-        let mut ring = Ring::default();
-        ring.push(ms);
-        map.insert(path.to_string(), ring);
+    }
+    let frame = current_frame();
+    if let Ok(mut acc) = FRAME_ACCUM.lock() {
+        if acc.frame == frame {
+            if let Some(entry) = acc.scripts.get_mut(path) {
+                entry.ms += ms;
+                entry.calls += 1;
+            } else {
+                acc.scripts.insert(
+                    path.to_string(),
+                    AccEntry {
+                        group: Group::Scripts,
+                        ms,
+                        calls: 1,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -312,6 +453,9 @@ pub fn reset_timings() {
     }
     if let Ok(mut map) = SCRIPT_RINGS.lock() {
         map.clear();
+    }
+    if let Ok(mut acc) = FRAME_ACCUM.lock() {
+        acc.clear();
     }
 }
 
@@ -745,13 +889,15 @@ pub fn physics_anchors(app: &mut App, schedule: impl bevy::ecs::schedule::Schedu
         .add_systems(schedule, physics_step_end.after(PhysicsSet::StepSimulation));
 }
 
+/// Lock partilhado pelos testes que tocam nos globais (anéis, acumulador,
+/// freeze). `script.rs` também o usa: `reset` limpa o acumulador por frame e
+/// não pode correr a meio de um teste de atribuição.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Os registos vivem em globais partilhados — os testes que os tocam
-    /// correm em série (cargo test lança testes em threads paralelas).
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn ring_with(ms: &[f32]) -> Ring {
         let mut ring = Ring::default();
@@ -878,5 +1024,45 @@ mod tests {
         reset_timings();
         assert!(systems_snapshot(16.0).is_empty());
         assert!(scripts_snapshot(16.0).is_empty());
+    }
+
+    #[test]
+    fn test_frame_hotspots_attribute_the_current_frame() {
+        let _guard = TEST_LOCK.lock();
+        reset_timings();
+        set_frozen(false);
+        begin_frame(11);
+        record_system(Group::Combat, "test_hot_a", 2.0);
+        record_system(Group::Combat, "test_hot_a", 3.0);
+        record_system(Group::Hud, "test_hot_b", 1.0);
+        record_script("test-hot.lua", 0.5);
+
+        let rows = frame_hotspots(8, 10.0);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].name, "test_hot_a");
+        assert!((rows[0].ms - 5.0).abs() < 1e-4);
+        assert_eq!(rows[0].calls, 2);
+        assert!((rows[0].pct - 50.0).abs() < 1e-4);
+        assert!(rows.iter().any(|row| {
+            row.name == "test-hot.lua" && row.group == "scripts" && row.calls == 1
+        }));
+
+        // O frame seguinte começa limpo — a atribuição não atravessa frames.
+        begin_frame(12);
+        assert!(frame_hotspots(8, 10.0).is_empty());
+    }
+
+    #[test]
+    fn test_frozen_still_records_trace_hook_but_not_frame_accum() {
+        let _guard = TEST_LOCK.lock();
+        reset_timings();
+        set_frozen(false);
+        begin_frame(20);
+        set_frozen(true);
+        record_system(Group::Fx, "test_frozen_frame_sys", 1.0);
+        // O acumulador por frame segue o freeze (a tabela de médias é que é
+        // estabilizada para leitura).
+        assert!(frame_hotspots(8, 10.0).is_empty());
+        set_frozen(false);
     }
 }

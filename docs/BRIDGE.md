@@ -28,7 +28,9 @@ bridge real em loopback, uma porta por teste.
 Métodos BRP: `viber.ping` (devolve `pid`+`world`), `viber.screenshot` +
 `viber.screenshot_status` (request/poll; o PNG só é "captured" quando o
 ficheiro tem IEND), `viber.burst` + `viber.burst_status`, `viber.tree`,
-`viber.logs`, `viber.profiler`/`.tab`/`.export`/`.extra_toggle`, `viber.lua`,
+`viber.logs`, `viber.profiler`/`.tab`/`.export`/`.extra_toggle`/`.config`
+(`{"hitch_ms"}`)/`.trace_start`/`.trace_stop`/`.trace_status`/
+`.trace_export`/`.mark`, `viber.lua`,
 `viber.input.key/text/click/move` (`click` com `state: click|press|release` — o arrasto do `viber debug drag`; cursor e botões saem também como `WindowEvent`, que é o que o `bevy_picking` lê: botões feathers, linhas de árvore, splitters), `viber.raycast`, `viber.camera.orbit/pan/
 zoom/look_at/pose` (câmara livre de editor — só com `viber run --camera free`;
 fora do modo respondem com o erro claro "camera mode is not free"), a família

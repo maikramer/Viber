@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::{Collider, RigidBody, Sensor, Sleeping};
 
 use crate::ai::EnemyCreature;
-use crate::combat::Corpse;
+use crate::corpse::Corpse;
 use crate::luau::{LuaScriptRef, ScriptActivation};
 use crate::particles::ParticleEmitter;
 use crate::player::Player;
