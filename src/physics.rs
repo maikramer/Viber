@@ -451,13 +451,18 @@ impl bevy::app::Plugin for PhysicsPlugin {
         // O wireframe existe sempre; `enabled` segue `debug` (jogo:
         // `VIBER_PHYSICS_DEBUG`). O editor liga-o ao vivo via
         // [`ColliderDebugToggle`] sem precisar da env.
-        let debug_render = RapierDebugRenderPlugin::default();
-        app.add_plugins(if self.debug {
-            debug_render
-        } else {
-            debug_render.disabled()
-        })
-        .add_systems(bevy::app::PostUpdate, apply_collider_debug_toggle);
+        // Nos testes headless não há `GizmoPlugin`: o debug render (mesmo
+        // desligado) panica à procura do store. O jogo e o editor trazem os
+        // gizmos pelos DefaultPlugins.
+        if self.debug || !cfg!(test) {
+            let debug_render = RapierDebugRenderPlugin::default();
+            app.add_plugins(if self.debug {
+                debug_render
+            } else {
+                debug_render.disabled()
+            });
+        }
+        app.add_systems(bevy::app::PostUpdate, apply_collider_debug_toggle);
     }
 }
 
@@ -469,9 +474,9 @@ pub struct ColliderDebugToggle(pub bool);
 
 fn apply_collider_debug_toggle(
     toggle: Option<Res<ColliderDebugToggle>>,
-    mut ctx: ResMut<DebugRenderContext>,
+    mut ctx: Option<ResMut<DebugRenderContext>>,
 ) {
-    if let Some(toggle) = toggle.as_ref() {
+    if let (Some(toggle), Some(ctx)) = (toggle.as_ref(), ctx.as_mut()) {
         ctx.enabled = toggle.0;
     }
 }
