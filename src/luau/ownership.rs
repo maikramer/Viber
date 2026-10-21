@@ -31,7 +31,15 @@ pub const SYSTEM_LOCOMOTION: &str = "locomotion";
 
 /// Sistemas reclamáveis — a validação à fila usa esta lista (typo vira erro
 /// de script em vez de no-op silencioso).
-pub const KNOWN_SYSTEMS: &[&str] = &[SYSTEM_LOCOMOTION];
+pub const KNOWN_SYSTEMS: &[&str] = &[
+    SYSTEM_DIALOGUE,
+    SYSTEM_ABILITIES,
+    SYSTEM_BOMB,
+    SYSTEM_GUARD,
+    SYSTEM_HOTBAR,
+    SYSTEM_HARVEST,
+    SYSTEM_LOCOMOTION,
+];
 
 /// Sistemas reclamados por scripts neste mundo.
 #[derive(Debug, Default, Resource)]
