@@ -265,6 +265,13 @@ fn hotbar_use_system(
     let Ok((mut health, effects)) = players.single_mut() else {
         return;
     };
+    if !potion {
+        let venom = effects.as_ref().map(|e| e.venom).unwrap_or(0.0);
+        if venom <= 0.0 {
+            toasts.write(ScriptToast("Antídoto: nada a neutralizar".into()));
+            return;
+        }
+    }
     if !vault.item_take(item) {
         toasts.write(ScriptToast(format!("{label}: sem stock no inventário")));
         *cooldown = HOTBAR_COOLDOWN;
@@ -286,12 +293,8 @@ fn hotbar_use_system(
             healed.round() as i32
         )));
     } else if let Some(mut effects) = effects {
-        if effects.venom > 0.0 {
-            effects.venom = 0.0;
-            toasts.write(ScriptToast("Antídoto: veneno neutralizado".into()));
-        } else {
-            toasts.write(ScriptToast("Antídoto: nada a neutralizar".into()));
-        }
+        effects.venom = 0.0;
+        toasts.write(ScriptToast("Antídoto: veneno neutralizado".into()));
     }
 }
 
