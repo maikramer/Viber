@@ -100,8 +100,7 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub events: Option<bevy::ecs::system::ResMut<'w, ScriptEventQueue>>,
     /// Props anexados a ossos (`viber.attach`/`detach`) — consumidos pelo
     /// `AttachmentPlugin` da app completa.
-    pub attachments:
-        Option<bevy::ecs::system::ResMut<'w, crate::attachment::AttachmentRequests>>,
+    pub attachments: Option<bevy::ecs::system::ResMut<'w, crate::attachment::AttachmentRequests>>,
     /// Warn 1× por path com a fila de eventos cheia.
     pub events_dropped: bevy::ecs::system::Local<'s, std::collections::HashSet<String>>,
     /// HP mutável de entidades NÃO-player (`viber.entity_*`). A MESMA query
@@ -158,6 +157,9 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub ui_action_owners: Option<bevy::ecs::system::ResMut<'w, crate::ui::actions::UiActionOwners>>,
     /// Pedido de save/load de script (`viber.save()` / `viber.load()`).
     pub save_request: Option<bevy::ecs::system::ResMut<'w, crate::save::SaveRequest>>,
+    /// Chave e pasta do save para `viber.save_slots()` (metadados no menu).
+    pub save_key: Option<bevy::ecs::system::Res<'w, crate::save::WorldSaveKey>>,
+    pub save_dir: Option<bevy::ecs::system::Res<'w, crate::save::SaveDir>>,
     /// Sistemas nativos reclamados por scripts (`viber.own_system`).
     pub system_owners: Option<bevy::ecs::system::ResMut<'w, super::ownership::ScriptSystemOwners>>,
     /// Sentidos deste frame (`viber.sense` / `on_sense`).
@@ -179,6 +181,8 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub balloon_warned: bevy::ecs::system::Local<'s, bool>,
     /// Recursos de FX das primitivas de script (`viber.burst/ring/shake/…`).
     pub fx: super::fx::ScriptFx<'w>,
+    /// Decals de impacto pedidos por script (`viber.decal`).
+    pub decals: Option<bevy::ecs::system::ResMut<'w, crate::decal_fx::DecalQueue>>,
     /// Fila das edições vivas do terreno (`viber.terrain.*`): o script
     /// enfileira, o `apply_terrain_edits` (PreUpdate seguinte) aplica ao
     /// overlay. `Option` pelas apps mínimas, como o resto.
@@ -193,10 +197,17 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub sound_loops: Option<bevy::ecs::system::ResMut<'w, crate::music::ScriptSoundLoops>>,
     /// Layer de BGM forçada (`viber.music.layer`).
     pub music_layer: Option<bevy::ecs::system::ResMut<'w, crate::music::MusicLayerOverride>>,
+    /// Estado da música de combate (`viber.music.combat`).
+    pub combat_music: Option<bevy::ecs::system::ResMut<'w, crate::music::CombatMusicState>>,
+    /// Ducking de buses (`viber.audio.duck`).
+    pub audio_duck: Option<bevy::ecs::system::ResMut<'w, crate::music::AudioDuck>>,
+    /// Reverb dos buses (`viber.audio.reverb`).
+    pub audio_reverb: Option<bevy::ecs::system::ResMut<'w, crate::music::AudioReverb>>,
     /// Marcas de HUD (`viber.markers`).
     pub markers: Option<bevy::ecs::system::ResMut<'w, crate::hud::markers::HudMarkers>>,
-    /// Tabela de idioma (`locale/<lang>.json`) para `viber.say`/`viber.toast`.
-    pub locale: Option<bevy::ecs::system::Res<'w, crate::locale::Locale>>,
+    /// Tabela de idioma (`locale/<lang>.json`) para `viber.say`/`viber.toast`
+    /// e para a troca em runtime (`viber.locale.set`).
+    pub locale: Option<bevy::ecs::system::ResMut<'w, crate::locale::Locale>>,
     /// Acessibilidade (`viber.a11y`/`viber.a11y_set`).
     pub a11y: Option<bevy::ecs::system::ResMut<'w, crate::a11y::A11y>>,
     /// Listen server / cliente (`viber.net_role`).
@@ -216,6 +227,10 @@ pub struct LuauRuntimeLocals<'w, 's> {
     >,
     /// Velocidade base do herói (`viber.set_player_speed`).
     pub players_speed: Query<'w, 's, &'static mut crate::player::Player, With<Player>>,
+    /// Luz da tocha controlada pelo jogo (`viber.lantern`).
+    pub lantern: Option<bevy::ecs::system::ResMut<'w, crate::ambient::TorchLightOverride>>,
+    /// Rotações aditivas por osso do herói (`viber.bone_offset`).
+    pub bone_offsets: Option<bevy::ecs::system::ResMut<'w, crate::ik::PlayerBoneOffsets>>,
     /// Prompt de mundo publicado por um controller (`viber.prompt`).
     pub ui_prompt: Option<bevy::ecs::system::ResMut<'w, crate::ui::UiPrompt>>,
 }
@@ -281,6 +296,16 @@ pub fn luau_update(
         && ctx.locale_table.is_none()
     {
         ctx.locale_table = Some(std::sync::Arc::new(locale.table.clone()));
+        ctx.locale_lang = Some(locale.lang.clone());
+    }
+    // Chave/pasta do save para `viber.save_slots()` (o path é fixo por run).
+    if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
+        if ctx.world_key.is_none() {
+            ctx.world_key = locals.save_key.as_deref().and_then(|k| k.0.clone());
+        }
+        if ctx.save_dir.is_none() {
+            ctx.save_dir = locals.save_dir.as_deref().and_then(|d| d.0.clone());
+        }
     }
     let (player_pos, mut player_components, player_forward) = match players.single_mut() {
         Ok((p_entity, global, transform, health)) => {
@@ -315,6 +340,44 @@ pub fn luau_update(
         ctx.just_pressed = just_pressed.clone();
         ctx.keys_down = keys_down;
         ctx.keys_released = keys_released;
+        // Relógio, herói e ações do frame, semeados ANTES de qualquer hook:
+        // timers, sinais, contactos e o aggro-chain correm fora do
+        // `run_update`, e sem isto `viber.time()` ficava no instante do último
+        // `on_update` (ou 0 se nenhum script correu) e `viber.after()` agendava
+        // a partir desse instante — o timer disparava logo.
+        ctx.elapsed = elapsed;
+        ctx.dt = dt;
+        ctx.player = player_pos;
+        // Sentidos do frame por entidade: `viber.sense()` resolve pelo
+        // `ctx.entity` de cada hook, sem herdar o pulso de outra entidade.
+        ctx.sense_by_entity = locals
+            .sense
+            .as_deref()
+            .map(|inbox| {
+                inbox
+                    .pulses
+                    .iter()
+                    .map(|(entity, kind)| (entity.to_bits() as i64, kind.as_str().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ctx.action_pressed = locals
+            .actions
+            .as_deref()
+            .map(|state| {
+                [
+                    crate::input_map::Action::Jump,
+                    crate::input_map::Action::Sprint,
+                    crate::input_map::Action::Attack,
+                    crate::input_map::Action::Interact,
+                    crate::input_map::Action::Lock,
+                    crate::input_map::Action::Menu,
+                ]
+                .into_iter()
+                .map(|action| (action.as_str().to_string(), state.pressed(action)))
+                .collect()
+            })
+            .unwrap_or_default();
         match locals.mouse.as_deref() {
             Some(mouse) => {
                 ctx.mouse_pressed = mouse.get_just_pressed().copied().collect();
@@ -390,7 +453,16 @@ pub fn luau_update(
             Some(_) => {}
             None => *locals.surfaces = None,
         }
-        ctx.scene = locals.scene.as_deref().and_then(|s| s.id.clone());
+        let scene_id = locals.scene.as_deref().and_then(|s| s.id.clone());
+        // Troca de cena: o `luau_update` pára no `Swap`/`Settle` (>2 frames) e
+        // os `RemovedComponents<Name>` dos despawns expiram no double-buffer —
+        // sem reseed completo os nomes da cena antiga ficavam PARA SEMPRE no
+        // snapshot (`find`/`nearby`/`entity_position` devolviam entidades
+        // mortas, com a posição de outra cena).
+        if ctx.scene != scene_id {
+            *locals.names_seeded = false;
+        }
+        ctx.scene = scene_id;
         ctx.scene_entry = locals.scene.as_deref().and_then(|s| s.entry.clone());
         if let Some(index) = locals.scene_index.as_ref()
             && (index.is_changed() || ctx.scene_ids.is_empty())
@@ -519,7 +591,7 @@ pub fn luau_update(
             elapsed,
             dt,
             player: player_pos,
-            origin_of: |owner| {
+            origin_of: Box::new(|owner| {
                 scripts
                     .get(owner)
                     .ok()
@@ -528,7 +600,15 @@ pub fn luau_update(
                             .map(GlobalTransform::translation)
                             .or_else(|| transform.map(|t| t.translation))
                     })
-            },
+            }),
+            name_of: Box::new(|owner| locals.entity_names.get(owner).ok().map(Name::to_string)),
+            props_of: Box::new(|owner| {
+                locals
+                    .script_props
+                    .get(owner)
+                    .ok()
+                    .map(|(_, props)| props.0.clone())
+            }),
         },
     );
 
@@ -556,28 +636,11 @@ pub fn luau_update(
             // Nome PRÓPRIO da entidade que vai correr (fora do snapshot com
             // cap — ver `entity_names`).
             ctx.self_name = locals.entity_names.get(entity).ok().map(Name::to_string);
-            ctx.self_props = locals.script_props.get(entity).ok().map(|(_, p)| p.0.clone());
-            ctx.sense = locals
-                .sense
-                .as_deref()
-                .and_then(|inbox| inbox.pulses.get(&entity).map(|kind| kind.as_str().to_string()));
-            ctx.action_pressed = locals
-                .actions
-                .as_deref()
-                .map(|state| {
-                    [
-                        crate::input_map::Action::Jump,
-                        crate::input_map::Action::Sprint,
-                        crate::input_map::Action::Attack,
-                        crate::input_map::Action::Interact,
-                        crate::input_map::Action::Lock,
-                        crate::input_map::Action::Menu,
-                    ]
-                    .into_iter()
-                    .map(|action| (action.as_str().to_string(), state.pressed(action)))
-                    .collect()
-                })
-                .unwrap_or_default();
+            ctx.self_props = locals
+                .script_props
+                .get(entity)
+                .ok()
+                .map(|(_, p)| p.0.clone());
         }
         // Secção "scripts" do profiler: um escopo por ficheiro (igual ao
         // `script/<file>` antigo). record_script auto-gateia em freeze.
@@ -593,8 +656,7 @@ pub fn luau_update(
             && let Ok(text) = host.lua.create_string(kind.as_str())
         {
             let args = mlua::MultiValue::from_vec(vec![mlua::Value::String(text)]);
-            if let Err(error) =
-                host.run_method(entity, &lref.path, origin, "on_sense", args, None)
+            if let Err(error) = host.run_method(entity, &lref.path, origin, "on_sense", args, None)
             {
                 host.warn_once(&lref.path, &error);
             }
@@ -692,7 +754,11 @@ pub fn luau_update(
             if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
                 ctx.interaction_range = interaction.map(|i| i.range);
                 ctx.self_name = locals.entity_names.get(target).ok().map(Name::to_string);
-                ctx.self_props = locals.script_props.get(target).ok().map(|(_, p)| p.0.clone());
+                ctx.self_props = locals
+                    .script_props
+                    .get(target)
+                    .ok()
+                    .map(|(_, p)| p.0.clone());
             }
             match host.run_method(
                 target,
@@ -1025,23 +1091,53 @@ pub fn luau_update(
                 });
             }
             ScriptCommand::SetScale { entity, scale } => {
+                // `scripts` exige `LuaScriptRef` e exclui o herói: sem os
+                // fallbacks, `viber.set_scale` era um no-op silencioso em
+                // props, NPCs sem script e no próprio jogador.
                 if let Ok((_, _, Some(mut transform), _, _, _)) = scripts.get_mut(entity) {
+                    transform.scale = Vec3::splat(scale);
+                } else if player_components
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == entity)
+                {
+                    if let Some((_, Some(transform), _)) = player_components.as_mut() {
+                        transform.scale = Vec3::splat(scale);
+                    }
+                } else if let Ok(mut transform) = locals.poses.get_mut(entity) {
                     transform.scale = Vec3::splat(scale);
                 }
             }
             ScriptCommand::EntitySetMaxHp { entity, max } => {
-                match locals.healths.get_mut(entity) {
-                    Ok((_, mut health, _)) => {
+                // O herói NÃO entra em `externals.healths` (query
+                // `Without<Player>`): o ramo de criação substituía o `Health`
+                // inteiro e um level-up curava-o em vez de só subir o teto.
+                if player_components
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == entity)
+                {
+                    if let Some((_, _, Some(health))) = player_components.as_mut() {
                         health.max = max;
                         health.current = health.current.min(max);
-                    }
-                    Err(_) => {
-                        // Criação: também grava no mapa-sombra (comandos do
-                        // mesmo frame não vêem a query).
+                    } else {
                         commands
                             .entity(entity)
                             .try_insert(crate::vitals::Health { current: max, max });
                         locals.fresh_health.insert(entity, (max, max));
+                    }
+                } else {
+                    match locals.healths.get_mut(entity) {
+                        Ok((_, mut health, _)) => {
+                            health.max = max;
+                            health.current = health.current.min(max);
+                        }
+                        Err(_) => {
+                            // Criação: também grava no mapa-sombra (comandos do
+                            // mesmo frame não vêem a query).
+                            commands
+                                .entity(entity)
+                                .try_insert(crate::vitals::Health { current: max, max });
+                            locals.fresh_health.insert(entity, (max, max));
+                        }
                     }
                 }
             }
@@ -1086,7 +1182,7 @@ pub fn luau_update(
                     }
                 } else if let Some((cur, max)) = locals.fresh_health.get_mut(&entity) {
                     let before = *cur;
-                    let next = (*cur - amount).max(0.0);
+                    let next = (*cur - amount).clamp(0.0, (*max).max(0.0));
                     *cur = next;
                     commands.entity(entity).try_insert(crate::vitals::Health {
                         current: next,
@@ -1136,16 +1232,33 @@ pub fn luau_update(
             ScriptCommand::Prompt { key, label } => {
                 if let Some(prompt) = locals.ui_prompt.as_deref_mut() {
                     if label.trim().is_empty() {
-                        prompt.label.clear();
+                        prompt.clear();
                     } else {
-                        prompt.key = key;
-                        prompt.label = label;
+                        prompt.set_script(key, label);
                     }
                 }
             }
             ScriptCommand::SetPlayerSpeed(mult) => {
                 for mut player in &mut locals.players_speed {
                     player.speed = crate::player::BASE_SPEED * mult;
+                }
+            }
+            ScriptCommand::SetLantern(intensity) => {
+                if let Some(light) = locals.lantern.as_deref_mut() {
+                    light.intensity = if intensity.is_finite() {
+                        intensity.max(0.0)
+                    } else {
+                        0.0
+                    };
+                }
+            }
+            ScriptCommand::SetBoneOffset { bone, rotation } => {
+                if let Some(offsets) = locals.bone_offsets.as_deref_mut() {
+                    if rotation == Quat::IDENTITY {
+                        offsets.clear(&bone);
+                    } else {
+                        offsets.set(&bone, rotation);
+                    }
                 }
             }
             ScriptCommand::Corpse { entity } => {
@@ -1294,6 +1407,17 @@ pub fn luau_update(
                 } else {
                     crate::hud::BALLOON_DURATION
                 };
+                // Fala no balão baixa a música (genérico: qualquer `viber.say`
+                // é diálogo, não um toast de sistema). A voz, quando existir,
+                // fica por cima; o SFX não é tocado.
+                if let Some(duck) = locals.audio_duck.as_deref_mut() {
+                    duck.apply(
+                        crate::music::AudioBus::Music,
+                        0.35,
+                        duration + 0.5,
+                        time.elapsed_secs_f64(),
+                    );
+                }
                 let shown = crate::dialogue::show_balloon(
                     &mut locals.balloons,
                     &mut locals.balloon_texts,
@@ -1309,12 +1433,40 @@ pub fn luau_update(
             ScriptCommand::SaveNow => {
                 if let Some(request) = locals.save_request.as_deref_mut() {
                     request.save = true;
+                    request.slot = None;
                 }
             }
             ScriptCommand::LoadNow => {
                 if let Some(request) = locals.save_request.as_deref_mut() {
                     request.load = true;
+                    request.slot = None;
                 }
+            }
+            ScriptCommand::SaveSlot(slot) => {
+                if let Some(request) = locals.save_request.as_deref_mut() {
+                    request.save = true;
+                    request.slot = Some(slot);
+                }
+            }
+            ScriptCommand::LoadSlot(slot) => {
+                if let Some(request) = locals.save_request.as_deref_mut() {
+                    request.load = true;
+                    request.slot = Some(slot);
+                }
+            }
+            ScriptCommand::SetLocale(lang) => {
+                if let Some(locale) = locals.locale.as_deref_mut() {
+                    locale.set_lang(&lang);
+                    if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
+                        ctx.locale_table = Some(std::sync::Arc::new(locale.table.clone()));
+                        ctx.locale_lang = Some(locale.lang.clone());
+                    }
+                }
+            }
+            ScriptCommand::Quit => {
+                commands.queue(|world: &mut World| {
+                    world.write_message(AppExit::Success);
+                });
             }
             ScriptCommand::SpawnPrototype {
                 name,
@@ -1363,6 +1515,7 @@ pub fn luau_update(
                 pitch,
                 volume,
                 position,
+                owner,
             } => {
                 if let Some(loops) = locals.sound_loops.as_deref_mut() {
                     loops.wanted.insert(
@@ -1372,6 +1525,7 @@ pub fn luau_update(
                             pitch,
                             volume,
                             position,
+                            owner,
                         },
                     );
                 }
@@ -1384,6 +1538,51 @@ pub fn luau_update(
             ScriptCommand::MusicLayer(layer) => {
                 if let Some(over) = locals.music_layer.as_deref_mut() {
                     over.0 = layer.filter(|name| !name.is_empty());
+                }
+            }
+            ScriptCommand::MusicCombat { active, boss } => {
+                if let Some(combat) = locals.combat_music.as_deref_mut() {
+                    if active {
+                        combat.engage(time.elapsed_secs_f64(), boss);
+                    } else {
+                        combat.clear();
+                    }
+                }
+            }
+            ScriptCommand::AudioDuck { bus, gain, secs } => {
+                if let (Some(duck), Some(bus)) = (
+                    locals.audio_duck.as_deref_mut(),
+                    crate::music::AudioBus::parse(&bus),
+                ) {
+                    duck.apply(bus, gain, secs, time.elapsed_secs_f64());
+                }
+            }
+            ScriptCommand::AudioReverb { preset, wet } => {
+                if let (Some(request), Some(preset)) = (
+                    locals.audio_reverb.as_deref_mut(),
+                    crate::music::ReverbPreset::parse(&preset),
+                ) {
+                    request.preset = preset;
+                    request.wet = wet;
+                }
+            }
+            ScriptCommand::Decal {
+                url,
+                position,
+                normal,
+                size,
+                life,
+                color,
+            } => {
+                if let Some(queue) = locals.decals.as_deref_mut() {
+                    queue.0.push(crate::decal_fx::DecalRequest {
+                        url,
+                        position,
+                        normal,
+                        size,
+                        life,
+                        color: Color::srgb(color[0], color[1], color[2]),
+                    });
                 }
             }
             ScriptCommand::SetMarkers {
@@ -1417,13 +1616,20 @@ pub fn luau_update(
     }
 
     // Compat: `viber.set_position` legado (posição absoluta = MUNDO; o
-    // Transform é local, por isso desconta-se o que o pai acrescenta).
+    // Transform é local, por isso converte-se pelo pai).
     for (entity, pos) in host.take_pending() {
         if let Ok((_, _, Some(mut transform), global, _, _)) = scripts.get_mut(entity) {
-            let offset = global
-                .map(|g| g.translation() - transform.translation)
-                .unwrap_or(Vec3::ZERO);
-            transform.translation = pos - offset;
+            // `pos` é MUNDO; o `Transform` é local. Infere-se a pose do pai a
+            // partir do par (`GlobalTransform`, `Transform`) da própria
+            // entidade — a diferença de translações só valia para pais sem
+            // rotação/escala. Usar o pai por `ChildOf` lia um `GlobalTransform`
+            // ainda não propagado em apps headless (o teste do legado pedia
+            // `local + 5` e recebia `5`).
+            let local_affine = transform.compute_affine();
+            let parent_world = global
+                .map(|global| global.affine() * local_affine.inverse())
+                .unwrap_or(bevy::math::Affine3A::IDENTITY);
+            transform.translation = parent_world.inverse().transform_point3(pos);
         }
     }
 }
@@ -1439,11 +1645,20 @@ pub const ALERT_RADIUS_M: f32 = 15.0;
 pub fn aggro_alert_system(
     mut alerts: bevy::ecs::message::MessageReader<crate::feedback::AttackAlert>,
     mut host: ResMut<LuaScriptHost>,
-    mut scripts: Query<(Entity, &LuaScriptRef, &GlobalTransform), Without<crate::player::Player>>,
+    mut scripts: Query<
+        (
+            Entity,
+            &LuaScriptRef,
+            &GlobalTransform,
+            Option<&Name>,
+            Option<&crate::luau::ScriptProps>,
+        ),
+        Without<crate::player::Player>,
+    >,
 ) {
     for alert in alerts.read() {
         let alert_pos = alert.position;
-        for (entity, lref, transform) in &mut scripts {
+        for (entity, lref, transform, name, props) in &mut scripts {
             // só quem está perto DO ALVO ATINGIDO (não do player)
             // Early-out por distância quadrada: sqrt por entidade×alerta
             // não compra nada (a comparação é a mesma).
@@ -1454,6 +1669,8 @@ pub fn aggro_alert_system(
                     &lref.path,
                     transform.translation(),
                     alert.position,
+                    name.map(Name::to_string),
+                    props.map(|props| props.0.clone()),
                 )
             {
                 host.warn_once(&lref.path, &error);
@@ -1467,8 +1684,16 @@ pub fn aggro_alert_system(
 pub fn luau_on_remove(
     mut host: ResMut<LuaScriptHost>,
     mut removed: RemovedComponents<LuaScriptRef>,
+    mut loops: Option<ResMut<crate::music::ScriptSoundLoops>>,
 ) {
     for entity in removed.read() {
         host.deactivate(entity);
+        // Loops de SFX do dono morrem com ele (motor de um veículo que
+        // despawna continuava a rugir até à troca de cena).
+        if let Some(loops) = loops.as_deref_mut() {
+            loops
+                .wanted
+                .retain(|_, params| params.owner != Some(entity));
+        }
     }
 }

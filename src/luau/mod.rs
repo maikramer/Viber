@@ -132,7 +132,14 @@ impl bevy::app::Plugin for LuauScriptPlugin {
                     app.insert_resource(state);
                     app.add_systems(
                         Update,
-                        crate::hot_reload::hot_reload_poll.before(luau_on_add),
+                        // Em Edit mode os scripts estão congelados e não há
+                        // dreno de comandos: uma gravação de `.lua` executava
+                        // o top-level e enfileirava efeitos para sempre. Na
+                        // troca de cena o mundo está a meio — também espera.
+                        crate::hot_reload::hot_reload_poll
+                            .before(luau_on_add)
+                            .run_if(crate::app::scripts_enabled)
+                            .run_if(crate::scene_loader::scene_settled),
                     );
                 }
                 Err(e) => {

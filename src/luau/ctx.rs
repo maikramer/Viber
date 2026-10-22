@@ -78,8 +78,11 @@ pub struct ScriptCtx {
     pub groups: std::collections::HashMap<String, Vec<i64>>,
     /// Id da cinemática a tocar (`viber.cinematic_playing()`), snapshot do frame.
     pub cinematic: Option<String>,
-    /// Último sentido deste frame (`viber.sense()`): `"see"` ou `"hear"`.
-    pub sense: Option<String>,
+    /// Pulsos de sentido DESTE frame, por entidade (bits → `"see"`/`"hear"`).
+    /// `viber.sense()` resolve pelo `ctx.entity` corrente: um `Option<String>`
+    /// semeado por chamada ficava pendurado nos hooks (um timer/sinal de uma
+    /// entidade lia o sentido de OUTRA, do último `on_update`).
+    pub sense_by_entity: std::collections::HashMap<i64, String>,
     /// Ações do mapa de input que dispararam neste frame (`viber.action`).
     pub action_pressed: std::collections::HashMap<String, bool>,
     /// `MenusOpen::any()` neste frame (`viber.menu_open`): menu, mapa,
@@ -93,6 +96,11 @@ pub struct ScriptCtx {
     /// Dir raiz dos scripts (`<mundo>/scripts`) — `viber.load` resolve
     /// módulos contra ele. Fixo por mundo (semeado no `LuaScriptHost::new`).
     pub scripts_dir: Option<std::path::PathBuf>,
+    /// Chave do save do mundo (`world_save_key`) — `viber.save_slots` lê os
+    /// metadados dos slots sem o jogo conhecer o path.
+    pub world_key: Option<String>,
+    /// `save.dir` do config.yaml (fallback histórico quando `None`).
+    pub save_dir: Option<std::path::PathBuf>,
     /// Nomes dos `<Prototype>` do mundo (validação à fila de
     /// `viber.spawn_prototype` — erro de script em vez de falha silenciosa).
     pub prototype_names: Vec<String>,
@@ -113,6 +121,8 @@ pub struct ScriptCtx {
     /// Tabela de idioma ativa (`locale/<lang>.json`) — `viber.localize`
     /// resolve as chaves `@nome` fora do `say`/`toast`.
     pub locale_table: Option<std::sync::Arc<std::collections::HashMap<String, String>>>,
+    /// Idioma ativo (`viber.locale.get`).
+    pub locale_lang: Option<String>,
     /// Acessibilidade (`viber.a11y`): escala de legendas, shake, hit-stop e
     /// [E] por hold.
     pub a11y: A11ySnap,

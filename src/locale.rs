@@ -13,6 +13,8 @@ use bevy::prelude::*;
 pub struct Locale {
     pub lang: String,
     pub table: HashMap<String, String>,
+    /// Pasta dos `locale/<lang>.json` (para a troca em runtime).
+    pub dir: std::path::PathBuf,
 }
 
 impl Locale {
@@ -29,7 +31,17 @@ impl Locale {
         Self {
             lang: lang.to_string(),
             table,
+            dir: dir.to_path_buf(),
         }
+    }
+
+    /// Troca o idioma sem reiniciar. Um ficheiro ausente deixa a tabela
+    /// vazia (as strings originais ficam) — o jogo não parte.
+    pub fn set_lang(&mut self, lang: &str) {
+        if lang.is_empty() || lang == self.lang {
+            return;
+        }
+        *self = Self::load(&self.dir, lang);
     }
 }
 

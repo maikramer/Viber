@@ -485,6 +485,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     }
                 }
             }
+            let owner = lua
+                .app_data_ref::<super::ctx::ScriptCtx>()
+                .and_then(|ctx| ctx.entity);
             lua.app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded")
                 .commands
@@ -494,6 +497,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     pitch,
                     volume,
                     position,
+                    owner,
                 });
             Ok(())
         })?,
@@ -522,7 +526,70 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 Ok(())
             })?,
         )?;
+        // viber.music.combat(active [, boss]) — a REGRA de quando entra a
+        // música de combate é do jogo (a engine só tem o estado e o crossfade).
+        music.set(
+            "combat",
+            lua.create_function(|lua, (active, boss): (bool, Option<bool>)| {
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded")
+                    .commands
+                    .push(ScriptCommand::MusicCombat {
+                        active,
+                        boss: boss.unwrap_or(false),
+                    });
+                Ok(())
+            })?,
+        )?;
         api.set("music", music)?;
+    }
+
+    // viber.audio.* — primitivas de mistura/ambiente (o jogo decide quando).
+    {
+        let audio = lua.create_table()?;
+        audio.set(
+            "duck",
+            lua.create_function(|lua, (bus, gain, secs): (String, f32, f32)| {
+                if !gain.is_finite() || !secs.is_finite() || secs <= 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "viber.audio.duck: gain finito e secs > 0",
+                    ));
+                }
+                if crate::music::AudioBus::parse(&bus).is_none() {
+                    return Err(mlua::Error::runtime(format!(
+                        "viber.audio.duck: bus '{bus}' inválido (master|music|sfx|voice|ambience)"
+                    )));
+                }
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded")
+                    .commands
+                    .push(ScriptCommand::AudioDuck { bus, gain, secs });
+                Ok(())
+            })?,
+        )?;
+        audio.set(
+            "reverb",
+            lua.create_function(|lua, (preset, wet): (String, Option<f32>)| {
+                if crate::music::ReverbPreset::parse(&preset).is_none() {
+                    return Err(mlua::Error::runtime(format!(
+                        "viber.audio.reverb: preset '{preset}' inválido (off|room|hall|cave)"
+                    )));
+                }
+                if let Some(wet) = wet
+                    && (!wet.is_finite() || !(0.0..=1.0).contains(&wet))
+                {
+                    return Err(mlua::Error::runtime(
+                        "viber.audio.reverb: wet tem de estar em 0..=1",
+                    ));
+                }
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded")
+                    .commands
+                    .push(ScriptCommand::AudioReverb { preset, wet });
+                Ok(())
+            })?,
+        )?;
+        api.set("audio", audio)?;
     }
 
     // viber.set_locomotion(walk, run [, turn_rate]) — nominais explícitos
@@ -621,6 +688,57 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.lantern(intensity) — acende/reforça a lanterna do viajante (a
+    // tocha equipada ilumina mesmo de DIA; 0 = só a lanterna automática
+    // nocturna). `intensity` em lúmenes, o mesmo espaço da `LANTERN`.
+    api.set(
+        "lantern",
+        lua.create_function(|lua, intensity: f32| {
+            if !intensity.is_finite() {
+                return Err(mlua::Error::runtime(
+                    "viber.lantern: intensidade não finita (NaN/inf)",
+                ));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::SetLantern(intensity.max(0.0)));
+            Ok(())
+        })?,
+    )?;
+
+    // viber.bone_offset(bone, rx, ry, rz) — rotação ADITIVA num osso do
+    // herói, somada por cima da animação (idle/walk/run) todos os frames.
+    // Serve para o braço da tocha ficar à frente sem perder a locomoção;
+    // zeros (identidade) limpam a entrada.
+    api.set(
+        "bone_offset",
+        lua.create_function(|lua, (bone, rx, ry, rz): (String, f32, f32, f32)| {
+            if bone.trim().is_empty() {
+                return Err(mlua::Error::runtime("viber.bone_offset: osso vazio"));
+            }
+            if !rx.is_finite() || !ry.is_finite() || !rz.is_finite() {
+                return Err(mlua::Error::runtime(
+                    "viber.bone_offset: rotação não finita (NaN/inf)",
+                ));
+            }
+            let identity = rx.abs() < 1e-6 && ry.abs() < 1e-6 && rz.abs() < 1e-6;
+            let rotation = if identity {
+                Quat::IDENTITY
+            } else {
+                Quat::from_euler(EulerRot::XYZ, rx, ry, rz)
+            };
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::SetBoneOffset {
+                    bone: bone.trim().to_lowercase(),
+                    rotation,
+                });
+            Ok(())
+        })?,
+    )?;
+
     // viber.attach(slot, url [, opts]) / viber.detach(slot [, id]) — prende
     // um GLB a um osso do rig. `url` vazio/nil solta o slot. Primitiva
     // genérica (volante, capacete, espada…): a engine só encontra o osso.
@@ -655,6 +773,14 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 if !scale.is_finite() || scale <= 0.0 {
                     return Err(mlua::Error::runtime(
                         "viber.attach: scale tem de ser finito e > 0",
+                    ));
+                }
+                // Um NaN em pos/rot envenena o `Transform` do prop para
+                // sempre (o `f32::clamp` não o recupera). As restantes APIs
+                // numéricas já rejeitam não-finitos.
+                if !pos.is_finite() || !rot.is_finite() {
+                    return Err(mlua::Error::runtime(
+                        "viber.attach: x/y/z/rx/ry/rz têm de ser finitos",
                     ));
                 }
                 let url = url.filter(|u| !u.trim().is_empty());
@@ -736,7 +862,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let pos = ctx.origin;
             ctx.commands.push(ScriptCommand::Noise {
                 pos,
-                loudness: if loudness.is_finite() { loudness.max(0.0) } else { 0.0 },
+                loudness: if loudness.is_finite() {
+                    loudness.max(0.0)
+                } else {
+                    0.0
+                },
             });
             Ok(())
         })?,
@@ -744,9 +874,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     api.set(
         "sense",
         lua.create_function(|lua, ()| {
-            let sense = lua
-                .app_data_ref::<ScriptCtx>()
-                .and_then(|ctx| ctx.sense.clone());
+            // Pulso do frame resolvido pela entidade CORRENTE: a tabela é
+            // semeada uma vez por frame e cada hook traz o seu `ctx.entity`.
+            let sense = lua.app_data_ref::<ScriptCtx>().and_then(|ctx| {
+                let bits = ctx.entity?.to_bits() as i64;
+                ctx.sense_by_entity.get(&bits).cloned()
+            });
             Ok(sense)
         })?,
     )?;
@@ -922,11 +1055,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(ctx) = ctx.as_ref() else {
                 return Ok(out);
             };
-            let mut found: Vec<(f32, i64, String, Vec3)> = ctx
+            // Filtrar ANTES de clonar: o snapshot tem todas as entidades
+            // nomeadas (~79k no Vael) e clonar cada nome para depois o deitar
+            // fora custava 3–4 ms por chamada — o `harvest.lua` chama isto
+            // em todos os frames.
+            let mut found: Vec<(f32, i64, &str, Vec3)> = ctx
                 .pos_snapshot
                 .iter()
-                .map(|(bits, (name, pos))| (pos.distance(ctx.origin), *bits, name.clone(), *pos))
-                .filter(|(d, ..)| *d <= radius)
+                .filter_map(|(bits, (name, pos))| {
+                    let d = pos.distance(ctx.origin);
+                    (d <= radius).then_some((d, *bits, name.as_str(), *pos))
+                })
                 .collect();
             found.sort_by(|a, b| a.0.total_cmp(&b.0));
             let cap = limit.unwrap_or(16).min(64);
@@ -968,11 +1107,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(origin) = ctx.player else {
                 return Ok(out);
             };
-            let mut found: Vec<(f32, i64, String, Vec3)> = ctx
+            // Filtrar ANTES de clonar: o snapshot tem todas as entidades
+            // nomeadas (~79k no Vael) e clonar cada nome para depois o deitar
+            // fora custava 3–4 ms por chamada — o `harvest.lua` chama isto
+            // em todos os frames.
+            let mut found: Vec<(f32, i64, &str, Vec3)> = ctx
                 .pos_snapshot
                 .iter()
-                .map(|(bits, (name, pos))| (pos.distance(origin), *bits, name.clone(), *pos))
-                .filter(|(d, ..)| *d <= radius)
+                .filter_map(|(bits, (name, pos))| {
+                    let d = pos.distance(origin);
+                    (d <= radius).then_some((d, *bits, name.as_str(), *pos))
+                })
                 .collect();
             found.sort_by(|a, b| a.0.total_cmp(&b.0));
             let cap = limit.unwrap_or(16).min(64);
@@ -1107,7 +1252,66 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
-    // Câmara & feedback: shake/kick/fov_kick/punch/hit_stop/damage_number.
+    // viber.decal(url, x, y, z [, {nx, ny, nz, size, life, color}]) — marca
+    // de impacto projectada numa superfície (chão/parede/rocha). A textura é
+    // do jogo; a engine só desenha e desvanece.
+    api.set(
+        "decal",
+        lua.create_function(
+            |lua, (url, x, y, z, opts): (String, f32, f32, f32, Option<Table>)| {
+                if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+                    return Err(mlua::Error::runtime(
+                        "viber.decal: coordenadas têm de ser finitas",
+                    ));
+                }
+                if url.trim().is_empty() {
+                    return Err(mlua::Error::runtime("viber.decal: url vazia"));
+                }
+                let (mut nx, mut ny, mut nz) = (0.0f32, 1.0f32, 0.0f32);
+                let mut size = 0.7f32;
+                let mut life = 1.5f32;
+                let mut color = [1.0f32, 1.0, 1.0];
+                if let Some(t) = opts {
+                    nx = t.raw_get("nx").ok().unwrap_or(nx);
+                    ny = t.raw_get("ny").ok().unwrap_or(ny);
+                    nz = t.raw_get("nz").ok().unwrap_or(nz);
+                    size = t.raw_get("size").ok().unwrap_or(size);
+                    life = t.raw_get("life").ok().unwrap_or(life);
+                    if let Some(hex) = t.raw_get::<Option<String>>("color").ok().flatten() {
+                        color =
+                            crate::xml::values::parse_color(&hex, "viber.decal").map_err(|e| {
+                                mlua::Error::runtime(format!("viber.decal: cor inválida ({e})"))
+                            })?;
+                    }
+                }
+                if !(nx.is_finite() && ny.is_finite() && nz.is_finite())
+                    || Vec3::new(nx, ny, nz).length_squared() < 1e-6
+                {
+                    nx = 0.0;
+                    ny = 1.0;
+                    nz = 0.0;
+                }
+                if !size.is_finite() || size <= 0.0 {
+                    size = 0.7;
+                }
+                if !life.is_finite() || life <= 0.0 {
+                    life = 1.5;
+                }
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::Decal {
+                        url,
+                        position: Vec3::new(x, y, z),
+                        normal: Vec3::new(nx, ny, nz),
+                        size,
+                        life,
+                        color,
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
     api.set(
         "shake",
         lua.create_function(|lua, amount: f32| {
@@ -1335,6 +1539,77 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // viber.quit() — fecha o jogo (AppExit limpo; o save é responsabilidade
+    // do jogo, tal como o botão Sair do menu).
+    api.set(
+        "quit",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::Quit);
+            Ok(())
+        })?,
+    )?;
+
+    // viber.save_slot(n) / viber.load_slot(n) — slots 0..=3 (0 = autosave).
+    // O save legado (`viber.save()`) fica no path antigo.
+    api.set(
+        "save_slot",
+        lua.create_function(|lua, slot: u32| {
+            if slot > 3 {
+                return Err(mlua::Error::runtime("viber.save_slot: slot fora de 0..=3"));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::SaveSlot(slot));
+            Ok(())
+        })?,
+    )?;
+    api.set(
+        "load_slot",
+        lua.create_function(|lua, slot: u32| {
+            if slot > 3 {
+                return Err(mlua::Error::runtime("viber.load_slot: slot fora de 0..=3"));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::LoadSlot(slot));
+            Ok(())
+        })?,
+    )?;
+    // viber.save_slots() — metadados dos 4 slots para o menu de continuar.
+    // Lê 4 JSONs pequenos por chamada; o menu só chama ao abrir.
+    api.set(
+        "save_slots",
+        lua.create_function(|lua, ()| {
+            let (key, dir) = {
+                let ctx = lua.app_data_ref::<ScriptCtx>();
+                ctx.as_ref()
+                    .map(|ctx| (ctx.world_key.clone(), ctx.save_dir.clone()))
+                    .unwrap_or_default()
+            };
+            let list = crate::save::list_save_slots(key.as_deref(), dir.as_deref());
+            let table = lua.create_table()?;
+            for (index, slot) in list.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("slot", slot.slot)?;
+                row.set("path", slot.path.as_str())?;
+                row.set("exists", slot.exists)?;
+                row.set("bytes", slot.bytes)?;
+                row.set("saved_at", slot.saved_at)?;
+                row.set("level", slot.level)?;
+                row.set("gold", slot.gold)?;
+                row.set("scene", slot.scene.as_deref())?;
+                row.set("playtime", slot.playtime)?;
+                row.set("title", slot.title.as_deref())?;
+                table.set(index + 1, row)?;
+            }
+            Ok(table)
+        })?,
+    )?;
 
     // viber.spawn_prototype(nome, x, z [, opts]) — instancia um
     // `<Prototype>` do mundo. opts: {y = cota explícita (default: assenta
@@ -1541,39 +1816,39 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // O jogo decide quando e quanto; a engine não conhece golpes.
     api.set(
         "entity_knockback",
-        lua.create_function(
-            |lua, (id, dx, dz, strength): (i64, f32, f32, f32)| {
-                if !(dx.is_finite() && dz.is_finite() && strength.is_finite()) {
-                    return Err(mlua::Error::runtime(
-                        "viber.entity_knockback: valores não finitos (NaN/inf)",
-                    ));
-                }
-                let dir = Vec3::new(dx, 0.0, dz).normalize_or_zero();
-                let entity = super::entity::entity_from_id(id)?;
-                lua.app_data_mut::<ScriptCtx>()
-                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
-                    .commands
-                    .push(ScriptCommand::EntityKnockback {
-                        entity,
-                        dir,
-                        strength: strength.max(0.0),
-                    });
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (id, dx, dz, strength): (i64, f32, f32, f32)| {
+            if !(dx.is_finite() && dz.is_finite() && strength.is_finite()) {
+                return Err(mlua::Error::runtime(
+                    "viber.entity_knockback: valores não finitos (NaN/inf)",
+                ));
+            }
+            let dir = Vec3::new(dx, 0.0, dz).normalize_or_zero();
+            let entity = super::entity::entity_from_id(id)?;
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::EntityKnockback {
+                    entity,
+                    dir,
+                    strength: strength.max(0.0),
+                });
+            Ok(())
+        })?,
     )?;
-    // viber.hit_flash(id[, segundos]) — acende o flash branco de impacto.
-    // Feedback visual genérico; não toca HP nem regras.
+    // viber.hit_flash([id][, segundos]) — acende o flash branco de impacto.
+    // Feedback visual genérico; não toca HP nem regras. `id` omitido = a
+    // própria entidade (como o resto das vitais; a doc prometia-o e o
+    // `i64` obrigatório era erro Lua).
     api.set(
         "hit_flash",
-        lua.create_function(|lua, (id, secs): (i64, Option<f32>)| {
+        lua.create_function(|lua, (id, secs): (Option<i64>, Option<f32>)| {
             let secs = secs.unwrap_or(crate::feedback::HIT_FLASH_SECS);
             if !secs.is_finite() || secs <= 0.0 {
                 return Err(mlua::Error::runtime(
                     "viber.hit_flash: segundos têm de ser finitos e > 0",
                 ));
             }
-            let entity = super::entity::entity_from_id(id)?;
+            let entity = super::entity::resolve_entity(lua, id)?;
             lua.app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
@@ -1585,13 +1860,14 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // viber.corpse(id) — marca a morte. A engine não agenda despawn nem XP:
+    // viber.corpse([id]) — marca a morte. A engine não agenda despawn nem XP:
     // o jogo chama isto, deixa o `ragdoll="true"` fazer o resto e decide
-    // quando remover o corpo.
+    // quando remover o corpo. Sem `id` = a própria entidade (a doc prometia-o
+    // e o `i64` obrigatório era erro Lua).
     api.set(
         "corpse",
-        lua.create_function(|lua, id: i64| {
-            let entity = super::entity::entity_from_id(id)?;
+        lua.create_function(|lua, id: Option<i64>| {
+            let entity = super::entity::resolve_entity(lua, id)?;
             lua.app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
@@ -1779,12 +2055,44 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let table = lua
                 .app_data_ref::<ScriptCtx>()
                 .and_then(|ctx| ctx.locale_table.clone());
-            Ok(crate::dialogue::localized_lines(
-                &text,
-                table.as_deref(),
-            ))
+            Ok(crate::dialogue::localized_lines(&text, table.as_deref()))
         })?,
     )?;
+    // viber.locale.get()/set(lang) — idioma ativo em runtime. A tabela é
+    // recarregada de `locale/<lang>.json`; `Say`/`toast`/UI resolvem as
+    // chaves `@…` no frame seguinte.
+    {
+        let locale = lua.create_table()?;
+        locale.set(
+            "get",
+            lua.create_function(|lua, ()| {
+                Ok(lua
+                    .app_data_ref::<ScriptCtx>()
+                    .and_then(|ctx| ctx.locale_lang.clone()))
+            })?,
+        )?;
+        locale.set(
+            "set",
+            lua.create_function(|lua, lang: String| {
+                let lang = lang.trim().to_ascii_lowercase();
+                if lang.is_empty()
+                    || !lang
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(mlua::Error::runtime(
+                        "viber.locale.set: idioma inválido (use 'pt', 'en', …)",
+                    ));
+                }
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::SetLocale(lang));
+                Ok(())
+            })?,
+        )?;
+        api.set("locale", locale)?;
+    }
     // viber.interacted(key) -> bool — tecla pressionada NESTE frame E
     // ESTA entidade é o alvo mais próximo dessa tecla
     // (`interact::InteractionFocus`). O alcance sozinho não chega: dois

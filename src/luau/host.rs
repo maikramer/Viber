@@ -307,7 +307,10 @@ impl LuaScriptHost {
 
     /// Loads a script from disk: `<scripts_dir>/<path>`.
     pub fn load_script_from_dir(&mut self, path: &str) -> mlua::Result<()> {
-        let full = self.scripts_dir.join(path);
+        // O lint aceita o estilo antigo `scripts/x.lua`; o runtime tem de
+        // resolver o mesmo caminho (a chave do registry fica a autoral).
+        let relative = path.strip_prefix("scripts/").unwrap_or(path);
+        let full = self.scripts_dir.join(relative);
         let code = std::fs::read_to_string(&full).map_err(|e| {
             mlua::Error::runtime(format!("failed to read script {}: {e}", full.display()))
         })?;
@@ -380,6 +383,12 @@ impl LuaScriptHost {
                 .registry
                 .get_mut(path)
                 .ok_or_else(|| mlua::Error::runtime(format!("script '{path}' not loaded")))?;
+            // Marca o chunk como executado ANTES de extrair os hooks: um
+            // global de hook com o tipo errado (ex. `on_update = true`) faz
+            // `raw_get` falhar; com `ran` ainda falso, cada `on_add`/contacto
+            // re-corria o TOP-LEVEL (timers e efeitos do topo repetiam-se a
+            // cada toque). O erro continua a ser reportado uma vez.
+            script.ran = true;
             script.on_update = script.env.raw_get::<Option<Function>>("on_update")?;
             script.on_player_attack = script.env.raw_get::<Option<Function>>("on_player_attack")?;
             script.on_trigger_enter = script.env.raw_get::<Option<Function>>("on_trigger_enter")?;
@@ -394,7 +403,6 @@ impl LuaScriptHost {
             script.on_collision_exit = script
                 .env
                 .raw_get::<Option<Function>>("on_collision_exit")?;
-            script.ran = true;
         }
         Ok(())
     }
@@ -441,6 +449,8 @@ impl LuaScriptHost {
         path: &str,
         origin: Vec3,
         attacker_pos: Vec3,
+        self_name: Option<String>,
+        self_props: Option<std::sync::Arc<Vec<(String, String)>>>,
     ) -> mlua::Result<()> {
         {
             let mut ctx = self
@@ -453,6 +463,8 @@ impl LuaScriptHost {
             // ÚLTIMA entidade do frame — position()/move_towards/damage_player
             // calculavam a partir de outra criatura.
             ctx.origin = origin;
+            ctx.self_name = self_name;
+            ctx.self_props = self_props;
         }
         let cb = self
             .registry
@@ -479,6 +491,8 @@ impl LuaScriptHost {
         other_name: Option<&str>,
         other_pos: Vec3,
         dt: f32,
+        self_name: Option<String>,
+        self_props: Option<std::sync::Arc<Vec<(String, String)>>>,
     ) -> mlua::Result<()> {
         {
             let mut ctx = self
@@ -489,6 +503,10 @@ impl LuaScriptHost {
             ctx.path = Some(path.to_string());
             ctx.origin = origin;
             ctx.dt = dt;
+            // Um hook de `tree.lua` partilhado lia o `self_name`/props do
+            // último `on_update` (outra árvore) — `viber.prop` mentia.
+            ctx.self_name = self_name;
+            ctx.self_props = self_props;
         }
         let callback = self.registry.get(path).and_then(|script| match hook {
             ContactHook::TriggerEnter => script.on_trigger_enter.clone(),
@@ -662,8 +680,8 @@ impl LuaScriptHost {
     /// Repõe o `viber.state()` gravado por [`Self::dump_entity_state`] na
     /// entidade nova (o id muda quando o streaming a volta a spawnar).
     pub fn restore_entity_state(&self, entity: Entity, json: &str) -> mlua::Result<()> {
-        let value: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| mlua::Error::runtime(e.to_string()))?;
         let states: Table = self.lua.named_registry_value("viber_states")?;
         let table = json_to_lua_table(&self.lua, &value)?;
         states.raw_set(entity.to_bits() as i64, table)?;
@@ -671,56 +689,112 @@ impl LuaScriptHost {
     }
 }
 
+/// Profundidade máxima de uma tabela de estado. O `viber.state()` é definido
+/// pelo script e pode conter ciclos (`st.self = st`): sem teto, o dump do
+/// streaming recursava até estourar a pilha e abortava o processo.
+const STATE_JSON_MAX_DEPTH: usize = 32;
+
 fn lua_table_to_json(table: &Table) -> serde_json::Value {
+    lua_table_to_json_at(table, 0)
+}
+
+fn lua_table_to_json_at(table: &Table, depth: usize) -> serde_json::Value {
+    if depth >= STATE_JSON_MAX_DEPTH {
+        return serde_json::Value::Null;
+    }
     let mut map = serde_json::Map::new();
+    let mut numeric: Vec<(i64, mlua::Value)> = Vec::new();
+    let mut array_shaped = true;
     for pair in table.pairs::<mlua::Value, mlua::Value>() {
         let Ok((key, value)) = pair else { continue };
-        let key = match key {
-            mlua::Value::String(text) => text.to_string_lossy(),
-            mlua::Value::Integer(n) => n.to_string(),
-            _ => continue,
-        };
-        if let Some(json) = lua_value_to_json(value) {
-            map.insert(key, json);
+        match key {
+            mlua::Value::Integer(n) if n >= 1 => numeric.push((n, value)),
+            mlua::Value::Integer(n) => {
+                array_shaped = false;
+                if let Some(json) = lua_value_to_json_at(value, depth + 1) {
+                    map.insert(n.to_string(), json);
+                }
+            }
+            mlua::Value::String(text) => {
+                array_shaped = false;
+                if let Some(json) = lua_value_to_json_at(value, depth + 1) {
+                    map.insert(text.to_string_lossy(), json);
+                }
+            }
+            _ => array_shaped = false,
+        }
+    }
+    // Sequência 1..n contígua vira array JSON; sem isto `st.queue[1]`
+    // voltava como a chave string "1" e lia-se `nil` depois do streaming.
+    if array_shaped && !numeric.is_empty() {
+        numeric.sort_by_key(|(index, _)| *index);
+        if numeric
+            .iter()
+            .enumerate()
+            .all(|(position, (index, _))| *index == position as i64 + 1)
+        {
+            return serde_json::Value::Array(
+                numeric
+                    .into_iter()
+                    .filter_map(|(_, value)| lua_value_to_json_at(value, depth + 1))
+                    .collect(),
+            );
+        }
+    }
+    for (index, value) in numeric {
+        if let Some(json) = lua_value_to_json_at(value, depth + 1) {
+            map.insert(index.to_string(), json);
         }
     }
     serde_json::Value::Object(map)
 }
 
-fn lua_value_to_json(value: mlua::Value) -> Option<serde_json::Value> {
+fn lua_value_to_json_at(value: mlua::Value, depth: usize) -> Option<serde_json::Value> {
     match value {
         mlua::Value::Nil => Some(serde_json::Value::Null),
         mlua::Value::Boolean(v) => Some(serde_json::Value::Bool(v)),
         mlua::Value::Integer(v) => Some(serde_json::Value::from(v)),
         mlua::Value::Number(v) => serde_json::Number::from_f64(v).map(serde_json::Value::Number),
         mlua::Value::String(text) => Some(serde_json::Value::String(text.to_string_lossy())),
-        mlua::Value::Table(table) => Some(lua_table_to_json(&table)),
+        mlua::Value::Table(table) => Some(lua_table_to_json_at(&table, depth)),
         _ => None,
     }
 }
 
 fn json_to_lua_table(lua: &mlua::Lua, value: &serde_json::Value) -> mlua::Result<Table> {
-    let table = lua.create_table()?;
-    let Some(map) = value.as_object() else {
-        return Ok(table);
-    };
-    for (key, value) in map {
-        match value {
-            serde_json::Value::Null => table.raw_set(key.as_str(), mlua::Value::Nil)?,
-            serde_json::Value::Bool(v) => table.raw_set(key.as_str(), *v)?,
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    table.raw_set(key.as_str(), i)?;
-                } else if let Some(f) = n.as_f64() {
-                    table.raw_set(key.as_str(), f)?;
-                }
-            }
-            serde_json::Value::String(text) => table.raw_set(key.as_str(), text.as_str())?,
-            serde_json::Value::Object(_) => {
-                table.raw_set(key.as_str(), json_to_lua_table(lua, value)?)?;
-            }
-            serde_json::Value::Array(_) => {}
-        }
+    match json_to_lua_value(lua, value)? {
+        mlua::Value::Table(table) => Ok(table),
+        _ => lua.create_table(),
     }
-    Ok(table)
+}
+
+fn json_to_lua_value(lua: &mlua::Lua, value: &serde_json::Value) -> mlua::Result<mlua::Value> {
+    Ok(match value {
+        serde_json::Value::Null => mlua::Value::Nil,
+        serde_json::Value::Bool(v) => mlua::Value::Boolean(*v),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                mlua::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                mlua::Value::Number(f)
+            } else {
+                mlua::Value::Nil
+            }
+        }
+        serde_json::Value::String(text) => mlua::Value::String(lua.create_string(text)?),
+        serde_json::Value::Array(items) => {
+            let table = lua.create_table()?;
+            for (index, item) in items.iter().enumerate() {
+                table.raw_set(index as i64 + 1, json_to_lua_value(lua, item)?)?;
+            }
+            mlua::Value::Table(table)
+        }
+        serde_json::Value::Object(map) => {
+            let table = lua.create_table()?;
+            for (key, value) in map {
+                table.raw_set(key.as_str(), json_to_lua_value(lua, value)?)?;
+            }
+            mlua::Value::Table(table)
+        }
+    })
 }

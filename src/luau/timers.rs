@@ -107,22 +107,23 @@ pub(crate) fn drop_timers(lua: &Lua, ids: &[i64]) {
 /// `run_update` semeia (sem ele, a callback via o `origin`/`dt` da ÚLTIMA
 /// entidade do frame anterior e `viber.position()`/`move_towards` calculavam
 /// a partir de outra criatura).
-pub struct TickFrame<F: Fn(Entity) -> Option<Vec3>> {
+pub struct TickFrame<'a> {
     pub elapsed: f64,
     pub dt: f32,
     pub player: Option<Vec3>,
     /// Posição no mundo do dono; `None` = dono morto (o timer é descartado).
-    pub origin_of: F,
+    pub origin_of: Box<dyn Fn(Entity) -> Option<Vec3> + 'a>,
+    /// `Name` do dono e props `prop-*` — o mesmo contexto que o `on_update`
+    /// semeia. Sem isto, um timer de um lobo lia o nome/props de OUTRO.
+    pub name_of: Box<dyn Fn(Entity) -> Option<String> + 'a>,
+    pub props_of: Box<dyn Fn(Entity) -> Option<std::sync::Arc<Vec<(String, String)>>> + 'a>,
 }
 
 /// Tick (início do `luau_update`, ANTES dos `on_update`): executa os timers
 /// vencidos com o ctx seedado ao dono (o `viber.state()` funciona dentro da
 /// callback). Erros são pcall-style (`warn_once` por path) — um timer a falhar
 /// nunca derruba o frame; `every` cancelado não re-agenda.
-pub fn tick<F: Fn(Entity) -> Option<Vec3>>(
-    host: &mut super::host::LuaScriptHost,
-    frame: TickFrame<F>,
-) {
+pub fn tick(host: &mut super::host::LuaScriptHost, frame: TickFrame<'_>) {
     let elapsed = frame.elapsed;
     let lua = host.lua.clone();
     let Ok(timers) = lua.named_registry_value::<Table>("viber_timers") else {
@@ -172,6 +173,8 @@ pub fn tick<F: Fn(Entity) -> Option<Vec3>>(
             ctx.player = frame.player;
             ctx.dt = frame.dt;
             ctx.elapsed = elapsed;
+            ctx.self_name = (frame.name_of)(entity);
+            ctx.self_props = (frame.props_of)(entity);
         }
         let result = {
             let _budget = host.budget_guard();

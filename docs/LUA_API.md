@@ -108,7 +108,10 @@ da instância, editável no Inspector (secção **Script**), por `viber scene se
 ```lua
 --@export speed: number(0..4) = 1.1        -- m/s a passear (o texto após `--` é a ajuda)
 --@export banter: string[] = "Olá." | "Bom dia."
+--@group Humor                             -- agrupa os exports seguintes no Inspector
 --@export mood: enum(calm, grumpy) = calm
+--@group                                   -- volta aos campos sem grupo
+--@export home: entity
 function on_update(dt)
   viber.move_towards(tx, tz, viber.prop("speed"))
 end
@@ -141,6 +144,9 @@ end
 - Hot-reload relê as anotações; `viber scene --live set … prop-x=…` muda a instância a correr
   sem respawn (o `viber.state()` mantém-se).
 - Esquema para agentes: `viber scene schema <seletor|x.lua>`; validação: `viber scene lint`.
+- `--@group Nome` (antes dos `--@export`) põe os campos seguintes numa subsecção colapsável
+  do Inspector; `--@group` sem nome volta aos campos sem grupo. O grupo é só apresentação —
+  `viber.prop`, o XML e o lint não mudam.
 
 ## Sinais e grupos (`viber.emit` / `viber.call_group` / `viber.group`)
 
@@ -297,6 +303,14 @@ de script.
 | `viber.sound_loop(id, clip [, {pitch, volume, x, y, z}])` | loop no bus de SFX; `clip` = registry ou caminho sob `sfx_dir` |
 | `viber.sound_stop(id)` | pára esse loop |
 | `viber.music.layer(nome)` | força a layer de BGM; `nil` devolve a zona automática |
+| `viber.music.combat(active [, boss])` | liga/desliga a música de combate; `boss=true` promove para a layer `boss`. A engine expira o hold de 8 s sozinha |
+| `viber.audio.duck(bus, gain, secs)` | baixa um bus (`master|music|sfx|voice|ambience`) para `gain` (0..1) durante `secs`; expira sozinho |
+| `viber.audio.reverb(preset [, wet])` | reverb dos buses de SFX/voz: `off|room|hall|cave`; `wet` 0..1 sobrepõe o mix do preset |
+| `viber.decal(url, x, y, z [, {nx,ny,nz,size,life,color}])` | marca de impacto projectada numa superfície (ForwardDecal); a textura é do jogo |
+| `viber.save_slot(n)` / `viber.load_slot(n)` | slots `0..3` (0 = autosave); o save legado (`viber.save`) fica no ficheiro antigo |
+| `viber.save_slots()` | lista de metadados (`slot, exists, saved_at, level, gold, playtime, scene, title`) |
+| `viber.locale.get()` / `viber.locale.set(lang)` | idioma ativo; `set` recarrega `locale/<lang>.json` sem reiniciar |
+| `viber.quit()` | fecha o jogo por `AppExit` limpo (o save é decisão do jogo) |
 | `viber.load_json(caminho)` | JSON relativo à pasta do mundo (sem `..`) |
 | `viber.player_id()` | bits do herói, para `entity_damage` / `entity_heal` |
 
@@ -367,7 +381,7 @@ foldarms/lean/idle`.
 | Função | Notas |
 |--------|-------|
 | `viber.gesture(name)` | gesto one-shot no rig da entidade; **alternativas** separadas por `,` são tentadas por ordem — `viber.gesture("salute,yes")` toca `salute` se o rig tiver, senão `yes` |
-| `viber.sound(clip [, {x, y, z}])` | SFX curto; sem posição toca na origem da entidade, com `{x,y,z}` no ponto do mundo (golpe num prop). Registry completo (case-insensitive; desconhecido = erro de script, warn 1×): `hit whoosh harvest ui chop_hit chop_break mine_hit mine_break levelup quest_complete travel loot chest_open footstep footstep_water hurt heal game_over quest_accept notification coin buy error save load shop_open enemy_hurt enemy_death wolf_growl/growl slime_squish boss_roar/roar shield_block/block door_open door_close bomb_drop jump dash`. Os OGGs vivem no pool partilhado (`../Vael/assets/manifests/audio-sfx-*.yaml` — regenerar com `regen_audio.py`), servido diretamente pela engine via fallback de asset roots — nunca copiados para o exemplo |
+| `viber.sound(clip [, {x, y, z}])` | SFX curto; sem posição toca na origem da entidade, com `{x,y,z}` no ponto do mundo (golpe num prop). Registry completo (case-insensitive; desconhecido = erro de script, warn 1×): `hit whoosh harvest ui chop_hit chop_break mine_hit mine_break levelup quest_complete travel loot chest_open footstep footstep_water hurt heal game_over quest_accept notification coin buy error save load shop_open enemy_hurt enemy_death wolf_growl/growl slime_squish boss_roar/roar shield_block/block door_open door_close bomb_drop jump dash bow_shot arrow_hit fire_crackle item_drop`. Os OGGs vivem no pool partilhado (`../Vael/assets/manifests/audio-sfx-*.yaml` — regenerar com `regen_audio.py`), servido diretamente pela engine via fallback de asset roots — nunca copiados para o exemplo |
 
 ## Combate & progressão
 
@@ -486,7 +500,9 @@ aplica pós-frame.
 | `viber.clip_duration(nome)` | duração (s) do clip do herói, fuzzy pelo nome normalizado (`nil` se o rig não o tem) |
 | `viber.attach(slot, url [, opts])` | prende um GLB a um osso do rig. `slot` lógico (`"weapon"`, `"helmet"`) substitui o que lá estiver; `opts = {bone="hand_r", id, x, y, z, rx, ry, rz (rad), scale}`. Primitiva genérica (volante, capacete, espada): a engine só encontra o osso |
 | `viber.detach(slot [, id])` | remove o que estiver no slot (default: herói) |
-| `viber.prompt(key, label)` | publica o prompt de mundo (o controller decide o alvo); `label` vazio limpa |
+| `viber.lantern(intensity)` | acende/reforça a lanterna do viajante (lúmenes; 0 = só a automática nocturna). A tocha do V usa 600000 — ilumina também de dia |
+| `viber.bone_offset(bone, rx, ry, rz)` | rotação ADITIVA (rad, XYZ local) num osso do herói, somada por cima da animação (idle/walk/run). Zeros limpam. Ex.: `viber.bone_offset("upperarm_r", 0.45, 0, 0)` inclina o braço à frente |
+| `viber.prompt(key, label)` | publica o prompt de mundo (o controller decide o alvo); `label` vazio limpa. Republicar por frame renova o TTL (0,25 s) |
 | `viber.localize(texto)` | resolve `@chave` do locale ativo (linha a linha) |
 
 ## Acessibilidade, idioma e rede
@@ -528,6 +544,15 @@ local fsm = viber.load("lib/fsm.lua")
 -- herói + vitais + game(); campos RPG quando existem). Um jogo sem RPG usa
 -- isto para auto-save em checkpoints (ver worlds/lua-demo).
 viber.save()
+
+-- Slots: 0 = autosave, 1..3 = manuais. O save legado (`viber.save()`)
+-- continua no ficheiro antigo; os slots são ficheiros irmãos.
+viber.save_slot(0)
+viber.load_slot(2)
+-- Metadados para o menu de continuar (saved_at, level, gold, playtime…).
+for _, slot in ipairs(viber.save_slots()) do
+  if slot.exists then viber.log(slot.slot .. ": nível " .. slot.level) end
+end
 ```
 
 ## Spawn em runtime (`viber.spawn_prototype`)
@@ -615,7 +640,7 @@ Um NPC/dador pode conduzir o seu PRÓPRIO diálogo em Lua:
 |--------|--------|
 | `viber.say(texto [, segundos])` | escreve no **balão nativo** do HUD (o mesmo do diálogo de quests); sem `<DialogueBalloon>` no mundo = no-op com warn 1×; `\n` faz multi-linha; default 4 s |
 | `viber.localize(texto)` | resolve as chaves `@nome` do locale ativo (`locale/<lang>.json`). `say`/`toast` já o fazem por linha; isto serve quem compõe (`Falante: @chave`) |
-| `viber.prompt(key, label)` | publica um prompt de interação de MUNDO (um controller mostra o verbo de um prop que não é a sua entidade). `label` vazio/nil limpa. UI genérica: o jogo decide quando |
+| `viber.prompt(key, label)` | publica um prompt de interação de MUNDO (um controller mostra o verbo de um prop que não é a sua entidade). `label` vazio/nil limpa. UI genérica: o jogo decide quando. Republicar por frame renova o TTL (0,25 s); um `<ScriptInteraction>` ao alcance tem prioridade |
 | `viber.quest_def(id)` | tabela da definição autoral (`id/title/npc/biome/kind/target/count/radius/gold/xp/items/lines_intro/lines_progress/lines_complete`) ou `nil` — lê o MESMO `<mundo>/quests/*.json` da engine |
 | `viber.quest_defs()` | lista com todas as definições do mundo |
 | `viber.own_system(nome)` | **reclama um sistema nativo** para Lua (compat): `abilities` (C/E/R), `bomb` (B), `guard` (L), `hotbar` (1/2), `harvest` (J), `locomotion` (o corpo do herói), `dialogue` ([E] dos NPCs). O handler nativo correspondente cala; os plugins de RPG já não correm no App, por isso a posse é sobretudo documental. Sem posse, o comportamento nativo (quando existe) é o de sempre |
@@ -649,7 +674,7 @@ snapshot do frame (bindings, estado por elemento, cliques, listas).
 |--------|-------|
 | `set_text(id, text)` | texto de um `UiText` — ou o **valor** de um `UiInput` |
 | `set_value(id, value)` | fração de `UiBar`/`UiCooldown`, ou valor de `UiSlider` (clampado ao min/max dele) |
-| `set_visible(id, visible)` | mostra/esconde |
+| `set_visible(id, visible)` | mostra/esconde (`"hud"` esconde também os widgets nativos: minimapa, bússola, seta) |
 | `set_disabled(id, disabled)` | desativa interação (restyle) |
 | `add_class(id, class)` / `remove_class(id, class)` | classes do stylesheet |
 | `toggle_class(id, class, on)` | o mais usado por HUD scripts |
@@ -659,6 +684,7 @@ snapshot do frame (bindings, estado por elemento, cliques, listas).
 | `set_checked(id, checked)` | estado de um `UiCheck` (classes `checked`/`unchecked` + tick sincronizam-se) |
 | `set_anim(id, spec)` | liga movimento em runtime (`"spin 3"`, `"pulse"`, `"bob 1.5 10"`, `"shake"`); `"none"` desliga |
 | `focus(id)` | dá o teclado a um `UiInput` (desfoca o anterior) |
+| `scale(factor)` | escala global da UI (`0.5..3.0`); multiplica a escala automática por resolução |
 | `open(id, open)` | abre/fecha um `UiModal` por id |
 | `select_tab(group, tab)` | seleciona tab num grupo |
 | `action(name, arg)` | levanta ação de gameplay (`learn`, `buy`, `sell`, `save`, `load`) |

@@ -60,7 +60,10 @@ fn test_set_pose_writes_local_transform() {
     assert!((transform.translation.z - 5.0).abs() < 1e-4);
     assert!((transform.scale.x - 2.0).abs() < 1e-4, "escala mantém-se");
     let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "yaw {yaw}");
+    assert!(
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "yaw {yaw}"
+    );
 }
 
 #[test]
@@ -1333,6 +1336,26 @@ fn test_game_kv_roundtrip_ignores_complex_values() {
     assert_eq!(game.raw_get::<f64>("n").unwrap(), 7.0);
     assert_eq!(game.raw_get::<String>("s").unwrap(), "x");
     assert!(game.raw_get::<bool>("b").unwrap());
+}
+
+/// Um load SUBSTITUI o estado: chaves que só existem na sessão atual não
+/// podem sobreviver a carregar um save anterior.
+#[test]
+fn test_game_kv_load_replaces_stale_state() {
+    let host = LuaScriptHost::new(PathBuf::from("scripts")).expect("host");
+    host.lua
+        .load("viber.game().stale = 1\nviber.game().keep = 'old'")
+        .exec()
+        .expect("chunk kv");
+    let mut kv = std::collections::BTreeMap::new();
+    kv.insert("keep".to_string(), serde_json::json!("new"));
+    crate::luau::game::json_to_game(&host.lua, &kv);
+    let game: Table = host.lua.named_registry_value("viber_game").unwrap();
+    assert!(
+        game.raw_get::<mlua::Value>("stale").unwrap().is_nil(),
+        "chave só da sessão sobreviveu ao load"
+    );
+    assert_eq!(game.raw_get::<String>("keep").unwrap(), "new");
 }
 
 #[test]

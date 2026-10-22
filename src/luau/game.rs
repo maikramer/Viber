@@ -40,8 +40,14 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                     "viber.load('{path}'): só caminhos relativos a scripts/ (sem '..')"
                 )));
             }
+            // Chave do cache = caminho RESOLVIDO (sem o prefixo histórico
+            // `scripts/`, que o loader aceita): a mesma chave em `modules` e
+            // em `evict_module` (hot-reload) — senão as duas grafias criavam
+            // dois módulos com estados separados e o reload não evictava.
+            let relative = path.strip_prefix("scripts/").unwrap_or(&path);
+            let key = relative.to_string();
             let modules: Table = lua.named_registry_value("viber_modules")?;
-            if let Ok(cached) = modules.raw_get::<mlua::Value>(path.clone())
+            if let Ok(cached) = modules.raw_get::<mlua::Value>(key.clone())
                 && !matches!(cached, mlua::Value::Nil)
             {
                 return Ok(cached);
@@ -50,7 +56,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 .app_data_ref::<ScriptCtx>()
                 .and_then(|ctx| ctx.scripts_dir.clone())
                 .ok_or_else(|| mlua::Error::runtime("viber.load sem scripts_dir"))?;
-            let full = dir.join(&path);
+            let full = dir.join(relative);
             let code = std::fs::read_to_string(&full)
                 .map_err(|e| mlua::Error::runtime(format!("viber.load('{path}'): {e}")))?;
             // Env sandbox próprio (mesma forma do chunk de entidade) — o
@@ -72,7 +78,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 mlua::Value::Nil => mlua::Value::Boolean(true),
                 other => other,
             };
-            modules.raw_set(path, value.clone())?;
+            modules.raw_set(key, value.clone())?;
             Ok(value)
         })?,
     )?;
@@ -190,6 +196,19 @@ pub fn json_to_game(lua: &Lua, kv: &std::collections::BTreeMap<String, serde_jso
     let Ok(game) = lua.named_registry_value::<Table>("viber_game") else {
         return;
     };
+    // Um load SUBSTITUI o estado do jogo. Sem limpar, as chaves que só
+    // existem na sessão atual (quest aceite, item apanhado, marco assinado)
+    // sobreviviam ao carregar um save anterior — `raw_set` só escrevia as
+    // chaves do ficheiro. Recolhe primeiro: mutar durante `pairs` é UB.
+    let stale: Vec<String> = game
+        .clone()
+        .pairs::<String, mlua::Value>()
+        .flatten()
+        .map(|(key, _)| key)
+        .collect();
+    for key in stale {
+        let _ = game.raw_remove(key);
+    }
     for (key, value) in kv {
         let lv = match value {
             serde_json::Value::Bool(b) => (*b).into_lua(lua),

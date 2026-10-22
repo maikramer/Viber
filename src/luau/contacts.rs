@@ -54,6 +54,7 @@ pub fn dispatch_contacts(
     mut host: ResMut<LuaScriptHost>,
     scripts: Query<&LuaScriptRef>,
     names: Query<&Name>,
+    props: Query<&crate::luau::ScriptProps>,
     globals: Query<&GlobalTransform>,
     parents: Query<&ChildOf>,
     sensors: Query<(), With<Sensor>>,
@@ -152,12 +153,16 @@ pub fn dispatch_contacts(
         .collect();
 
     for (owner, hook, other) in fires {
-        call(&mut host, &scripts, &globals, owner, hook, &other, dt);
+        call(
+            &mut host, &scripts, &names, &props, &globals, owner, hook, &other, dt,
+        );
     }
     for (owner, other, trigger) in stays {
         call(
             &mut host,
             &scripts,
+            &names,
+            &props,
             &globals,
             owner,
             ContactHook::stay(trigger),
@@ -254,6 +259,8 @@ fn touch(
 fn call(
     host: &mut LuaScriptHost,
     scripts: &Query<&LuaScriptRef>,
+    names: &Query<&Name>,
+    props: &Query<&crate::luau::ScriptProps>,
     globals: &Query<&GlobalTransform>,
     owner: Entity,
     hook: ContactHook,
@@ -280,6 +287,8 @@ fn call(
         other.name.as_deref(),
         other.pos,
         dt,
+        names.get(owner).ok().map(Name::to_string),
+        props.get(owner).ok().map(|props| props.0.clone()),
     ) {
         host.warn_once(&script.path, &error);
     }

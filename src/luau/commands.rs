@@ -46,8 +46,20 @@ pub enum ScriptCommand {
     },
     /// Empurrão do herói (dash/salto lateral) pelo character controller —
     /// colide com paredes, ao contrário do teleporte.
-    PushPlayer { velocity: Vec3 },
+    PushPlayer {
+        velocity: Vec3,
+    },
     HealPlayer(f32),
+    /// `viber.lantern(intensity)` — acende/reforça a lanterna do viajante
+    /// (a tocha equipada ilumina mesmo de dia; 0 = só a automática nocturna).
+    SetLantern(f32),
+    /// `viber.bone_offset(bone, rx, ry, rz)` — rotação ADITIVA num osso do
+    /// herói, aplicada por cima de qualquer animação (idle/walk/run).
+    /// `Quat::IDENTITY` remove a entrada.
+    SetBoneOffset {
+        bone: String,
+        rotation: Quat,
+    },
     /// Dispara um projétil de um `<ProjectileTemplate>` (`viber.fire_projectile`).
     FireProjectile {
         template: String,
@@ -55,15 +67,15 @@ pub enum ScriptCommand {
         target: Vec3,
         shooter: Option<Entity>,
     },
-     /// Destrutível com queda (`break-style: fall`) — tomba na direção
+    /// Destrutível com queda (`break-style: fall`) — tomba na direção
     /// herói→entidade e despawna no fim.
     Topple {
         entity: Entity,
     },
-     /// Reclama uma ação da UI (`viber.own_action("buy")`) — o handler nativo
+    /// Reclama uma ação da UI (`viber.own_action("buy")`) — o handler nativo
     /// correspondente cala e a ação chega a Lua via `viber.events()`.
     OwnUiAction(String),
-     /// Mensagem de UI (balão/toast) — consumida via [`ScriptToast`].
+    /// Mensagem de UI (balão/toast) — consumida via [`ScriptToast`].
     Toast(String),
     /// Registra alvo de interação ("[J] Minerar") na entidade.
     SetInteraction {
@@ -146,6 +158,13 @@ pub enum ScriptCommand {
     SaveNow,
     /// Pede um carregamento do save (`viber.load()`).
     LoadNow,
+    /// Grava/carrega um slot (`viber.save_slot(n)` / `viber.load_slot(n)`).
+    SaveSlot(u32),
+    LoadSlot(u32),
+    /// Troca o idioma em runtime (`viber.locale.set`).
+    SetLocale(String),
+    /// Fecha o jogo (`viber.quit`) — pedido limpo ao AppExit.
+    Quit,
     /// Vitais GENÉRICAS de entidade (`viber.entity_set_max_hp`): cria o
     /// `Health` se faltar (current = max); numa entidade existente
     /// redimensiona (current clampe ao novo max).
@@ -194,7 +213,9 @@ pub enum ScriptCommand {
     /// Marca a entidade como cadáver (`viber.corpse`): o jogo decide a morte;
     /// a engine só deixa de a animar e, se tiver `RagdollDeath`
     /// (`ragdoll="true"`), começa o ragdoll. Não despawna — isso é do jogo.
-    Corpse { entity: Entity },
+    Corpse {
+        entity: Entity,
+    },
     /// Anexa um GLB a um osso (`viber.attach`) ou remove o slot
     /// (`url = None`, `viber.detach`). Genérico: a engine não sabe o que é
     /// uma arma; só encontra o osso e pendura o prop.
@@ -240,7 +261,7 @@ pub enum ScriptCommand {
         on_spawned: Option<Function>,
         caller_path: Option<String>,
     },
-     /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
+    /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
     /// A escala fica. Com `own_system("locomotion")` o `player_movement` não
     /// disputa esta escrita no herói.
     SetPose {
@@ -256,11 +277,41 @@ pub enum ScriptCommand {
         pitch: f64,
         volume: f32,
         position: Option<Vec3>,
+        /// Entidade cujo script pediu o loop (o loop morre com ela). `None`
+        /// em chamadas fora de `on_update` (tick/REPL).
+        owner: Option<Entity>,
     },
     /// Pára um loop (`viber.sound_stop`).
     SoundStop(String),
     /// Força a layer de BGM (`viber.music.layer`). `None` devolve o automático.
     MusicLayer(Option<String>),
+    /// Liga/desliga a música de combate (`viber.music.combat`). `boss` promove
+    /// para a layer `boss`; `active=false` corta já (sem esperar o hold).
+    MusicCombat {
+        active: bool,
+        boss: bool,
+    },
+    /// Duck temporário de um bus (`viber.audio.duck`): `gain` linear durante
+    /// `secs` segundos. Expira sozinho.
+    AudioDuck {
+        bus: String,
+        gain: f32,
+        secs: f32,
+    },
+    /// Reverb dos buses de SFX/voz (`viber.audio.reverb`).
+    AudioReverb {
+        preset: String,
+        wet: Option<f32>,
+    },
+    /// Decal de impacto (`viber.decal`): quad projectado com fade.
+    Decal {
+        url: String,
+        position: Vec3,
+        normal: Vec3,
+        size: f32,
+        life: f32,
+        color: [f32; 3],
+    },
     /// Marcas de HUD (`viber.markers`): blips `(pos, tower)`, faróis e waypoint.
     SetMarkers {
         blips: Vec<(Vec3, bool)>,
@@ -268,5 +319,8 @@ pub enum ScriptCommand {
         waypoint: Option<(Vec3, String)>,
     },
     /// `viber.noise(loudness)` — audição das criaturas sem script.
-    Noise { pos: Vec3, loudness: f32 },
+    Noise {
+        pos: Vec3,
+        loudness: f32,
+    },
 }

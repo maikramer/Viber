@@ -26,6 +26,9 @@ use serde_json::{Value, json};
 
 /// Prefixo das anotações num script.
 pub const EXPORT_MARK: &str = "--@export";
+/// Agrupa os `--@export` seguintes no Inspector (secção Script). Sem nome
+/// (`--@group`) volta aos campos sem grupo.
+pub const GROUP_MARK: &str = "--@group";
 /// Prefixo dos atributos XML que carregam o valor de uma instância.
 pub const PROP_ATTR_PREFIX: &str = "prop-";
 
@@ -194,6 +197,8 @@ pub struct ExportDef {
     pub default_raw: Option<String>,
     /// Descrição (texto depois de `--` na linha da anotação).
     pub doc: String,
+    /// Grupo do Inspector (`--@group Nome` antes da anotação), se houver.
+    pub group: Option<String>,
     /// Linha (1-based) da anotação no script.
     pub line: usize,
 }
@@ -347,6 +352,7 @@ impl ExportDef {
             "attr": prop_attr(&self.name),
             "default": self.default.as_ref().map(PropValue::to_json),
             "doc": self.doc,
+            "group": self.group,
             "line": self.line,
         });
         match &self.ty {
@@ -368,6 +374,8 @@ impl ExportDef {
 /// Lê as anotações `--@export` de um script.
 pub fn parse_exports(source: &str) -> ScriptExports {
     let mut out = ScriptExports::default();
+    // Grupo corrente para os `--@export` seguintes (`--@group Nome`).
+    let mut group: Option<String> = None;
     for (index, line) in source.lines().enumerate() {
         let line_no = index + 1;
         // Funções globais: só `function nome(` no início da linha (as locais e
@@ -396,13 +404,21 @@ pub fn parse_exports(source: &str) -> ScriptExports {
             }
             continue;
         }
+        if let Some(rest) = line.trim_start().strip_prefix(GROUP_MARK) {
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                continue; // `--@groupfoo` não é anotação
+            }
+            let name = rest.trim();
+            group = (!name.is_empty()).then(|| name.to_owned());
+            continue;
+        }
         let Some(rest) = line.trim_start().strip_prefix(EXPORT_MARK) else {
             continue;
         };
         if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
             continue; // `--@exportfoo` não é anotação
         }
-        match parse_annotation(rest.trim(), line_no) {
+        match parse_annotation(rest.trim(), line_no, group.clone()) {
             Ok(def) if out.get(&def.name).is_some() => out.errors.push(ExportError {
                 line: line_no,
                 message: format!("prop `{}` declarado duas vezes", def.name),
@@ -453,7 +469,7 @@ fn parse_signal(text: &str, line: usize) -> Result<SignalDef, String> {
 }
 
 /// `nome: tipo [= default] [-- doc]`.
-fn parse_annotation(text: &str, line: usize) -> Result<ExportDef, String> {
+fn parse_annotation(text: &str, line: usize, group: Option<String>) -> Result<ExportDef, String> {
     let (body, doc) = split_doc(text);
     let (name, rest) = body
         .split_once(':')
@@ -483,6 +499,7 @@ fn parse_annotation(text: &str, line: usize) -> Result<ExportDef, String> {
         default,
         default_raw,
         doc: doc.to_owned(),
+        group,
         line,
     })
 }
@@ -802,6 +819,29 @@ mod tests {
 local x = 1 --@export not-at-start: number
 function on_update(dt) end
 "#;
+
+    #[test]
+    fn groups_bind_following_exports_until_reset() {
+        let exports = parse_exports(
+            "--@export top: number = 1\n\
+             --@group Espada\n\
+             --@export a: number = 2\n\
+             --@export b: number = 3\n\
+             --@group Tocha\n\
+             --@export c: number = 4\n\
+             --@group\n\
+             --@export bottom: number = 5\n",
+        );
+        assert!(exports.errors.is_empty(), "{:?}", exports.errors);
+        assert_eq!(exports.get("top").unwrap().group, None);
+        assert_eq!(exports.get("a").unwrap().group.as_deref(), Some("Espada"));
+        assert_eq!(exports.get("b").unwrap().group.as_deref(), Some("Espada"));
+        assert_eq!(exports.get("c").unwrap().group.as_deref(), Some("Tocha"));
+        assert_eq!(exports.get("bottom").unwrap().group, None);
+        let schema = exports.to_json();
+        assert_eq!(schema["exports"][1]["group"], "Espada");
+        assert_eq!(schema["exports"][4]["group"], serde_json::Value::Null);
+    }
 
     #[test]
     fn parses_every_type() {

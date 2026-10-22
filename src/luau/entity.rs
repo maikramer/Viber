@@ -244,7 +244,7 @@ pub fn entity_from_id(bits: i64) -> mlua::Result<bevy::prelude::Entity> {
 }
 
 /// Bits da entidade alvo: `id` explícito OU a entidade corrente.
-fn resolve_entity(lua: &Lua, id: Option<i64>) -> mlua::Result<bevy::prelude::Entity> {
+pub(crate) fn resolve_entity(lua: &Lua, id: Option<i64>) -> mlua::Result<bevy::prelude::Entity> {
     match id {
         Some(bits) => entity_from_id(bits),
         None => lua
