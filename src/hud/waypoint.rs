@@ -143,6 +143,7 @@ pub fn update_waypoint_arrow(
     markers: Option<Res<HudMarkers>>,
     interior: Option<Res<crate::worldsys::InteriorLighting>>,
     menus: Option<Res<crate::menus::MenusOpen>>,
+    hud_hidden: Option<Res<crate::hud::HudHidden>>,
     cameras: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     players: Query<&GlobalTransform, With<Player>>,
     mut roots: Query<(&mut Node, &mut Visibility, &WaypointArrowRoot)>,
@@ -153,7 +154,8 @@ pub fn update_waypoint_arrow(
         return;
     };
     let hidden = interior.as_deref().is_some_and(|state| state.active)
-        || menus.as_deref().is_some_and(|m| m.any());
+        || menus.as_deref().is_some_and(|m| m.any())
+        || hud_hidden.as_deref().is_some_and(|hidden| hidden.0);
     let target = markers.as_deref().and_then(|m| m.waypoint.as_ref());
     let (Some(target), Some((camera, camera_gt)), Some(player), false) = (
         target,

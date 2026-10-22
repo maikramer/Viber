@@ -56,7 +56,10 @@ pub fn drive_ui_checks(
             &mut UiClasses,
             Has<UiStyleDirty>,
         ),
-        Or<(Changed<UiCheck>, Changed<Interaction>)>,
+        (
+            Or<(Changed<UiCheck>, Changed<Interaction>)>,
+            Without<UiDisabled>,
+        ),
     >,
 ) {
     for (entity, interaction, mut check, mut classes, already_dirty) in &mut checks {
@@ -185,20 +188,31 @@ pub fn drive_ui_sliders(
             commands.entity(entity).insert(UiStyleDirty);
         }
         let fraction = slider.fraction() * 100.0;
+        // Escrita gated: atribuir o mesmo `Val` marcava o `Node` em `Changed`
+        // e o Taffy refazia o layout do slider em TODOS os frames.
         if let Ok(mut fill) = nodes.get_mut(slider.fill) {
+            let wanted = Val::Percent(fraction);
             if slider.vertical {
-                fill.height = Val::Percent(fraction);
-            } else {
-                fill.width = Val::Percent(fraction);
+                if fill.height != wanted {
+                    fill.height = wanted;
+                }
+            } else if fill.width != wanted {
+                fill.width = wanted;
             }
         }
         // The handle rides the fill edge: positioned by percentage so any
         // track size works without measuring pixels.
         if let Ok(mut handle) = nodes.get_mut(slider.handle) {
             if slider.vertical {
-                handle.top = Val::Percent(100.0 - fraction);
+                let wanted = Val::Percent(100.0 - fraction);
+                if handle.top != wanted {
+                    handle.top = wanted;
+                }
             } else {
-                handle.left = Val::Percent(fraction);
+                let wanted = Val::Percent(fraction);
+                if handle.left != wanted {
+                    handle.left = wanted;
+                }
             }
         }
     }
@@ -298,12 +312,28 @@ pub fn sync_ui_input_focus(
             commands.entity(entity).insert(UiStyleDirty);
         }
     }
-    for (entity, interaction, mut classes, already_dirty) in &mut inputs {
-        if *interaction == Interaction::Pressed && focus.0 != Some(entity) {
-            focus.0 = Some(entity);
-            if classes.add("focused") && !already_dirty {
-                commands.entity(entity).insert(UiStyleDirty);
-            }
+    // Um só alvo por frame: com o iterador mutável não se pode pedir outra
+    // entidade ao mesmo `Query` (o blur do anterior exige `get_mut`).
+    let pressed = inputs.iter_mut().find_map(|(entity, interaction, _, _)| {
+        (*interaction == Interaction::Pressed && focus.0 != Some(entity)).then_some(entity)
+    });
+    if let Some(entity) = pressed {
+        let previous = focus.0.replace(entity);
+        if let Some(previous) = previous
+            && previous != entity
+            && let Ok((_, _, mut classes, already_dirty)) = inputs.get_mut(previous)
+            && classes.remove("focused")
+            && !already_dirty
+        {
+            // Sem isto, clicar noutro campo deixava o antigo com o estilo de
+            // foco para sempre.
+            commands.entity(previous).insert(UiStyleDirty);
+        }
+        if let Ok((_, _, mut classes, already_dirty)) = inputs.get_mut(entity)
+            && classes.add("focused")
+            && !already_dirty
+        {
+            commands.entity(entity).insert(UiStyleDirty);
         }
     }
 }
@@ -367,7 +397,9 @@ pub fn drive_ui_tooltip(
     mut layer: ResMut<UiTooltipLayer>,
     hovered: Query<(&Interaction, &UiTooltipText)>,
     roots: Query<(Entity, &super::runtime::UiTag)>,
-    windows: Query<&Window>,
+    // A janela PRIMÁRIA, como no cursor: com mais do que uma janela o
+    // `single()` falhava e o tooltip ficava parado.
+    windows: Query<&Window, With<PrimaryWindow>>,
     // `Option`: mundos sem HUD (qa-agua, terrain demo) não inserem
     // `HudAssets` — exigir o resource panica a engine no arranque.
     assets: Option<Res<crate::hud::HudAssets>>,
@@ -379,6 +411,16 @@ pub fn drive_ui_tooltip(
     let Some(assets) = assets else {
         return;
     };
+    // A camada nasce como filha de um `UiRoot` e morre com ele (rebuild de
+    // cena/UI). Sem este reset, `layer.entity` apontava para uma entidade
+    // morta e o tooltip deixava de aparecer para o resto da sessão.
+    if let Some(tip) = layer.entity
+        && nodes.get(tip).is_err()
+    {
+        layer.entity = None;
+        layer.text_entity = None;
+        layer.showing = None;
+    }
     let target = hovered.iter().find_map(|(interaction, tooltip)| {
         (*interaction != Interaction::None).then(|| tooltip.0.clone())
     });

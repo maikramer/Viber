@@ -307,7 +307,7 @@ pub fn hud_minimap_update(
             Without<MinimapArrow>,
         ),
     >,
-    mut baked: Local<Option<Handle<Image>>>,
+    mut baked: Local<Option<(Entity, Handle<Image>)>>,
 ) {
     let Some(cam) = cameras.iter().next() else {
         return;
@@ -321,11 +321,13 @@ pub fn hud_minimap_update(
     };
     let scale = minimap_scale();
 
-    // Bake one-shot: no primeiro frame em que o terreno já existe. O custo
-    // é de carregamento, nunca de gameplay.
-    if baked.is_none()
-        && let Some(runtime) = runtime.as_deref()
-    {
+    // Bake one-shot por PAINEL: um `Local` só com o handle sobrevivia à troca
+    // de cena, e o minimapa novo ficava sem terreno (o antigo era despawnado
+    // com a raiz). A chave é a entidade do mapa.
+    let needs_bake = baked
+        .as_ref()
+        .is_none_or(|(entity, _)| *entity != map_entity);
+    if needs_bake && let Some(runtime) = runtime.as_deref() {
         let handle = images.add(bake_terrain_image(runtime));
         let span_px = runtime.spec.world_size * scale;
         commands.entity(map_entity).with_children(|map| {
@@ -352,13 +354,16 @@ pub fn hud_minimap_update(
                 MinimapTerrain,
             ));
         });
-        *baked = Some(handle);
+        *baked = Some((map_entity, handle));
     }
     // Sem terreno ainda (mundo a carregar): o resto do HUD do mapa espera —
     // pontos sobre vidro escuro sem contexto era o erro que o crítico apanhou.
-    if baked.is_none() {
+    if baked
+        .as_ref()
+        .is_none_or(|(entity, _)| *entity != map_entity)
+    {
         return;
-    };
+    }
 
     // O mapa desliza ao contrário do herói: o herói é o centro do painel.
     if let Ok(mut transform) = terrain.single_mut() {

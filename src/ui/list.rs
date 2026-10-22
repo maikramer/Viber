@@ -251,6 +251,11 @@ pub fn rebuild_ui_lists(world: &mut World, params: &mut RebuildParams) {
                         display: Some(display),
                         ..Default::default()
                     }));
+                    // O build inicial escondeu-o com `Visibility::Hidden`;
+                    // daqui em diante quem manda é o `display`, senão a
+                    // mensagem de lista vazia nunca aparecia (ficava oculta
+                    // mesmo com `display: flex`).
+                    label_entity.insert(Visibility::Inherited);
                     label_entity.insert(UiStyleDirty);
                 }
             }

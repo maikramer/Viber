@@ -493,7 +493,7 @@ Instalada por `src/ui/script.rs` sobre o host de scripting existente.
 |---------|--------|
 | `set_text(id, texto)` | escreve um `UiText` — ou o VALOR de um `UiInput` |
 | `set_value(id, v)` | valor de barra, cooldown **ou slider** (clampado ao intervalo) |
-| `set_visible(id, bool)` / `set_disabled(id, bool)` | visibilidade / estado `:disabled` |
+| `set_visible(id, bool)` / `set_disabled(id, bool)` | visibilidade / estado `:disabled` (`"hud"` inclui minimapa, bússola e seta nativos) |
 | `add_class(id, c)` / `remove_class(id, c)` / `toggle_class(id, c, on)` | estado visual |
 | `set_style(id, "prop: valor; …")` | override inline (todo o dialecto do §2) |
 | `set_style(id, "…", true)` | SUBSTITUI o inline inteiro (o merge nunca desfaz; isto sim) |
@@ -708,3 +708,18 @@ Código da engine importa `crate::ui::interaction::{Button, Interaction}` — o
 import explícito sombreia o do prelude. Migrar os consumidores para os
 componentes nativos do picking é uma reescrita da camada de consumo, não da
 entrada.
+
+## Navegação por gamepad
+
+`ui/gamepad.rs` dá foco direccional à UI quando um menu/modal está aberto
+(`MenusOpen::any()`): D-pad ou stick esquerdo movem, A acciona. O foco vive
+em `UiGamepadFocus` e o elemento recebe a classe `focused` — a folha de
+estilo do jogo deve pintá-la (o `:hover` não existe no comando). No mundo o
+stick continua a ser do herói: a navegação só corre com um menu aberto.
+
+## Texto localizado
+
+Um `<UiText>` cujo texto comece por `@` é uma chave de `locale/<lang>.json`:
+`ui::runtime::localize_ui_texts` resolve-a antes dos binds, e re-resolve
+quando `viber.locale.set(lang)` troca o idioma. Texto dinâmico (`bind=` ou
+`viber.ui.set_text`) é responsabilidade do script — use `viber.localize`.

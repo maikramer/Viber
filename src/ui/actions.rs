@@ -26,7 +26,7 @@ pub struct UiAction {
 #[derive(Debug, Default, Resource)]
 pub struct UiActionOwners(pub std::collections::HashSet<String>);
 
- /// Encaminha TODAS as ações da UI para a fila de eventos dos scripts
+/// Encaminha TODAS as ações da UI para a fila de eventos dos scripts
 /// (`viber.events()` → `{type="ui_action", name=..., arg=...}`). Os handlers
 /// nativos correm à mesma — a ação é lida por ambos os consumidores.
 pub fn forward_ui_actions(
@@ -45,4 +45,3 @@ pub fn forward_ui_actions(
         });
     }
 }
-

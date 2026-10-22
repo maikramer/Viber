@@ -139,6 +139,18 @@ pub fn collect_ui_widget_events(
     mut last_focus: Local<Option<Entity>>,
     mut last_tabs: Local<std::collections::HashMap<String, String>>,
 ) {
+    // Entities despawnadas (rows de listas, rebuild de cena) deixavam a
+    // entrada no mapa para sempre: memória a crescer e, pior, um id reciclado
+    // pelo ECS herdava o "último valor" do antigo e engolia o primeiro evento
+    // (ou emitia um HoverLeave falso). O registry só muda quando algo entra ou
+    // sai dele, por isso a limpeza não corre em frames parados.
+    if registry.is_changed() {
+        let live: std::collections::HashSet<Entity> = registry.by_id.values().copied().collect();
+        last_sliders.retain(|entity, _| live.contains(entity));
+        last_inputs.retain(|entity, _| live.contains(entity));
+        last_checks.retain(|entity, _| live.contains(entity));
+        last_hover.retain(|entity, _| live.contains(entity));
+    }
     for (entity, id, slider) in &sliders {
         if last_sliders.get(&entity).copied() != Some(slider.value) {
             events.push(UiEvent::ValueChanged {
@@ -170,13 +182,25 @@ pub fn collect_ui_widget_events(
     // continua por cima durante o clique).
     for (entity, id, interaction) in &interactions {
         let hovered = matches!(interaction, Interaction::Hovered | Interaction::Pressed);
-        if last_hover.get(&entity).copied() != Some(hovered) {
-            events.push(if hovered {
-                UiEvent::HoverEnter { id: id.0.clone() }
-            } else {
-                UiEvent::HoverLeave { id: id.0.clone() }
-            });
-            last_hover.insert(entity, hovered);
+        // `Changed<Interaction>` também dispara em `Added`: sem a entrada
+        // anterior, um elemento acabado de nascer emitia `HoverLeave` sem
+        // nunca ter estado por baixo do ponteiro.
+        match last_hover.get(&entity).copied() {
+            Some(previous) if previous == hovered => {}
+            Some(_) => {
+                events.push(if hovered {
+                    UiEvent::HoverEnter { id: id.0.clone() }
+                } else {
+                    UiEvent::HoverLeave { id: id.0.clone() }
+                });
+                last_hover.insert(entity, hovered);
+            }
+            None => {
+                if hovered {
+                    events.push(UiEvent::HoverEnter { id: id.0.clone() });
+                }
+                last_hover.insert(entity, hovered);
+            }
         }
     }
     // Foco: o teclado mudou de input — blur no antigo, focus no novo.

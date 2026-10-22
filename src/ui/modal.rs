@@ -25,7 +25,7 @@ use bevy::prelude::*;
 // Bevy 0.20: `Interaction`/`Button` do prelude são aliases de tipos privados.
 use crate::ui::interaction::Interaction;
 
-use super::runtime::{UiClasses, UiId, UiStyleDirty};
+use super::runtime::{UiClasses, UiDisabled, UiId, UiStyleDirty};
 
 /// A full-screen overlay toggled by a key.
 #[derive(Debug, Component)]
@@ -262,24 +262,35 @@ fn letter_key(name: &str) -> Option<KeyCode> {
 /// the toggle keys are ignored (Escape included — it blurs the field instead),
 /// so typing "Menu" in a text field never flings the menu open.
 pub fn drive_ui_modals(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    typing: Res<super::widgets::UiFocusedInput>,
+    mut typing: ResMut<super::widgets::UiFocusedInput>,
     mut open: ResMut<UiModalsOpen>,
-    mut modals: Query<(&mut UiModal, &mut Visibility, Option<&UiId>)>,
+    mut modals: Query<(Entity, &mut UiModal, &mut Visibility, Option<&UiId>)>,
+    parents: Query<&ChildOf>,
+    mut classes: Query<&mut UiClasses>,
 ) {
     let escape = typing.0.is_none() && keys.just_pressed(KeyCode::Escape);
     let mut anonymous = 0usize;
+    // Um modal que fecha não pode deixar o teclado preso a um input
+    // invisível: `drive_ui_modals` ignora todas as teclas de toggle
+    // enquanto `typing` estiver preenchido, e o jogo ficava sem menu.
+    let mut closed: Vec<Entity> = Vec::new();
     // Ids de modais ainda VIVOS. O estado `open` era reconciliado só a partir
     // dos componentes: um modal destruído (`viber.ui.destroy`, unload de
     // cena) deixava o id na lista e `menu_open()` ficava true para sempre.
     let mut live = std::collections::HashSet::new();
-    for (mut modal, mut visibility, id) in &mut modals {
+    for (entity, mut modal, mut visibility, id) in &mut modals {
+        let was_open = modal.open;
         let toggled = typing.0.is_none() && keys.just_pressed(modal.key);
         // Escape only ever closes: opening every modal with one key would be a
         // surprise, closing them all with it is the expected thing.
         let closed_by_escape = modal.open && modal.escape_closes && escape;
         if toggled || closed_by_escape {
             modal.open = if closed_by_escape { false } else { !modal.open };
+        }
+        if was_open && !modal.open {
+            closed.push(entity);
         }
         let wanted = if modal.open {
             Visibility::Inherited
@@ -304,10 +315,43 @@ pub fn drive_ui_modals(
             }
         }
     }
-    open.open.retain(|id| live.contains(id));
+    // Escritas gated: `UiModalsOpen` é lido com `is_changed()` pelo
+    // `collect_menu_lists` e pelo publish dos scripts; um `retain`/atribuição
+    // incondicional marcava-o em todos os frames e as listas do menu eram
+    // reconstruídas 60×/s com o menu fechado.
+    if open.open.iter().any(|id| !live.contains(id)) {
+        open.open.retain(|id| live.contains(id));
+    }
     // Modais sem id não entram em `open`, mas um menu em ecrã inteiro rouba
     // input ao gameplay seja qual for o id — contam em `any`.
-    open.anonymous = anonymous;
+    if open.anonymous != anonymous {
+        open.anonymous = anonymous;
+    }
+    // Blur se o input focado estava dentro de um modal que fechou.
+    if let Some(focused) = typing.0
+        && !closed.is_empty()
+    {
+        let in_closed = closed.iter().any(|root| {
+            let mut current = Some(focused);
+            while let Some(entity) = current {
+                if entity == *root {
+                    return true;
+                }
+                current = parents.get(entity).ok().map(ChildOf::parent);
+            }
+            false
+        });
+        if in_closed {
+            typing.0 = None;
+            if let Ok(mut classes) = classes.get_mut(focused) {
+                if classes.remove("focused") {
+                    commands
+                        .entity(focused)
+                        .insert(super::runtime::UiStyleDirty);
+                }
+            }
+        }
+    }
 }
 
 /// Seeds each group's selection from the first page authored in it, so a menu
@@ -343,7 +387,7 @@ pub fn seed_ui_tabs(
 pub fn drive_ui_tabs(
     mut commands: Commands,
     mut tabs: ResMut<UiTabs>,
-    clicked: Query<(&Interaction, &UiTabButton), Changed<Interaction>>,
+    clicked: Query<(&Interaction, &UiTabButton), (Changed<Interaction>, Without<UiDisabled>)>,
     mut buttons: Query<(Entity, &UiTabButton, &mut UiClasses)>,
 ) {
     for (interaction, button) in &clicked {
@@ -407,8 +451,13 @@ pub fn drive_ui_tab_keys(
     open: Res<UiModalsOpen>,
     mut tabs: ResMut<UiTabs>,
     buttons: Query<(&UiTabButton, Option<&super::runtime::UiOrder>)>,
+    focus: Option<Res<super::widgets::UiFocusedInput>>,
 ) {
     if !open.any() {
+        return;
+    }
+    // Digitar "1." num UiInput também trocava de aba (e escondia a página).
+    if focus.as_deref().is_some_and(|f| f.0.is_some()) {
         return;
     }
     let step = if keys.just_pressed(KeyCode::Period) || keys.just_pressed(KeyCode::BracketRight) {
@@ -643,7 +692,7 @@ mod tests {
             Query<(&UiTabButton, Option<&UiOrder>)>,
         )> = bevy::ecs::system::SystemState::new(world);
         let (keys, open, tabs, buttons) = state.get_mut(world).expect("system state");
-        drive_ui_tab_keys(keys, open, tabs, buttons);
+        drive_ui_tab_keys(keys, open, tabs, buttons, None);
     }
 
     /// One fresh key press. `ButtonInput::press` only records `just_pressed`

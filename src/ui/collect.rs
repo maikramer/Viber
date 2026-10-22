@@ -87,6 +87,7 @@ pub fn retire_legacy_toast_layer(
 /// floating over the world, and anything longer reads as a tooltip.
 pub fn collect_ui_prompt(
     mut prompt: ResMut<UiPrompt>,
+    time: Res<Time>,
     players: Query<&GlobalTransform, With<crate::player::Player>>,
     targets: Query<
         (&GlobalTransform, &crate::luau::ScriptInteraction),
@@ -94,7 +95,7 @@ pub fn collect_ui_prompt(
     >,
 ) {
     let Ok(player) = players.single() else {
-        prompt.label.clear();
+        prompt.clear();
         return;
     };
     let origin = player.translation();
@@ -124,10 +125,15 @@ pub fn collect_ui_prompt(
         Some((_, key, label)) => {
             prompt.key = key;
             prompt.label = label;
+            // Interação nativa é dona do prompt enquanto estiver ao alcance.
+            prompt.script_ttl = 0.0;
         }
         None => {
-            prompt.key.clear();
-            prompt.label.clear();
+            // Um prompt de script foi publicado DEPOIS deste collect (os
+            // scripts correm após UiSet::Collect). Preserva-o até expirar;
+            // sem TTL, um controller removido (troca de cena) deixava o
+            // verbo preso no HUD.
+            age_script_prompt(&mut prompt, time.delta_secs());
         }
     }
 }
@@ -165,11 +171,21 @@ pub fn collect_ui_data(
     prompt: Option<Res<UiPrompt>>,
     toast: Res<UiToast>,
 ) {
+    // Escritas gated: `UiData` é `ResMut` e um `deref_mut` marca o recurso em
+    // `Changed`; escrever a vida/chuva incondicionalmente fazia o
+    // `publish_ui_script_view` clonar o snapshot inteiro em todos os frames.
     if let Ok(Some(health)) = hero.single() {
-        data.health = health.current;
-        data.health_max = health.max;
+        if data.health != health.current {
+            data.health = health.current;
+        }
+        if data.health_max != health.max {
+            data.health_max = health.max;
+        }
     }
-    data.weather_rain = weather.as_deref().map(|w| w.rain).unwrap_or(0.0);
+    let rain = weather.as_deref().map(|w| w.rain).unwrap_or(0.0);
+    if data.weather_rain != rain {
+        data.weather_rain = rain;
+    }
     if let Some(day) = day.as_deref() {
         let text = clock_text(day.minute_of_day);
         if data.clock != text {
@@ -394,6 +410,44 @@ fn tick(window: &mut f32, dt: f32) {
 pub struct UiPrompt {
     pub key: String,
     pub label: String,
+    /// Tempo restante de um prompt publicado por script (`viber.prompt`).
+    /// Os scripts correm depois de [`collect_ui_prompt`], portanto um prompt
+    /// deles sobrevive ao collect seguinte enquanto estiver fresco. Uma
+    /// interação nativa (`<ScriptInteraction>`) tem prioridade e zera isto.
+    pub script_ttl: f32,
+}
+
+/// Quanto dura um prompt de script sem ser republicado (s). O controller
+/// republica por frame; se for removido (troca de cena), o verbo expira.
+pub const SCRIPT_PROMPT_TTL: f32 = 0.25;
+
+impl UiPrompt {
+    /// Publica o prompt de um script; os `on_update` seguintes renovam o TTL.
+    pub fn set_script(&mut self, key: String, label: String) {
+        self.key = key;
+        self.label = label;
+        self.script_ttl = SCRIPT_PROMPT_TTL;
+    }
+
+    /// Limpa o prompt (script cancelou ou o alvo nativo saiu de alcance).
+    pub fn clear(&mut self) {
+        self.key.clear();
+        self.label.clear();
+        self.script_ttl = 0.0;
+    }
+}
+
+/// Envelhece um prompt de script. Sem TTL (prompt nativo ou já vazio), limpa;
+/// com TTL, desconta o frame e limpa quando expira.
+pub(crate) fn age_script_prompt(prompt: &mut UiPrompt, dt: f32) {
+    if prompt.script_ttl <= 0.0 {
+        prompt.clear();
+        return;
+    }
+    prompt.script_ttl = (prompt.script_ttl - dt).max(0.0);
+    if prompt.script_ttl <= 0.0 {
+        prompt.clear();
+    }
 }
 
 /// Reads `"2/5"` as `0.4`; anything else is 0.
@@ -553,5 +607,32 @@ mod tests {
         assert_eq!(progress_fraction(""), 0.0);
         assert_eq!(progress_fraction("done"), 0.0);
         assert_eq!(progress_fraction("3/0"), 0.0);
+    }
+
+    #[test]
+    fn test_script_prompt_survives_collect_until_ttl_expires() {
+        let mut prompt = UiPrompt::default();
+        prompt.set_script("J".into(), "Cortar".into());
+        // O controller republica por frame; meio TTL ainda mostra o verbo.
+        age_script_prompt(&mut prompt, SCRIPT_PROMPT_TTL * 0.5);
+        assert_eq!(prompt.key, "J");
+        assert_eq!(prompt.label, "Cortar");
+        // Sem republicação, o prompt expira (troca de cena/script removido).
+        age_script_prompt(&mut prompt, SCRIPT_PROMPT_TTL);
+        assert!(prompt.key.is_empty());
+        assert!(prompt.label.is_empty());
+        assert_eq!(prompt.script_ttl, 0.0);
+    }
+
+    #[test]
+    fn test_native_prompt_never_outlives_the_target() {
+        let mut prompt = UiPrompt {
+            key: "E".into(),
+            label: "Falar".into(),
+            script_ttl: 0.0,
+        };
+        age_script_prompt(&mut prompt, 0.0);
+        assert!(prompt.key.is_empty());
+        assert!(prompt.label.is_empty());
     }
 }

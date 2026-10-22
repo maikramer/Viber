@@ -21,6 +21,17 @@ pub const GAIN: f32 = 0.62;
 pub const MIN_SCALE: f32 = 0.72;
 pub const MAX_SCALE: f32 = 2.0;
 
+/// Multiplicador do utilizador (menu de acessibilidade). 1.0 = escala
+/// automática por resolução; 0.5..3.0 é o intervalo aceite.
+#[derive(Debug, Clone, Copy, Resource)]
+pub struct UiUserScale(pub f32);
+
+impl Default for UiUserScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 /// HUD scale factor for a window height.
 pub fn hud_scale_for_height(height: f32) -> f32 {
     if height <= 0.0 {
@@ -55,17 +66,26 @@ pub fn ui_viewport(width: f32, height: f32, scale: f32) -> (f32, f32) {
 
 /// Keeps [`UiScale`] in step with the primary window.
 pub fn sync_ui_scale(
+    mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scale: ResMut<UiScale>,
+    user: Res<UiUserScale>,
     mut minimaps: Query<&mut Node, With<crate::hud::minimap::MinimapRange>>,
+    elements: Query<Entity, With<super::runtime::UiTag>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
     let (width, height) = (window.resolution.width(), window.resolution.height());
-    let wanted = hud_scale_for_window(width, height);
+    let wanted = (hud_scale_for_window(width, height) * user.0.clamp(0.5, 3.0)).clamp(0.5, 3.0);
     if (scale.0 - wanted).abs() > 1e-3 {
         scale.0 = wanted;
+        // Unidades de viewport e media queries são resolvidas no re-estilo
+        // contra esta escala; sem marcar dirty, `viber.ui.scale(n)` só teria
+        // efeito no próximo resize.
+        for entity in &elements {
+            commands.entity(entity).insert(super::runtime::UiStyleDirty);
+        }
     }
     // A faixa inferior fica reservada às ações nas janelas estreitas — medida
     // no mesmo espaço autoral que as media queries do CSS (ver ui_viewport).

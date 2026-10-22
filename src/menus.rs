@@ -65,7 +65,7 @@ pub fn is_zone_notice(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.starts_with("Entraste em:") || trimmed == "De volta ao vale."
 }
- /// Abre/fecha o estado dos menus que roubam input à hotbar.
+/// Abre/fecha o estado dos menus que roubam input à hotbar.
 #[derive(Debug, Clone, Resource, Default)]
 pub struct MenusOpen {
     pub modal: bool,
@@ -371,8 +371,14 @@ pub fn options_body(selected: usize, volumes: (f32, f32, f32), controls: &str) -
     )
 }
 
-/// Corpo de uma tab (puro; texturas dos testes).
- fn spawn_loading_screen(mut commands: Commands) {
+/// Ecrã de carregamento: o título vem do `config.yaml` do jogo (antes era o
+/// nome fixo do protótipo e aparecia em qualquer jogo). `...` em ASCII: o
+/// atlas de fontes da engine não tem o glifo `…` e saía um retângulo.
+fn spawn_loading_screen(mut commands: Commands, config: Option<Res<crate::config::GameConfig>>) {
+    let title = config
+        .and_then(|config| config.title.clone())
+        .map(|title| title.to_uppercase())
+        .unwrap_or_else(|| "DISCORDIA".to_string());
     commands
         .spawn((
             Node {
@@ -391,7 +397,7 @@ pub fn options_body(selected: usize, volumes: (f32, f32, f32), controls: &str) -
         ))
         .with_children(|root| {
             root.spawn((
-                Text::new("DISCORDIA\n\na forjar o mundo…"),
+                Text::new(format!("{title}\n\na forjar o mundo...")),
                 TextColor(Color::srgb(0.95, 0.85, 0.6)),
                 TextFont::from_font_size(26.0),
             ));
@@ -538,7 +544,7 @@ mod tests {
         assert_eq!(next_tab(1, 4), 1);
     }
 
-     #[test]
+    #[test]
     fn test_toast_constants_sane() {
         assert!((1..=6).contains(&TOAST_CAP));
         assert!((2.0..=5.0).contains(&TOAST_LIFETIME));

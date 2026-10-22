@@ -390,6 +390,9 @@ pub struct UiStyleInfo<'w, 's> {
     pub letters: Query<'w, 's, &'static mut LetterSpacing>,
     /// Estado de transição por elemento — diff de alvos e valores exibidos.
     pub tweens: Query<'w, 's, &'static mut super::tween::UiTransitions>,
+    /// `@keyframes` em curso: o overlay é cozido no `StyleProps` resolvido
+    /// (o driver só avança o tempo e marca dirty).
+    pub animations: Query<'w, 's, &'static super::tween::UiAnimation>,
 }
 
 /// Recomputes and writes the style of every dirty element.
@@ -593,30 +596,6 @@ pub fn apply_ui_styles(
         };
         props.apply_inherited(&base);
         resolve_relative_font(&mut props, parent_font, root_font);
-        // Opacidade efetiva = a PRÓPRIA × a CSS dos ancestrais (GRUPO — uma
-        // `opacity: 0.4` num pai esbate tudo lá dentro, como no browser) × os
-        // fades de toda a cadeia. A fade is inherited: an ancestor dissolving
-        // takes its whole widget with it instead of leaving the labels at
-        // full strength.
-        let mut opacity = props.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
-        for (index, ancestor) in chain.iter().enumerate() {
-            if index + 1 < chain.len() {
-                let ancestor_css = fresh
-                    .get(ancestor)
-                    .and_then(|props| props.opacity)
-                    .or_else(|| {
-                        computed
-                            .get(*ancestor)
-                            .ok()
-                            .and_then(|computed| computed.0.opacity)
-                    })
-                    .unwrap_or(1.0);
-                opacity *= ancestor_css.clamp(0.0, 1.0);
-            }
-            if let Ok(fade) = fades.get(*ancestor) {
-                opacity *= fade.alpha.clamp(0.0, 1.0);
-            }
-        }
         // ── transitions: diff de alvos + inject do valor exibido ──────────
         // O diff corre contra os ALVOS guardados (não contra o `UiComputed`,
         // que contém valores interpolados a meio de um tween). Um tween
@@ -665,6 +644,57 @@ pub fn apply_ui_styles(
                 }
             }
             commands.entity(entity).insert(created);
+        }
+        // ── @keyframes: o overlay entra no estilo computado ───────────────
+        // O driver da animação avança o `elapsed` e marca dirty, mas o
+        // fan-out para `BackgroundColor`/`UiTransform`/… é DESTE sistema;
+        // sem cozer o overlay aqui, um keyframe de `background`/`scale`
+        // mudava só o `UiComputed` e nunca chegava ao ecrã. O driver fica
+        // congelado no último frame quando a animação tem `forwards`.
+        if let Ok(animation) = info.animations.get(entity)
+            // O componente pode estar um frame atrás da cascata (o sync corre
+            // mais tarde): não cozer um overlay que já foi removido/trocado.
+            && props.animation.as_ref().is_some_and(|spec| {
+                spec.name.eq_ignore_ascii_case(&animation.spec.name)
+            })
+            && let Some(frames) = sheet.keyframes(&animation.spec.name)
+        {
+            let offset = super::tween::animation_offset(&animation.spec, animation.elapsed)
+                .or_else(|| {
+                    super::tween::animation_finished(&animation.spec, animation.elapsed)
+                        .then(|| super::tween::animation_terminal_offset(&animation.spec))
+                        .flatten()
+                });
+            if let Some(overlay) = offset
+                .and_then(|offset| super::tween::sample_keyframes(frames, offset, &animation.spec))
+            {
+                props.merge(&overlay);
+            }
+        }
+        // Opacidade efetiva = a PRÓPRIA × a CSS dos ancestrais (GRUPO — uma
+        // `opacity: 0.4` num pai esbate tudo lá dentro, como no browser) × os
+        // fades de toda a cadeia. A fade is inherited: an ancestor dissolving
+        // takes its whole widget with it instead of leaving the labels at
+        // full strength. DEPOIS da injeção de transitions/keyframes: um tween
+        // de `opacity` tem de esbater as cores escritas mais abaixo.
+        let mut opacity = props.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+        for (index, ancestor) in chain.iter().enumerate() {
+            if index + 1 < chain.len() {
+                let ancestor_css = fresh
+                    .get(ancestor)
+                    .and_then(|props| props.opacity)
+                    .or_else(|| {
+                        computed
+                            .get(*ancestor)
+                            .ok()
+                            .and_then(|computed| computed.0.opacity)
+                    })
+                    .unwrap_or(1.0);
+                opacity *= ancestor_css.clamp(0.0, 1.0);
+            }
+            if let Ok(fade) = fades.get(*ancestor) {
+                opacity *= fade.alpha.clamp(0.0, 1.0);
+            }
         }
         commands
             .entity(entity)
@@ -719,12 +749,18 @@ pub fn apply_ui_styles(
             // Contorno escuro garantido (regra do crítico, r5): via commands
             // porque `Outline` nem sempre existe no entity (mesmo padrão do
             // TextShadow abaixo).
-            if let Some(spec) = props.outline {
-                commands.entity(entity).insert(Outline::new(
-                    Val::Px(spec.width),
-                    Val::ZERO,
-                    fade(spec.color, opacity),
-                ));
+            match props.outline {
+                Some(spec) => {
+                    commands.entity(entity).insert(Outline::new(
+                        Val::Px(spec.width),
+                        Val::ZERO,
+                        fade(spec.color, opacity),
+                    ));
+                }
+                // Regra desapareceu (class swap): o contorno tem de sair.
+                None => {
+                    commands.entity(entity).remove::<Outline>();
+                }
             }
             // Sombras: lista vazia = `box-shadow: none` explícito (remove).
             match &props.box_shadow {
@@ -738,7 +774,11 @@ pub fn apply_ui_styles(
                     }
                     commands.entity(entity).insert(BoxShadow(owned));
                 }
-                None => {}
+                // Sem declaração = sem sombra (o `.tab.active` ficava com o
+                // glow âmbar para sempre depois de perder a classe).
+                None => {
+                    commands.entity(entity).remove::<BoxShadow>();
+                }
             }
             // Recompute even when the declaration disappears (class/media
             // changes): auto restores each widget's policy, not always Block.
@@ -773,8 +813,14 @@ pub fn apply_ui_styles(
                         .remove::<super::widgets::UiCursorIcon>();
                 }
             }
-            if let (Some(mut z), Some(value)) = (z_index, props.z_index) {
-                *z = ZIndex(value);
+            // Reset incluído: um `z` que veio de uma classe/@media que deixou
+            // de valer voltava a 0 (semântica apply-fresh), em vez de ficar
+            // preso por cima dos irmãos.
+            if let Some(mut z) = z_index {
+                let wanted = ZIndex(props.z_index.unwrap_or(0));
+                if *z != wanted {
+                    *z = wanted;
+                }
             }
             if let Some(mut transform) = transform {
                 // Reset+apply: sem `anim` e sem rotate/scale/translate, o
@@ -805,6 +851,10 @@ pub fn apply_ui_styles(
             }
             if let Some(weight) = props.font_weight {
                 font.weight = FontWeight(weight.clamp(1.0, 1000.0) as u16);
+            } else {
+                // `font-weight: bold` de `.tab.active` sobrevivia à troca de
+                // aba (a regra base não declara weight).
+                font.weight = FontWeight(400);
             }
             // letter-spacing: `em` fecha contra a fonte computada do próprio
             // elemento; sem declaração, o espaçamento volta a 0 (um class-swap
@@ -1040,9 +1090,11 @@ pub fn sync_text_overflow(
                 full_w = content_w; // primeira medição do texto completo
             }
             let reference = if m.keep == chars { content_w } else { full_w };
-            if reference > 0.0 {
+            // Um único caractere não se trunca: `clamp(1, 0)` entrava em
+            // pânico (min > max) numa caixa estreita com `text-overflow`.
+            if reference > 0.0 && chars > 1 {
                 let ratio = ((node_w / reference) * MARGIN).clamp(0.0, 1.0);
-                let new_keep = ((chars as f32 * ratio) as usize).clamp(1, chars.saturating_sub(1));
+                let new_keep = ((chars as f32 * ratio) as usize).clamp(1, chars - 1);
                 let cut: String = m.full.chars().take(new_keep).collect();
                 desired = Some((format!("{cut}…"), new_keep));
             }
@@ -1145,6 +1197,23 @@ pub fn mark_resize_dirty(
     }
 }
 
+/// Bevy só aplica `ScrollPosition` nos eixos com `OverflowAxis::Scroll`
+/// (`bevy_ui::layout`); `<UiPanel scroll="y">` inseria o `UiScroll` mas deixava
+/// o `Node::overflow` no omissão, e a roda escrevia uma posição que o layout
+/// descartava — todos os painéis roláveis ficavam presos.
+pub fn sync_scroll_overflow(mut scrolls: Query<(&super::modal::UiScroll, &mut Node)>) {
+    for (scroll, mut node) in &mut scrolls {
+        let wanted = if scroll.vertical {
+            Overflow::scroll_y()
+        } else {
+            Overflow::scroll_x()
+        };
+        if node.overflow != wanted {
+            node.overflow = wanted;
+        }
+    }
+}
+
 /// Width (or height) a bar fill gets for a 0..1 value.
 pub fn bar_fill_size(value: f32) -> Val {
     Val::Percent((value.clamp(0.0, 1.0) * 100.0).max(0.0))
@@ -1229,6 +1298,26 @@ pub fn collect_ui_clicks(
 /// para o frame seguinte.
 pub fn clear_ui_clicks(mut clicks: ResMut<UiClicks>) {
     clicks.0.clear();
+}
+
+/// Resolve as chaves `@nome` do texto declarativo (`<UiText>`) no idioma
+/// ativo. Corre antes dos binds: um `bind=` dinâmico continua a ganhar.
+pub fn localize_ui_texts(
+    locale: Option<Res<crate::locale::Locale>>,
+    mut texts: Query<(&super::tree::UiTextKey, &mut Text)>,
+) {
+    let Some(locale) = locale else {
+        return;
+    };
+    for (key, mut text) in &mut texts {
+        if !key.0.contains('@') {
+            continue;
+        }
+        let resolved = locale.resolve(&key.0);
+        if text.0 != resolved {
+            text.0 = resolved;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1830,6 +1919,55 @@ mod tests {
             let mirror = world.get::<UiTextOverflowMirror>(entity).unwrap();
             assert_eq!(mirror.keep, full.chars().count());
         }
+    }
+
+    #[test]
+    fn test_keyframes_overlay_is_baked_into_the_components() {
+        // O driver só marca dirty; o fan-out é daqui. Sem o overlay cozido
+        // no `StyleProps`, um keyframe de `background` mudava o `UiComputed`
+        // e deixava o `BackgroundColor` na cor da cascata (animação invisível).
+        use super::super::style::{AnimationSpec, Iterations};
+        use super::super::tween::{Easing, UiAnimation};
+        let mut app = style_app();
+        app.world_mut().resource_mut::<StyleSheet>().parse_into(
+            ".pulse { animation: pulse 1 linear infinite }
+             @keyframes pulse { from { background: #000000 } to { background: #ffffff } }",
+        );
+        let element = app
+            .world_mut()
+            .spawn((
+                Node::default(),
+                BackgroundColor(Color::NONE),
+                UiTag("uipanel".into()),
+                UiClasses::parse("pulse"),
+                UiAnimation {
+                    spec: AnimationSpec {
+                        name: "pulse".into(),
+                        duration: 1.0,
+                        easing: Easing::Linear,
+                        delay: 0.0,
+                        iterations: Iterations::Infinite,
+                        alternate: false,
+                        reverse: false,
+                        fill_forwards: false,
+                    },
+                    elapsed: 0.5,
+                    frozen: false,
+                },
+                UiStyleDirty,
+            ))
+            .id();
+        app.update();
+        let color = app
+            .world()
+            .get::<BackgroundColor>(element)
+            .expect("background component")
+            .0
+            .to_srgba();
+        assert!(
+            (color.red - 0.5).abs() < 0.05,
+            "meio do keyframe = cinzento médio, veio {color:?}"
+        );
     }
 
     #[test]

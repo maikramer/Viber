@@ -321,7 +321,12 @@ fn parse_keyframe_offset(text: &str) -> Option<f32> {
 fn parse_time(word: &str) -> Option<f32> {
     let finite = |v: f32| v.is_finite().then_some(v);
     if let Some(ms) = word.strip_suffix("ms") {
-        return ms.trim().parse::<f32>().ok().and_then(finite).map(|v| v / 1000.0);
+        return ms
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .and_then(finite)
+            .map(|v| v / 1000.0);
     }
     if let Some(seconds) = word.strip_suffix('s') {
         return seconds.trim().parse::<f32>().ok().and_then(finite);
@@ -1995,15 +2000,25 @@ fn apply_declaration(props: &mut StyleProps, name: &str, value: &str) -> bool {
             // campos próprios e o runtime fecha-as contra a base do pai.
             // "rem" tem de ser testado ANTES de "em" (termina em "em").
             let value = value.trim();
+            // As três formas são exclusivas: `font-size: 1.2em; font-size: 20`
+            // tem de valer 20 (última declaração ganha). Sem limpar as
+            // outras, o `em` antigo sobrevivia no merge e voltava a ganhar
+            // no `resolve_relative_font`.
             if let Some(n) = value
                 .strip_suffix("rem")
                 .and_then(|n| n.trim().parse().ok())
             {
                 props.font_size_rem = Some(n);
+                props.font_size_em = None;
+                props.font_size = None;
             } else if let Some(n) = value.strip_suffix("em").and_then(|n| n.trim().parse().ok()) {
                 props.font_size_em = Some(n);
-            } else {
-                assign(&mut props.font_size, parse_measure_in(value, name));
+                props.font_size_rem = None;
+                props.font_size = None;
+            } else if let Some(parsed) = parse_measure_in(value, name) {
+                props.font_size = Some(parsed);
+                props.font_size_rem = None;
+                props.font_size_em = None;
             }
         }
         "font-weight" | "weight" => props.font_weight = parse_font_weight(value),
@@ -2058,12 +2073,12 @@ fn apply_declaration(props: &mut StyleProps, name: &str, value: &str) -> bool {
                     other => color = parse_color(other).or(color),
                 }
             }
-            if underline != Decoration::Off {
-                props.text_underline = Some(underline);
-            }
-            if strike != Decoration::Off {
-                props.text_strikethrough = Some(strike);
-            }
+            // O shorthand escreve SEMPRE os dois campos: `text-decoration:
+            // none` numa regra mais específica tem de poder desligar o
+            // sublinhado que uma regra inferior ligou (`Off` é a declaração
+            // explícita; `None` no campo seria "sem declaração").
+            props.text_underline = Some(underline);
+            props.text_strikethrough = Some(strike);
         }
         "underline" => props.text_underline = Some(parse_decoration(value)),
         "strikethrough" | "line-through" => {

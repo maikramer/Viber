@@ -136,7 +136,10 @@ pub fn hud_compass_update(
             node.left = wanted;
         }
         let sector = sector_distance(&bearings, dist.bearing_deg, 22.5);
-        let wanted_visibility = if sector.is_some() {
+        // Fora do alcance da faixa a letra esconde-se; a distância tem de
+        // seguir a mesma regra, senão ficava a flutuar em `left = -100`.
+        let on_strip = compass_offset_px(delta, 230.0, 55.0).is_some();
+        let wanted_visibility = if sector.is_some() && on_strip {
             Visibility::Inherited
         } else {
             Visibility::Hidden

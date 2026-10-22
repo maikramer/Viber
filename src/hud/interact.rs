@@ -3,7 +3,6 @@
 
 use bevy::prelude::*;
 
-
 /// Marker for the interaction prompt node (shown near a `<DialogueNPC>`).
 #[derive(Component)]
 pub struct HudPrompt {
@@ -70,7 +69,7 @@ pub fn hud_balloon_update(
     let dt = time.delta_secs();
     for (mut visibility, mut balloon, children) in &mut balloons {
         let visible = *visibility == Visibility::Visible;
-        if !balloon_tick(&mut balloon.timer, visible, dt) {
+        if !balloon_tick(&mut balloon.timer, visible, dt) && visible {
             *visibility = Visibility::Hidden;
             if let Some(child) = children.first()
                 && let Ok(mut text) = texts.get_mut(*child)
@@ -93,10 +92,15 @@ pub fn apply_subtitle_scale(
         return;
     };
     let px = crate::a11y::subtitle_px(15.0, &a11y);
+    let wanted: bevy::text::FontSize = px.into();
     for children in &balloons {
         for child in children.iter() {
             if let Ok(mut font) = fonts.get_mut(child) {
-                font.font_size = px.into();
+                // Escrita gated: o mesmo tamanho marcava `TextFont` em
+                // `Changed` e o texto era re-layoutizado em todos os frames.
+                if font.font_size != wanted {
+                    font.font_size = wanted;
+                }
             }
         }
     }

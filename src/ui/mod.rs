@@ -21,6 +21,7 @@ pub mod bind;
 pub mod collect;
 pub mod events;
 pub mod fade;
+pub mod gamepad;
 pub mod interaction;
 pub mod list;
 pub mod menu_data;
@@ -95,6 +96,8 @@ impl bevy::app::Plugin for UiPlugin {
             .init_resource::<UiTabs>()
             .init_resource::<widgets::UiFocusedInput>()
             .init_resource::<widgets::UiTooltipLayer>()
+            .init_resource::<gamepad::UiGamepadFocus>()
+            .init_resource::<scale::UiUserScale>()
             .init_resource::<actions::UiActionOwners>()
             .init_resource::<UiEvents>()
             .init_resource::<script::UiScriptBinds>()
@@ -143,9 +146,14 @@ impl bevy::app::Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (
+                    // Gamepad primeiro: move o foco e acciona ANTES de
+                    // `collect_ui_clicks` ler `Changed<Interaction>`.
+                    gamepad::drive_ui_gamepad_nav,
                     runtime::collect_ui_clicks,
                     // Emissores de eventos de widget (value/text/check/focus/tab).
                     events::collect_ui_widget_events,
+                    // `@chave` do texto declarativo antes dos binds dinâmicos.
+                    runtime::localize_ui_texts,
                     bind::apply_ui_bindings,
                     // Class binds (`bind="nome:classe"`) — o toggle de estado
                     // engine-driven que antes vivia em Luau.
@@ -185,6 +193,10 @@ impl bevy::app::Plugin for UiPlugin {
                     runtime::mark_sheet_dirty,
                     runtime::propagate_style_dirty,
                     runtime::apply_ui_styles,
+                    // `<... scroll="y">` precisa do eixo `Scroll` no `Node`
+                    // para o layout honrar `ScrollPosition`; o re-estilo
+                    // repõe o omissão, por isso corre logo a seguir.
+                    runtime::sync_scroll_overflow,
                     // text-transform escreve no `Text` lendo o `UiComputed`
                     // que o re-estilo acabou de publicar (sync point entre
                     // sistemas em cadeia aplica-o primeiro).
@@ -195,11 +207,11 @@ impl bevy::app::Plugin for UiPlugin {
                     // nada muda.
                     runtime::sync_text_overflow,
                     // Motion CSS: o sync liga o componente `UiAnimation` ao
-                    // `animation` do computed; os drivers escrevem valores
-                    // interpolados no `UiComputed` + dirty — o fan-out para os
-                    // componentes é do re-estilo do frame seguinte (1 frame de
-                    // latência, invisível a 60 fps; o valor DE PARTIDA já é
-                    // escrito pelo re-estilo que iniciou o tween).
+                    // `animation` do computed; os drivers avançam o tempo e
+                    // marcam dirty — o re-estilo seguinte coze os valores no
+                    // `StyleProps` e faz o fan-out (1 frame de latência,
+                    // invisível a 60 fps; o valor DE PARTIDA já sai no
+                    // re-estilo que iniciou o tween).
                     tween::sync_ui_animations,
                     tween::drive_ui_transitions,
                     tween::drive_ui_animations,

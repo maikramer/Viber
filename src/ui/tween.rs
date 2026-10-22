@@ -484,6 +484,9 @@ pub struct UiAnimation {
     pub spec: AnimationSpec,
     /// Segundos desde o arranque da animação (delay incluído).
     pub elapsed: f32,
+    /// Animação finita com `forwards` já terminada: o componente fica para o
+    /// re-estilo continuar a cozer o último frame, mas o tempo não avança.
+    pub frozen: bool,
 }
 
 /// Resolve o offset 0..1 atual de uma animação, com loops/alternate/reverse.
@@ -580,6 +583,7 @@ pub fn sync_ui_animations(
                     commands.entity(entity).insert(UiAnimation {
                         spec: spec.clone(),
                         elapsed: 0.0,
+                        frozen: false,
                     });
                 }
             }
@@ -592,43 +596,38 @@ pub fn sync_ui_animations(
     }
 }
 
-/// O driver das `animation`: escreve o overlay dos keyframes no `UiComputed`
-/// e marca dirty — o mesmo caminho das transitions. `forwards` segura o
-/// último frame sem continuar a re-estilizar (o componente sai e o
-/// `UiComputed` fica com o overlay final até à próxima alteração real).
-#[allow(clippy::type_complexity)]
+/// O driver das `animation`: avança o tempo e marca dirty. Quem coze o
+/// overlay dos keyframes no estilo computado é o `apply_ui_styles` (o mesmo
+/// caminho das transitions) — escrever só no `UiComputed` não chegava aos
+/// componentes (`BackgroundColor`, `UiTransform`, …).
+///
+/// `forwards` congela no último frame (o componente fica, `frozen`), sem
+/// re-estilar todos os frames; sem `forwards` o componente sai e o re-estilo
+/// seguinte volta à cascata.
 pub fn drive_ui_animations(
     sheet: Res<StyleSheet>,
     time: Res<Time>,
-    mut animations: Query<(Entity, &mut UiAnimation, &mut UiComputed)>,
+    mut animations: Query<(Entity, &mut UiAnimation)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut animation, mut computed) in &mut animations {
-        let Some(keyframes) = sheet.keyframes(&animation.spec.name) else {
+    for (entity, mut animation) in &mut animations {
+        if animation.frozen || !sheet.has_keyframes(&animation.spec.name) {
             continue;
-        };
+        }
         animation.elapsed += dt;
         if animation_finished(&animation.spec, animation.elapsed) {
-            // O frame em que `progress` chega ao número de voltas nunca era
-            // amostrado: `steps()` perdia o último degrau e `forwards` ficava
-            // no frame anterior.
-            if let Some(end) = animation_terminal_offset(&animation.spec)
-                && let Some(overlay) = sample_keyframes(keyframes, end, &animation.spec)
-            {
-                computed.0.merge(&overlay);
-            }
-            commands.entity(entity).remove::<UiAnimation>();
-            if !animation.spec.fill_forwards {
-                commands.entity(entity).insert(UiStyleDirty);
+            // `progress == n` só existe no limite: sem este dirty o último
+            // frame (`steps()` incluído) nunca era amostrado.
+            commands.entity(entity).insert(UiStyleDirty);
+            if animation.spec.fill_forwards {
+                animation.frozen = true;
+            } else {
+                commands.entity(entity).remove::<UiAnimation>();
             }
             continue;
         }
-        let Some(offset) = animation_offset(&animation.spec, animation.elapsed) else {
-            continue;
-        };
-        if let Some(overlay) = sample_keyframes(keyframes, offset, &animation.spec) {
-            computed.0.merge(&overlay);
+        if animation_offset(&animation.spec, animation.elapsed).is_some() {
             commands.entity(entity).insert(UiStyleDirty);
         }
     }
@@ -637,7 +636,7 @@ pub fn drive_ui_animations(
 /// Interpola os frames vizinhos de `offset`. Os campos interpoláveis presentes
 /// nos DOIS frames interpolam com a easing da spec; os restantes ficam do
 /// frame mais próximo (a troca discreta do CSS).
-fn sample_keyframes(
+pub(crate) fn sample_keyframes(
     keyframes: &[Keyframe],
     offset: f32,
     spec: &AnimationSpec,

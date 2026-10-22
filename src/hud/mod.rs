@@ -47,10 +47,20 @@ pub use vitals::{HudHealthFill, HudHealthLabel, health_label_text, hud_health_sy
 #[derive(bevy::prelude::Component, Debug, Clone, Copy, Default)]
 pub struct HideInInterior;
 
-/// Esconde/repõe os [`HideInInterior`] quando o herói entra/sai de um interior.
+/// HUD suprimido por script (`viber.ui.set_visible("hud", false)`).
+///
+/// O `#hud` declarativo é só uma parte do HUD: minimapa, bússola e seta são
+/// widgets NATIVOS. O título/morte escondem o HUD inteiro; sem isto os
+/// widgets nativos ficavam por cima do véu.
+#[derive(bevy::prelude::Resource, Debug, Clone, Copy, Default)]
+pub struct HudHidden(pub bool);
+
+/// Esconde/repõe os [`HideInInterior`] quando o herói entra/sai de um interior —
+/// ou quando o jogo esconde o HUD (título, morte).
 pub fn hide_world_hud_in_interior(
     interior: Option<bevy::prelude::Res<crate::worldsys::InteriorLighting>>,
     cinematic: Option<bevy::prelude::Res<crate::cinematic::CinematicPlayback>>,
+    hidden: Option<bevy::prelude::Res<HudHidden>>,
     mut panels: bevy::prelude::Query<
         &mut bevy::prelude::Visibility,
         bevy::prelude::With<HideInInterior>,
@@ -58,8 +68,9 @@ pub fn hide_world_hud_in_interior(
 ) {
     use bevy::prelude::{DetectChangesMut, Visibility};
     // Também durante uma cinemática (este sistema repunha-os por cima do
-    // esconder-HUD da cena).
-    let inside = interior.as_deref().is_some_and(|state| state.active)
+    // esconder-HUD da cena) e com o HUD suprimido pelo jogo (título/morte).
+    let inside = hidden.as_deref().is_some_and(|h| h.0)
+        || interior.as_deref().is_some_and(|state| state.active)
         || cinematic.as_deref().is_some_and(|c| c.playing().is_some());
     let wanted = if inside {
         Visibility::Hidden

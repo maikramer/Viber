@@ -105,6 +105,8 @@ pub enum UiCommand {
     Focus {
         id: String,
     },
+    /// Escala global da UI (`viber.ui.scale(n)`); 0.5..3.0.
+    SetScale(f32),
     /// Remove um elemento (e a subárvore) da UI em runtime.
     Destroy {
         id: String,
@@ -438,6 +440,7 @@ pub fn install_ui_api(lua: &Lua, state: &UiScriptState) -> mlua::Result<()> {
         UiCommand::SetAnim { id, spec }
     });
     command!("focus", (String, ()), |(id, ())| UiCommand::Focus { id });
+    command!("scale", (f32, ()), |(value, ())| UiCommand::SetScale(value));
 
     // viber.ui.list(name, { {campo = valor, …}, … }) — feeds a <UiList>
     // source from script data; numbers and booleans stringify so a row is
@@ -1109,6 +1112,8 @@ pub struct UiCommandInfo<'w, 's> {
     pub tweens: Query<'w, 's, &'static mut super::tween::UiTransitions>,
     /// Estilo computado (alvo inicial do tween).
     pub computed: Query<'w, 's, &'static UiComputed>,
+    /// Escala global da UI (`viber.ui.scale`).
+    pub user_scale: ResMut<'w, super::scale::UiUserScale>,
 }
 
 /// Applies the queued script mutations to the live UI.
@@ -1158,6 +1163,10 @@ pub fn apply_ui_commands(
             | UiCommand::Tween { id, .. }
             | UiCommand::ClearStyle { id } => id,
             // These address a group / the game / a data source, not an element.
+            UiCommand::SetScale(value) => {
+                info.user_scale.0 = value.clamp(0.5, 3.0);
+                continue;
+            }
             UiCommand::SelectTab { group, tab } => {
                 tabs.select(group, tab);
                 continue;
@@ -1179,6 +1188,14 @@ pub fn apply_ui_commands(
                 continue;
             }
         };
+        // "hud" esconde o HUD INTEIRO: além do `#hud` declarativo, os widgets
+        // nativos (minimapa, bússola, seta) são entidades à parte e tinham
+        // ficado por cima do véu do título.
+        if let UiCommand::SetVisible { visible, .. } = &command
+            && id.as_str() == "hud"
+        {
+            commands.insert_resource(crate::hud::HudHidden(!*visible));
+        }
         let Some(entity) = registry.get(id) else {
             if warned.insert(id.clone()) {
                 warn!("ui: script addressed unknown element `{id}`");
@@ -1190,6 +1207,8 @@ pub fn apply_ui_commands(
             .get_mut(entity)
             .unwrap_or((None, None, None, None, None));
         match command {
+            // Tratado acima (não chega a ter id de elemento).
+            UiCommand::SetScale(_) => {}
             UiCommand::SetText { text: value, .. } => {
                 // An input owns its text: writing it must update the flag the
                 // widget syncs from, not just a stale `Text` on the root.
@@ -1274,6 +1293,10 @@ pub fn apply_ui_commands(
                     entity_commands.insert(anim);
                 } else {
                     entity_commands.remove::<super::anim::UiAnim>();
+                    // O último frame da animação ficou escrito no
+                    // `UiTransform`; sem re-estilo o elemento continuava
+                    // rodado/deslocado depois do `set_anim(id, "none")`.
+                    entity_commands.insert(UiStyleDirty);
                 }
             }
             UiCommand::Focus { .. } => {

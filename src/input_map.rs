@@ -74,10 +74,13 @@ impl Default for ActionMap {
 
 impl ActionMap {
     pub fn rebind_key(&mut self, action: Action, key: &str) {
-        self.bindings.entry(action).or_insert(Binding {
-            key: None,
-            pad: None,
-        }).key = Some(key.to_string());
+        self.bindings
+            .entry(action)
+            .or_insert(Binding {
+                key: None,
+                pad: None,
+            })
+            .key = Some(key.to_string());
     }
 }
 
@@ -165,9 +168,11 @@ pub fn gather_actions(
             .as_deref()
             .and_then(key_of)
             .is_some_and(|k| keys.just_pressed(k));
-        let pad = binding.pad.as_deref().and_then(pad_of).is_some_and(|button| {
-            pads.iter().any(|pad| pad.just_pressed(button))
-        });
+        let pad = binding
+            .pad
+            .as_deref()
+            .and_then(pad_of)
+            .is_some_and(|button| pads.iter().any(|pad| pad.just_pressed(button)));
         key || pad
     };
     let held = |action: Action| -> bool {
@@ -179,9 +184,11 @@ pub fn gather_actions(
             .as_deref()
             .and_then(key_of)
             .is_some_and(|k| keys.pressed(k));
-        let pad = binding.pad.as_deref().and_then(pad_of).is_some_and(|button| {
-            pads.iter().any(|pad| pad.pressed(button))
-        });
+        let pad = binding
+            .pad
+            .as_deref()
+            .and_then(pad_of)
+            .is_some_and(|button| pads.iter().any(|pad| pad.pressed(button)));
         key || pad
     };
     *state = ActionState {

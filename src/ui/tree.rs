@@ -73,7 +73,9 @@ fn attr<'a>(node: &'a XmlNode, name: &str) -> Option<&'a str> {
 }
 
 fn attr_f32(node: &XmlNode, name: &str) -> Option<f32> {
-    attr(node, name).and_then(|v| v.trim().parse().ok())
+    attr(node, name)
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|v: &f32| v.is_finite())
 }
 
 /// Text content of an element: the `text` attribute, else the concatenated
@@ -84,6 +86,12 @@ fn element_text(node: &XmlNode) -> String {
     }
     node.text.trim().to_string()
 }
+
+/// Texto original de um `<UiText>` cuja fonte pode ser uma chave `@nome`.
+/// O sistema de localização resolve-o para o idioma ativo (e re-resolve
+/// quando o idioma muda); binds dinâmicos correm depois e ganham.
+#[derive(Component, Clone, Debug)]
+pub struct UiTextKey(pub String);
 
 /// Spawns `node` and its children under `parent`, returning the root entity.
 ///
@@ -249,14 +257,16 @@ pub fn build_ui_tree(
 
     match tag.as_str() {
         "uitext" => {
+            let source = element_text(node);
             entity.insert((
-                Text::new(element_text(node)),
+                Text::new(source.clone()),
                 TextColor(Color::WHITE),
                 TextFont {
                     font: font.clone().into(),
                     ..Default::default()
                 },
                 TextLayout::default(),
+                UiTextKey(source),
             ));
         }
         "uiicon" => {
@@ -537,6 +547,7 @@ fn build_slider(world: &mut World, node: &XmlNode, track: Entity) {
 /// widget owns its content (`text` / `placeholder`) and `ui::widgets` keeps it
 /// in sync.
 fn build_input(world: &mut World, node: &XmlNode, field: Entity, font: &Handle<Font>) {
+    let source = element_text(node);
     let text = world
         .spawn((
             Node::default(),
@@ -548,13 +559,14 @@ fn build_input(world: &mut World, node: &XmlNode, field: Entity, font: &Handle<F
                 ..Default::default()
             }),
             UiStyleDirty,
-            Text::new(element_text(node)),
+            Text::new(source.clone()),
             TextColor(Color::WHITE),
             TextFont {
                 font: font.clone().into(),
                 ..Default::default()
             },
             TextLayout::default(),
+            UiTextKey(source),
             ChildOf(field),
         ))
         .id();
@@ -890,7 +902,9 @@ mod tests {
         // A `bind` the engine does not know leaves the element frozen at its
         // authored placeholder — silent, and easy to miss by eye.
         let data = crate::ui::bind::UiData::default();
-        let lists = ["quests", "bag", "skills", "shop", "controls", "system", "a11y"];
+        let lists = [
+            "quests", "bag", "skills", "shop", "controls", "system", "a11y",
+        ];
         // Binds de SCRIPT: os nomes que os `.lua` do mundo alimentam com
         // `viber.ui.set("nome", …)` literal (barra de chefe, cooldowns das
         // habilidades Lua). Um nome que nenhum script escreve continua a
