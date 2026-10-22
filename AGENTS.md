@@ -164,11 +164,16 @@ bolsa remota do mesmo mundo.
 ```yaml
 project:                     # config.yaml — sem este bloco o mundo é de uma só cena
   main-scene: world.xml      # id `main`
+  start-scene: scenes/menu.xml  # opcional: 1.ª cena do `viber run` sem `--scene`
   scenes: scenes             # ids = caminho relativo sem .xml (`interiors/chapel`)
   autoload:                  # spawnados UMA vez, sobrevivem às trocas (jogador, câmara, HUD)
     - world/autoload/player.xml
     - world/autoload/ui.xml
 ```
+
+- **Arranque**: `viber run <projeto>` (ou o `world.xml`) abre o `start-scene` quando
+  declarado; `--scene <id>` e `viber run scenes/x.xml` continuam a mandar. A chave do save,
+  os shaders do céu/água/terreno e o `main` continuam a ser os da cena principal.
 
 - **Contrato**: uma cena é `<world static="true" title="Capela" [clear-color]>`. Chegadas:
   `<SceneEntry name="from-town" translation euler/>`. Portas: `<ScenePortal name target
@@ -1018,7 +1023,7 @@ em **[`docs/ASSETS.md`](docs/ASSETS.md)**; `viber create` gera um completo.
 | `PlayerGLTF` | `model-url` (obrigatório), `name` (default `player`), `pos` (alias de `translation` — tags verbatim mantêm `pos`), `speed`. Componente `Player` + WASD/setas relativo à câmara (Shift = sprint ×1.5, Space = salto com buffer/coyote), assenta no terreno via `TerrainRuntime::sample` todos os frames (`src/player.rs`) |
 | `ThirdPersonCamera` | alias interactivo do `OrbitCamera` com defaults `target="player"`, `distance` 4, `height` 1.6; attrs `mouse-sensitivity`, `follow-lag`, `turn-lag`, `min-terrain-distance`, `fov`. Drag (qualquer botão) = yaw/pitch, scroll = zoom (clamp 2–80 m), anti-clip com o terreno; câmaras extra são rebaixadas a Group com warning |
 | `DialogueNPC` | `dialogue-id` (obrigatório; ausente = skip), `marker-height` (2.5 — marcador flutuante), `portrait-url`/`voice-sfx` aceites sem efeito. Componente `DialogueNpc` + marcador esférico dourado emissivo; [E] a <3.5 m abre o **diálogo real** (linhas intro/progress/complete das quests JSON, `src/quests.rs`) com balão no HUD |
-| `AudioMixer` | `master`/`music`/`sfx` (buses, default 1) — recurso `AudioMixerSettings` (`src/music.rs`); o driver de música multiplica o bus music |
+| `AudioMixer` | `master`/`music`/`sfx`/`voice`/`ambience` (buses, default 1) — recurso `AudioMixerSettings` (`src/music.rs`); o driver de música multiplica o bus music. `voice` isola falas/barks e `ambience` isola vento/chuva/água, para o ducking os poder baixar sem calar o outro |
 | `MusicLayer` | `layer` (obrigatório; ex. explore/battle/boss/dungeon/mountain/village), `sound` (nome `bgm-x`; URL por convenção `{bgm_dir}/x.ogg`, dir do config.yaml), `base-volume` (0.2). Spawna `AudioPlayer` em LOOP a volume 0; `music_driver` crossfada a layer da zona do player (port do `bgmZone`: dungeon caixa 770-950/205-355 → mountain wedge z≤-240 → vila r<55 → explore) com fade 0.6/s. **Combate**: `CombatMusicState` (`src/music.rs`, escrito pelo aggro da FSM em `src/ai.rs`) promove a layer para `battle` (ou `boss` se o nome da criatura contiver "boss") durante 8 s após o último evento de aggro |
 | `ResourceChip` | `resource` (obrigatório), `icon`, `target-entity` — chip de HUD com valor VIVO do vault (`gold/wood/stone`, `src/economy.rs`), empilhado no canto superior esquerdo; `icon`/`target-entity` aceites sem efeito |
 | HUD (HudScreenLayer, HealthBar, XpBar, BossBar, TargetBar, Minimap, Compass, InteractionPrompt, DialogueBalloon, TabbedModal, QuestTracker, WaypointArrow) | IR genérica `HudElement` (tag + attrs crus); UI real em `src/hud/` via bevy_ui: barras HP/XP reais (sync de vitals), TargetBar com o alvo do combate, Minimap 140×140 com `range` + borda, Compass, prompt de interação ([E] a <3.5 m ou via `viber.set_interaction`), balão de diálogo, menu de jogo [Q] (UiModal declarativo, `world/menu.xml`) e profiler em janela (F3/P). QuestTracker renderiza o tracker de quests (`src/quests.rs`), WaypointArrow a seta do waypoint (`src/travel.rs`). A tag `BossBar` é aceite mas **sem UI própria** (removida no cleanup) |

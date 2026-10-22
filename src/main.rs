@@ -2119,11 +2119,9 @@ fn record_profile(
                 });
                 agg.sum_avg += row.get("avg_ms").and_then(Value::as_f64).unwrap_or(0.0);
                 agg.samples += 1;
-                agg.max_p95 = agg.max_p95.max(
-                    row.get("p95_ms")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(0.0),
-                );
+                agg.max_p95 = agg
+                    .max_p95
+                    .max(row.get("p95_ms").and_then(Value::as_f64).unwrap_or(0.0));
             }
         }
 
@@ -3157,15 +3155,9 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             if let Some(last) = final_status.get("last") {
                 print_trace_analysis(last);
             }
-            println!(
-                "  abre com `chrome://tracing` ou https://ui.perfetto.dev (formato {format})"
-            );
+            println!("  abre com `chrome://tracing` ou https://ui.perfetto.dev (formato {format})");
         }
-        DebugCommand::Mark {
-            label,
-            port,
-            world,
-        } => {
+        DebugCommand::Mark { label, port, world } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
             let result = client.prof_mark(&label)?;

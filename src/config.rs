@@ -186,9 +186,16 @@ impl GameConfig {
     }
 
     /// Path de asset (relativo a uma root) como string para o AssetServer.
+    /// Diretório vazio (`sfx_dir: ""`, áudio na raiz do jogo) NÃO pode gerar
+    /// `"/x.ogg"` — o path absoluto fura a root e o asset nunca carrega.
     fn asset_string(dir: &Path, rel: &str) -> String {
         let dir = dir.to_string_lossy();
-        format!("{}/{}", dir.trim_end_matches('/'), rel)
+        let dir = dir.trim_end_matches('/');
+        if dir.is_empty() {
+            rel.to_string()
+        } else {
+            format!("{dir}/{rel}")
+        }
     }
 
     /// `<MusicLayer layer>` → path AssetServer (contra as roots).
@@ -314,7 +321,7 @@ fn warn_unknown_keys(path: &Path, value: &serde_yaml::Value) {
         "save",
         "project",
     ];
-    const PROJECT: &[&str] = &["main-scene", "scenes", "autoload"];
+    const PROJECT: &[&str] = &["main-scene", "start-scene", "scenes", "autoload"];
     const ASSETS: &[&str] = &["roots", "bgm_dir", "sfx_dir", "terrain_textures_dir"];
     const GAME: &[&str] = &["scripts_dir"];
     const SAVE: &[&str] = &["dir"];
@@ -487,6 +494,18 @@ mod tests {
         assert_eq!(reflections.wet_ground, Some(false));
         assert_eq!(reflections.steps, Some(16));
         assert_eq!(reflections.max_distance, Some(90.0));
+    }
+
+    #[test]
+    fn empty_asset_dir_does_not_escape_the_root() {
+        assert_eq!(
+            GameConfig::asset_string(Path::new(""), "hit.ogg"),
+            "hit.ogg"
+        );
+        assert_eq!(
+            GameConfig::asset_string(Path::new("assets/sfx/"), "hit.ogg"),
+            "assets/sfx/hit.ogg"
+        );
     }
 
     #[test]

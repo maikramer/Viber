@@ -27,10 +27,10 @@ use crate::profiler::{Group, timed};
 use crate::recipes::ParsedWorld;
 use crate::recipes::spawn::{self, PendingWorld};
 use crate::{
-    a11y, ambient, animation, attachment, audio_space, camera, editor_camera, foliage,
-    grass, hud, ik, impact, input_map, locale, luau, menus, meshopt, music, nav, netplay,
-    particles, physics, physics_fx, player, postfx, profiler, prop_tint, ragdoll, recipes,
-    render_lod, save, sky, spawner, streaming, terrain, textures, time_fx, ui, worldsys, xml,
+    a11y, ambient, animation, attachment, audio_space, camera, editor_camera, foliage, grass, hud,
+    ik, impact, input_map, locale, luau, menus, meshopt, music, nav, netplay, particles, physics,
+    physics_fx, player, postfx, profiler, prop_tint, ragdoll, recipes, render_lod, save, sky,
+    spawner, streaming, terrain, textures, time_fx, ui, worldsys, xml,
 };
 
 /// Para quê a App é montada.
@@ -390,7 +390,23 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // som nasce por ele.
     app.add_plugins(bevy_kira_audio::AudioPlugin);
     app.add_audio_channel::<crate::music::MusicBus>();
-    app.add_audio_channel::<crate::music::SfxBus>();
+    let mut sfx_track = bevy_kira_audio::AudioTrack::new();
+    let sfx_reverb = sfx_track.add_effect(
+        bevy_kira_audio::prelude::ReverbBuilder::new().mix(bevy_kira_audio::prelude::Mix(0.0)),
+    );
+    app.add_audio_channel_with_track::<crate::music::SfxBus>(sfx_track);
+    let mut voice_track = bevy_kira_audio::AudioTrack::new();
+    let voice_reverb = voice_track.add_effect(
+        bevy_kira_audio::prelude::ReverbBuilder::new().mix(bevy_kira_audio::prelude::Mix(0.0)),
+    );
+    app.add_audio_channel_with_track::<crate::music::VoiceBus>(voice_track);
+    app.add_audio_channel::<crate::music::AmbienceBus>();
+    app.init_resource::<crate::music::AudioDuck>();
+    app.init_resource::<crate::music::AudioReverb>();
+    app.insert_resource(crate::music::ReverbHandles {
+        sfx: Some(sfx_reverb),
+        voice: Some(voice_reverb),
+    });
     if let Some(port) = bridge_port {
         app.add_plugins(bridge::BridgePlugin { port });
         // O ping passa a identificar o mundo servido — o `viber debug
@@ -504,6 +520,9 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // nascia dentro de `build_menu` — mundos sem `TabbedModal` (o HUD é agora
     // declarativo) panicas na validação do `ResMut` todos os frames.
     app.init_resource::<hud::menu::HudMenuState>();
+    // Widgets nativos (minimapa/bússola/seta) também obedecem ao esconder-HUD
+    // do jogo (`viber.ui.set_visible("hud", false)`).
+    app.init_resource::<hud::HudHidden>();
     // `sky::spawn_sky` needs `Assets<SkyMaterial>`; without this plugin the
     // startup system panics and leaves `Assets<Mesh>` taken out of the world.
     // O mesmo para o material de água (`Assets<WaterMaterial>` no bootstrap
@@ -519,6 +538,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         terrain::layer_material::TerrainChunkMaterial,
     >::default());
     app.add_plugins(animation::AnimationPlugin);
+    app.add_plugins(crate::decal_fx::DecalFxPlugin);
     app.add_plugins(ik::IkPlugin);
     app.add_plugins(ragdoll::RagdollPlugin);
     app.add_plugins(input_map::InputMapPlugin);
@@ -531,6 +551,8 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.add_plugins(foliage::FoliagePlugin);
     // `VIBER_DRAW_DIAG=1`: malhas/triângulos por vista (câmara, cascatas, lanternas).
     app.add_plugins(crate::draw_diag::DrawDiagPlugin);
+    // Frames com a mesma duração (divisor do refresh); `VIBER_FPS_CAP`.
+    app.add_plugins(crate::frame_pacing::FramePacingPlugin);
     app.add_plugins(netplay::NetPlayPlugin);
     app.add_plugins(physics::PhysicsPlugin {
         debug: std::env::var_os("VIBER_PHYSICS_DEBUG").is_some(),
@@ -622,9 +644,12 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.init_resource::<camera::CameraKick>();
     // Quests, marcadores e o guia são do exemplo (`scripts/lib/rules.lua`).
     app.add_plugins(crate::cinematic::CinematicPlugin);
-    // IA (FSM Rust + respawn): criaturas de <DynamicSpawner> SEM script caem
-    // aqui — sem este plugin nasciam estátuas eternas e a RespawnQueue
-    // nunca drenava.
+    // IA: o `AiPlugin` regista o `apply_ai_locomotion`, consumidor ÚNICO do
+    // movimento pedido pelos scripts (`viber.move_towards`) e pela navegação.
+    // Sem ele a FSM entra em chase e o `desired` fica certo, mas ninguém
+    // aplica a velocidade — as criaturas atacam paradas. Também traz os
+    // sentidos (`SensesPlugin`) e os vitais das criaturas sem script.
+    app.add_plugins(crate::ai::AiPlugin);
     // Navegação: navmesh Recast num tile que segue o herói, A* + evitamento
     // RVO (bevy_landmass) e preferência por estradas via custo por tipo de
     // polígono. Sem isto a IA volta à linha recta de sempre — o que é
@@ -736,6 +761,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
             timed(Group::Hud, hud::hud_minimap_landmarks_update),
             timed(Group::World, music::audio_loop_starter),
             timed(Group::World, music::mixer_sync),
+            timed(Group::World, music::apply_reverb),
             timed(Group::World, music::music_driver),
             timed(Group::World, music::script_sound_loops),
             // A bandeira de interior é lida pelo `daycycle_drive` e pelo

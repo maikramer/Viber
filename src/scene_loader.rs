@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use bevy::ecs::change_detection::Tick;
@@ -760,13 +761,62 @@ pub fn swap_scene(world: &mut World, request: &ChangeScene) -> Result<()> {
     Ok(())
 }
 
+/// Para os loops kira das entidades que vão ser despawnadas, com um fade
+/// curto (o despawn não os pára — ver [`unload_scene`]).
+fn stop_scene_loops(world: &mut World, doomed: &[(Entity, Option<String>)]) {
+    let doomed: HashSet<Entity> = doomed.iter().map(|(entity, _)| *entity).collect();
+    let all: Vec<(Entity, Handle<bevy_kira_audio::AudioInstance>)> = {
+        // O clone do handle é barato; a query fica fechada antes do
+        // `Assets<AudioInstance>` para não pedir dois borrows ao mundo.
+        let mut query = world.query::<(Entity, &crate::music::LoopInstance)>();
+        query
+            .iter(world)
+            .map(|(entity, instance)| (entity, instance.0.clone()))
+            .collect()
+    };
+    let handles: Vec<Handle<bevy_kira_audio::AudioInstance>> = all
+        .into_iter()
+        .filter(|(entity, _)| {
+            // Também os loops em filhos de uma raiz condenada (o despawn é
+            // recursivo, mas o varrimento só lista raízes).
+            let mut current = *entity;
+            loop {
+                if doomed.contains(&current) {
+                    return true;
+                }
+                match world.get::<ChildOf>(current) {
+                    Some(parent) => current = parent.parent(),
+                    None => return false,
+                }
+            }
+        })
+        .map(|(_, handle)| handle)
+        .collect();
+    let Some(mut instances) = world.get_resource_mut::<Assets<bevy_kira_audio::AudioInstance>>()
+    else {
+        // Apps headless sem kira: os loops nunca arrancaram.
+        return;
+    };
+    for handle in handles {
+        if let Some(mut sound) = instances.get_mut(&handle) {
+            sound.stop(bevy_kira_audio::AudioTween::linear(Duration::from_millis(
+                120,
+            )));
+        }
+    }
+}
+
 /// Despawn de todas as raízes da cena + reset dos recursos por cena.
 pub fn unload_scene(world: &mut World) -> SweepReport {
     let started = world.resource::<SceneLoader>().started_tick;
-    let mut query = world.query_filtered::<
-        (Entity, Has<SceneEntity>, SpawnDetails, Option<&Name>),
-        (With<Transform>, Without<ChildOf>, Without<Persistent>),
-    >();
+    let mut query = world
+        .query_filtered::<(Entity, Has<SceneEntity>, SpawnDetails, Option<&Name>), (
+            // UI roots têm Node, não Transform: ficavam fora do sweep e o
+            // HUD da cena anterior sobrevivia ao change_scene.
+            Or<(With<Transform>, With<bevy::ui::Node>)>,
+            Without<ChildOf>,
+            Without<Persistent>,
+        )>();
     let this_run = world.change_tick();
     let doomed: Vec<(Entity, Option<String>)> = query
         .iter(world)
@@ -791,6 +841,11 @@ pub fn unload_scene(world: &mut World) -> SweepReport {
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(12);
     let roots = doomed.len();
+    // Os loops kira da cena morrem com ela: despawnar a entidade larga o
+    // `Handle<AudioInstance>`, mas o kira NÃO pára o som ao largar o handle
+    // (`StaticSoundHandle` não tem `Drop`) — a `<MusicLayer>`/`<AmbientLoop>`
+    // da cena antiga continuava a tocar por cima da nova.
+    stop_scene_loops(world, &doomed);
     for (entity, _) in doomed {
         if let Ok(entity) = world.get_entity_mut(entity) {
             entity.despawn();
@@ -835,6 +890,17 @@ pub fn reset_scene_resources(world: &mut World) {
     reset_default::<crate::worldsys::InteriorLighting>(world);
     reset_default::<crate::grass::GrassField>(world);
     reset_default::<crate::terrain::delta::TerrainEditQueue>(world);
+    // Posse de sistemas/ações (`viber.own_system`/`own_action`) é do MUNDO:
+    // um kart que reclamava `locomotion` deixava o herói sem movimento para
+    // sempre depois de trocar de cena.
+    reset_default::<crate::luau::ownership::ScriptSystemOwners>(world);
+    reset_default::<crate::ui::actions::UiActionOwners>(world);
+    // Loops de SFX pedidos por scripts morrem com a cena (o driver de áudio
+    // para tudo o que sai de `wanted`).
+    reset_default::<crate::music::ScriptSoundLoops>(world);
+    // `viber.music.layer` forçada é da cena que a pediu: sem este reset, um
+    // override deixado por um script antigo escolhia a layer da cena nova.
+    reset_default::<crate::music::MusicLayerOverride>(world);
     reset_default::<PortalGrace>(world);
     crate::nav::reset_for_scene(world);
 }
@@ -1031,7 +1097,9 @@ fn scene_portal_system(
 }
 
 /// Resolve o caminho de arranque de `viber run`: uma pasta de projeto vira a cena
-/// principal; `--scene <id>` escolhe outra cena do projeto de `path`.
+/// principal; `--scene <id>` escolhe outra cena do projeto de `path`. Sem `--scene`,
+/// um `start-scene` declarado no `config.yaml` substitui a principal (é o menu: a
+/// primeira cena carregada deixa de ser o mundo inteiro).
 pub fn resolve_run_path(path: &std::path::Path, scene: Option<&str>) -> Result<PathBuf> {
     let project = Project::discover(path);
     let base = if path.is_dir() {
@@ -1040,6 +1108,17 @@ pub fn resolve_run_path(path: &std::path::Path, scene: Option<&str>) -> Result<P
         path.to_path_buf()
     };
     let Some(scene) = scene else {
+        // Só a principal cede ao `start-scene`: passar um ficheiro de outra cena
+        // (`viber run scenes/x.xml`) continua a abrir exactamente essa cena.
+        // `scene_id` canonicaliza os dois lados — `viber run world.xml` chega
+        // aqui com um caminho relativo.
+        let is_main = project.scene_id(&base).as_deref() == Some(MAIN_SCENE);
+        if project.declared
+            && is_main
+            && let Some(start) = project.start_scene_path()
+        {
+            return Ok(start);
+        }
         return Ok(base);
     };
     project.resolve_scene(scene).ok_or_else(|| {
@@ -1245,5 +1324,22 @@ mod tests {
         let house = resolve_run_path(&tmp.path().join("world.xml"), Some("house")).unwrap();
         assert!(house.ends_with("scenes/house.xml"));
         assert!(resolve_run_path(tmp.path(), Some("nope")).is_err());
+    }
+
+    #[test]
+    fn start_scene_replaces_main_unless_a_scene_is_named() {
+        let tmp = project();
+        let config = format!("{CONFIG}  start-scene: house\n");
+        std::fs::write(tmp.path().join("config.yaml"), config).unwrap();
+        // Sem `--scene`, a pasta do projeto (e o `world.xml`) arranca na cena de menu.
+        for entry in [tmp.path().to_path_buf(), tmp.path().join("world.xml")] {
+            let start = resolve_run_path(&entry, None).unwrap();
+            assert!(start.ends_with("scenes/house.xml"), "{entry:?} → {start:?}");
+        }
+        // `--scene main` e um ficheiro de cena explícito continuam mandar.
+        let main = resolve_run_path(&tmp.path().join("world.xml"), Some("main")).unwrap();
+        assert!(main.ends_with("world.xml"));
+        let house = resolve_run_path(&tmp.path().join("scenes/house.xml"), None).unwrap();
+        assert!(house.ends_with("scenes/house.xml"));
     }
 }

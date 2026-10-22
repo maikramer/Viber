@@ -39,6 +39,11 @@ const MAX_ROOT_SEARCH: usize = 4;
 pub struct ProjectConfig {
     #[serde(default, rename = "main-scene")]
     pub main_scene: Option<PathBuf>,
+    /// Cena onde `viber run` arranca quando ninguém pede `--scene`. É um id
+    /// (`menu`, `interiors/chapel`) ou um caminho como `scenes/menu.xml`.
+    /// Ausente = arranca na principal; a chave do save continua a ser a principal.
+    #[serde(default, rename = "start-scene")]
+    pub start_scene: Option<PathBuf>,
     #[serde(default)]
     pub scenes: Option<PathBuf>,
     #[serde(default)]
@@ -175,6 +180,14 @@ impl Project {
         self.root.join(self.config.main_scene())
     }
 
+    /// A cena de arranque do projeto (`start-scene`), resolvida como
+    /// [`Self::resolve_scene`] aceita: id ou caminho. `None` quando não está
+    /// declarada ou o ficheiro não existe (o `run` cai na principal).
+    pub fn start_scene_path(&self) -> Option<PathBuf> {
+        let start = self.config.start_scene.as_ref()?;
+        self.resolve_scene(&start.to_string_lossy())
+    }
+
     pub fn scenes_dir(&self) -> PathBuf {
         self.root.join(self.config.scenes_dir())
     }
@@ -202,7 +215,11 @@ impl Project {
         if rel.extension().and_then(|e| e.to_str()) != Some("xml") {
             return None;
         }
-        Some(slash_path(&rel.with_extension("")))
+        let id = slash_path(&rel.with_extension(""));
+        // `main` é o id RESERVADO da cena principal (tratada acima): um
+        // ficheiro `scenes/main.xml` não pode reclamá-lo, senão `list_scenes`
+        // mostra duas cenas "main" e change_scene/save escolhem a errada.
+        (id != MAIN_SCENE).then_some(id)
     }
 
     /// O ficheiro de uma cena pelo id (`main`, `interiors/chapel`, ou um caminho relativo à
@@ -217,7 +234,10 @@ impl Project {
             return main.is_file().then_some(main);
         }
         let by_id = self.scenes_dir().join(format!("{id}.xml"));
-        if by_id.is_file() {
+        // `scene_id` valida que o ficheiro está mesmo sob `scenes/` (ou é a
+        // cena principal): sem isto um id `../world` carregava XML arbitrário
+        // relativo à pasta de cenas.
+        if by_id.is_file() && self.scene_id(&by_id).is_some() {
             return Some(by_id);
         }
         let by_path = self.root.join(id);
@@ -231,12 +251,16 @@ impl Project {
     pub fn scene_files(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let main = self.main_scene_path();
+        let main_canon = main.canonicalize().unwrap_or_else(|_| main.clone());
         if main.is_file() {
             out.push(main);
         }
         let mut found = Vec::new();
         collect_xml(&self.scenes_dir(), &mut found);
         found.sort();
+        // `main-scene: scenes/main.xml` também aparece no `collect_xml`;
+        // sem o filtro o `list_scenes` devolvia dois `main`.
+        found.retain(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) != main_canon);
         out.extend(found);
         out
     }
@@ -493,6 +517,21 @@ mod tests {
         assert!(p.resolve_scene("nope").is_none());
         assert!(p.resolve_scene("world/frag.xml").is_none(), "não é cena");
         assert_eq!(p.autoload_paths(), vec![p.root.join("world/frag.xml")]);
+
+        // `main` é reservado: um scenes/main.xml físico não pode reclamar o
+        // id da cena principal (duas linhas "main" na listagem).
+        let collision = dir.path().join("scenes/main.xml");
+        std::fs::write(&collision, "<world static=\"true\"/>").unwrap();
+        assert_eq!(p.scene_id(&collision), None, "id `main` é reservado");
+        assert!(p.resolve_scene("scenes/main.xml").is_none());
+        assert_eq!(
+            p.list_scenes()
+                .iter()
+                .filter(|scene| scene.id == MAIN_SCENE)
+                .count(),
+            1,
+            "só a cena principal é `main`"
+        );
     }
 
     #[test]
