@@ -305,6 +305,9 @@ mod tests {
                 max_sun_elevation: 55.0,
                 sun_azimuth_base: 180.0,
                 min_sun_elevation: 8.0,
+                day_speed_scale: 1.0,
+                night_speed_scale: 1.0,
+                night_cap_minute: 0.0,
             }),
             spec(EntityKind::Group).with_child(EntityKind::Weather {
                 wind: [1.0, 0.0],

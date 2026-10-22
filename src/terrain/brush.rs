@@ -214,6 +214,13 @@ impl BrushGrid {
         &self.grid
     }
 
+    /// Interpolação usada por [`Self::sample`] (0 = bilinear, 1 = Catmull-Rom).
+    /// A cache do splat inclui-o na chave: mudar `height-smoothing` muda as
+    /// alturas amostradas sem tocar no `raw()`.
+    pub fn smoothing(&self) -> f32 {
+        self.smoothing
+    }
+
     /// Consumes the grid into its raw buffer (hand-off to read-side types).
     pub fn into_raw(self) -> Vec<u16> {
         self.grid
@@ -369,7 +376,15 @@ impl BrushGrid {
         let texel = self.texel();
         let falloff = min_effective(falloff, texel);
         let core_half = size * 0.5;
+        // `<TerrainPad size>` vem do parser sem validação (qualquer f32):
+        // um valor negativo/NaN fazia o `clamp(0.0, core_half.min(...))`
+        // abaixo entrar em pânico (`min > max`) no bootstrap. Pad degenerado
+        // resolve a cota (auto) e não carva nada.
+        if !core_half.is_finite() || core_half.x <= 0.0 || core_half.y <= 0.0 {
+            return height.unwrap_or_else(|| self.sample(at.x, at.y));
+        }
         let radius = corner_radius.clamp(0.0, core_half.x.min(core_half.y));
+        let radius = if radius.is_finite() { radius } else { 0.0 };
         let inner = core_half - Vec2::splat(radius);
         let target_height = height.unwrap_or_else(|| self.sample(at.x, at.y));
 
@@ -672,6 +687,27 @@ mod tests {
             far < 6.5,
             "outside the falloff the hill is untouched: {far}"
         );
+    }
+
+    /// `size` não positivo/NaN (o parser aceita qualquer f32) não pode
+    /// entrar no `clamp(0.0, min)` de `flatten_rect` — `min > max` é pânico.
+    #[test]
+    fn test_flatten_rejects_non_positive_size_without_panicking() {
+        for size in [
+            Vec2::new(-10.0, 10.0),
+            Vec2::new(10.0, -10.0),
+            Vec2::new(f32::NAN, 10.0),
+            Vec2::splat(0.0),
+        ] {
+            let mut grid = flat_grid(8.0);
+            let before = grid.raw().to_vec();
+            let resolved = grid.flatten_rect(Vec2::ZERO, size, 4.0, 2.0, None, "pad:bad");
+            assert!(
+                (resolved - 8.0).abs() < 0.01,
+                "pad {size:?}: cota auto é a do centro, veio {resolved}"
+            );
+            assert_eq!(grid.raw(), before.as_slice(), "pad {size:?} carvou");
+        }
     }
 
     #[test]

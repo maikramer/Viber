@@ -39,7 +39,7 @@ const FACE_SIZE: u32 = 128;
 /// Fases do dia que regeram o cubemap. Mais fases = transições mais suaves,
 /// cada uma custa um re-filtro compute (~1 frame). 12 (era 6, 2026-09-09):
 /// os saltos discretos de ambiente às trocas de fase liam-se nas encostas.
-const DAY_PHASES: u32 = 12;
+pub const DAY_PHASES: u32 = 12;
 
 /// Quanto do chão default o tint regional substitui (probes regionais).
 const TINT_MIX_GROUND: f32 = 0.65;
@@ -89,9 +89,12 @@ fn spawn_sky_probe(mut commands: Commands) {
 /// Fase quantizada do dia (0..DAY_PHASES). `None` até haver relógio útil.
 fn day_phase(clock: Option<&DayCycleState>) -> Option<u32> {
     let clock = clock?;
-    let day =
-        crate::worldsys::daylight_factor(clock.minute_of_day, clock.dawn_minute, clock.dusk_minute);
-    Some((day.clamp(0.0, 1.0) * DAY_PHASES as f32).floor() as u32)
+    // O `daylight_factor` é 1.0 o dia INTEIRO e 0.0 a noite inteira: usá-lo
+    // como fase regerava o cubemap só nos crepúsculos (o sol das 12h ficava
+    // com a luz das 08h). A fase vem do minuto VISUAL (já com o night-cap).
+    let minute = clock.visual_minute().rem_euclid(1440.0);
+    let per_phase = 1440.0 / DAY_PHASES as f32;
+    Some(((minute / per_phase).floor() as u32).min(DAY_PHASES - 1))
 }
 
 #[allow(clippy::type_complexity)]
@@ -113,10 +116,12 @@ fn update_sky_cubemap(
     if last_phase.is_some_and(|last| last == phase) {
         return;
     }
-    *last_phase = Some(phase);
+    // Só marca a fase DEPOIS de o probe existir: se a query falhasse na
+    // primeira frame útil, o IBL nunca era gerado.
     let Ok(probe_entity) = probes.single() else {
         return;
     };
+    *last_phase = Some(phase);
     // O modelo do céu do mundo (attr `<Sky model>`/env): o cubemap pinta a
     // MESMA radiância que o domo desenha (analítico ou nishita).
     let nishita = model_state
@@ -172,21 +177,16 @@ pub fn sky_cubemap_tinted(
     let mut data = vec![0u8; (FACE_SIZE * FACE_SIZE * 6) as usize * 8];
     let sun = a.sun_dir.normalize_or_zero();
     let moon = a.moon_dir.normalize_or_zero();
-    let write = |data: &mut [u8],
-                 base_off: usize,
-                 size: u32,
-                 face: u32,
-                 x: u32,
-                 y: u32,
-                 rgba: [u16; 4]| {
-        // `base_off` é o início do MIP: sem ele cada nível reescrevia o
-        // começo do mip 0 e os mips especulares ficavam a zeros (ambiente
-        // preto em roughness > 0).
-        let base = base_off + (face * size * size + y * size + x) as usize * 8;
-        for c in 0..4 {
-            data[base + c * 2..base + c * 2 + 2].copy_from_slice(&rgba[c].to_le_bytes());
-        }
-    };
+    let write =
+        |data: &mut [u8], base_off: usize, size: u32, face: u32, x: u32, y: u32, rgba: [u16; 4]| {
+            // `base_off` é o início do MIP: sem ele cada nível reescrevia o
+            // começo do mip 0 e os mips especulares ficavam a zeros (ambiente
+            // preto em roughness > 0).
+            let base = base_off + (face * size * size + y * size + x) as usize * 8;
+            for c in 0..4 {
+                data[base + c * 2..base + c * 2 + 2].copy_from_slice(&rgba[c].to_le_bytes());
+            }
+        };
     // Mip 0: o modelo de radiância por direção.
     for face in 0..6u32 {
         for y in 0..FACE_SIZE {
@@ -373,8 +373,12 @@ fn sky_radiance(
         let sd = dir.dot(sun).max(0.0);
         let halo = (sd.powi(8)) * 0.35 + (sd.powi(64)) * 1.2;
         let disc = smoothstep(0.9995, 0.99985, sd) * 60.0;
+        // O domo GPU esconde o disco quando o sol está abaixo do horizonte
+        // (`sky.wesl`); o CPU não gateava nada e pintava um disco de 60× no
+        // hemisfério de baixo à noite, iluminando por baixo.
+        let visible = smoothstep(-0.055, 0.005, sun.y) * smoothstep(0.0, 0.002, dir.y);
         for (s, t) in sun_add.iter_mut().zip(a.sun_tint.iter()) {
-            *s = *t * (halo + disc);
+            *s = *t * (halo + disc) * visible;
         }
     }
     for i in 0..3 {

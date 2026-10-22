@@ -1670,6 +1670,13 @@ pub fn lake_water_mesh(spec: &LakeSpec, water_y: f32, grid: &BrushGrid) -> Chunk
     // sobre areia seca, nos rasos). O MESMO fator vive no registry
     // (`WaterBody::mirror_reach`) — ver [`lake_mirror_reach`].
     let reach = lake_mirror_reach(spec.depth, spec.water_offset);
+    // `water_offset >= depth` (uma taça mais rasa que a lâmina) não cruza a
+    // linha de água: o reach é 0 e todos os anéis colapsavam no centro — um
+    // espelho de área ZERO cujos índices não eram vazios, portanto o
+    // `spawn_water` ainda o spawnava. Sem espelho, não há mesh.
+    if reach <= 0.0 {
+        return ChunkMeshData::default();
+    }
     let push = |mesh: &mut ChunkMeshData, p: Vec2, _radial: f32, mask: f32| {
         // Coluna vertical: o leito É a grid (o carve escreveu a taça lá).
         let depth = (water_y - grid.sample(p.x, p.y)).clamp(0.05, 40.0);
@@ -1878,8 +1885,8 @@ pub fn river_water_mesh(spec: &RiverSpec, body: &WaterBody) -> ChunkMeshData {
             let c = a + per;
             let d = c + 1;
             // Winding +Y (a convenção do mesh do lago): `a,c,b` olhava para
-        // baixo e o `is_front` do shader desligava a onda no rio.
-        mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+            // baixo e o `is_front` do shader desligava a onda no rio.
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
         }
     }
     mesh

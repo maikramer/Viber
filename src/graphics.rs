@@ -109,10 +109,16 @@ pub fn present_mode() -> bevy::window::PresentMode {
 }
 
 /// Cascatas do shadow map do sol por preset.
+///
+/// `equilibrado` 3 → 2 cascatas e 150 → 110 m (levantamento de 13 pontos do
+/// Vael, RTX 4050): no centro do vale a cascata longa levava 8–12 M
+/// triângulos (o frustum de sombra estende-se para o lado do sol e apanha
+/// casters bem fora da vista) e o passe valia 6–7,5 ms; com 2 × 110 m fica
+/// em 3,6–4,5 ms, sem diferença visível perto do herói.
 pub fn shadow_cascades() -> usize {
     match preset() {
         GraphicsPreset::Alto => 4,
-        GraphicsPreset::Equilibrado => 3,
+        GraphicsPreset::Equilibrado => 2,
         GraphicsPreset::Desempenho => 2,
     }
 }
@@ -121,7 +127,7 @@ pub fn shadow_cascades() -> usize {
 pub fn shadow_distance() -> f32 {
     match preset() {
         GraphicsPreset::Alto => 300.0,
-        GraphicsPreset::Equilibrado => 150.0,
+        GraphicsPreset::Equilibrado => 110.0,
         GraphicsPreset::Desempenho => 90.0,
     }
 }
@@ -209,11 +215,11 @@ mod tests {
         // Não depende do estado global: compara as tabelas diretamente.
         let cascades = |p: GraphicsPreset| match p {
             GraphicsPreset::Alto => 4,
-            GraphicsPreset::Equilibrado => 3,
+            GraphicsPreset::Equilibrado => 2,
             GraphicsPreset::Desempenho => 2,
         };
         assert!(cascades(GraphicsPreset::Alto) > cascades(GraphicsPreset::Equilibrado));
-        assert!(cascades(GraphicsPreset::Equilibrado) > cascades(GraphicsPreset::Desempenho));
+        assert!(cascades(GraphicsPreset::Equilibrado) >= cascades(GraphicsPreset::Desempenho));
     }
 
     /// Os getters têm de ser utilizáveis sem `resolve` (o `analyze` e os
@@ -226,8 +232,8 @@ mod tests {
             return;
         }
         assert_eq!(preset(), GraphicsPreset::Equilibrado);
-        assert_eq!(shadow_cascades(), 3);
-        assert_eq!(shadow_distance(), 150.0);
+        assert_eq!(shadow_cascades(), 2);
+        assert_eq!(shadow_distance(), 110.0);
         assert_eq!(volumetric_steps(), 24);
         assert_eq!(dir_shadow_size(), 4096);
         assert!(heavy_fx_enabled());
@@ -242,24 +248,24 @@ mod tests {
     fn test_desempenho_cuts_every_axis() {
         let cascades = |p| match p {
             GraphicsPreset::Alto => 4,
-            GraphicsPreset::Equilibrado => 3,
+            GraphicsPreset::Equilibrado => 2,
             GraphicsPreset::Desempenho => 2,
         };
         let distance = |p| match p {
             GraphicsPreset::Alto => 300.0,
-            GraphicsPreset::Equilibrado => 150.0,
+            GraphicsPreset::Equilibrado => 110.0,
             GraphicsPreset::Desempenho => 90.0_f32,
         };
         let steps = |p| match p {
             GraphicsPreset::Alto => 64,
-            GraphicsPreset::Equilibrado => 40,
+            GraphicsPreset::Equilibrado => 24,
             GraphicsPreset::Desempenho => 0,
         };
         for (a, b) in [
             (GraphicsPreset::Alto, GraphicsPreset::Equilibrado),
             (GraphicsPreset::Equilibrado, GraphicsPreset::Desempenho),
         ] {
-            assert!(cascades(a) > cascades(b), "cascatas {a:?} > {b:?}");
+            assert!(cascades(a) >= cascades(b), "cascatas {a:?} >= {b:?}");
             assert!(distance(a) > distance(b), "alcance {a:?} > {b:?}");
             assert!(steps(a) > steps(b), "volumétrico {a:?} > {b:?}");
         }

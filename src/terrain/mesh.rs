@@ -180,7 +180,10 @@ mod tests {
         };
         let valley = tint_vertex_color(10.0, 1.0, 200.0, &tint);
         let peak = tint_vertex_color(199.0, 1.0, 200.0, &tint);
-        assert_eq!(valley, [1.0; 4], "flat ground keeps the texture: {valley:?}");
+        assert_eq!(
+            valley, [1.0; 4],
+            "flat ground keeps the texture: {valley:?}"
+        );
         assert_eq!(peak, valley, "altitude must not recolor: {peak:?}");
 
         tint.height_blend_strength = 0.0;

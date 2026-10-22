@@ -71,12 +71,16 @@ const REFINE_ABOVE_MODS: usize = 16;
 /// keeps that list short — measured at ~3.5x on the bridge column of
 /// `worlds/qa-pontes.xml` (`tests/chunk_build_bench.rs`).
 fn resolve_cell_size(hint: f32, world_size: f32, mods: usize) -> f32 {
-    if mods < REFINE_ABOVE_MODS {
-        return hint;
-    }
+    // O piso de células vale SEMPRE. `floor` é o MENOR passo que mantém
+    // `span <= MAX_CELLS_PER_EDGE`; o antigo early-return de "poucos mods"
+    // furava-o e um `chunk-size` minúsculo (o hint) com três grutas num mundo
+    // de 4 km enchia o processo de baldes — `span²` `Vec`s, centenas de MB.
     let floor = (world_size.max(1.0) / MAX_CELLS_PER_EDGE).max(MIN_CELL_SIZE);
-    // Refine to the floor, but never coarsen a caller that already asked finer.
-    hint.min(floor)
+    if mods < REFINE_ABOVE_MODS {
+        return hint.max(floor);
+    }
+    // Acima de REFINE_ABOVE_MODS afina-se até ao piso (nunca para além dele).
+    hint.max(floor)
 }
 
 impl ModIndex {
@@ -406,6 +410,27 @@ mod tests {
             "the shelf column spanned [{lo}, {hi}] — the floor is the ground \
              and the ceiling is the shelf, not the world union"
         );
+    }
+
+    #[test]
+    fn test_a_tiny_hint_with_few_mods_still_respects_the_bucket_cap() {
+        // Três mods e `cell-size="1"` num mundo de 4 km: o early-return de
+        // "poucos mods" devolvia o hint cru e a grelha virava `span²` `Vec`s
+        // (4000² = 16 M baldes). O piso tem de valer sempre.
+        let mods = vec![
+            boxed("a", Vec3::ZERO, Vec3::splat(4.0)),
+            boxed("b", Vec3::new(100.0, 0.0, 0.0), Vec3::new(104.0, 4.0, 4.0)),
+            boxed("c", Vec3::new(-100.0, 0.0, 0.0), Vec3::new(-96.0, 4.0, 4.0)),
+        ];
+        let idx = ModIndex::build(&mods, 4000.0, 1.0);
+        let cap = 4000.0 / super::MAX_CELLS_PER_EDGE;
+        assert!(
+            idx.cell_size() >= cap,
+            "pitch {} abaixo do piso {cap} que mantém o teto de {} células",
+            idx.cell_size(),
+            super::MAX_CELLS_PER_EDGE
+        );
+        assert!(idx.cell_size() >= super::MIN_CELL_SIZE);
     }
 
     #[test]

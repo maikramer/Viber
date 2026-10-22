@@ -32,6 +32,7 @@ use super::runtime::{ChunkMaterialHandle, TerrainChunkMaterials, TerrainRuntime}
 use super::spec::{DEFAULT_LOD_HYSTERESIS, DEFAULT_LOD_RESELECT_DISTANCE, TerrainSpec};
 use crate::profiler::{Group, timed};
 use bevy::prelude::*;
+use std::time::{Duration, Instant};
 
 /// Tag on every terrain chunk mesh entity managed by this plugin.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -244,6 +245,14 @@ fn adopt_chunks(
 const VOXEL_MAX_MESH_BUILDS_PER_FRAME: u32 = 4;
 /// Multiplicador do orçamento durante um corte de cinemática (ecrã em negro).
 const STREAMING_BOOST: u32 = 10;
+/// Orçamento de TEMPO do passe voxel por frame. O orçamento de caixas
+/// (4/frame) não chega: uma caixa refinada custa 2–5 ms e quatro delas
+/// encostam o frame aos 20 ms; no teleporte, uma coluna de respawn pode
+/// custar 40 ms sozinha. Este teto para de começar trabalho novo a meio do
+/// frame e deixa o resto para o seguinte (`state.pending`).
+const VOXEL_BUILD_BUDGET_MS: f32 = 3.5;
+/// Durante um corte de cinemática o ecrã está em negro: pode-se gastar mais.
+const VOXEL_BUILD_BUDGET_BOOST_MS: f32 = 18.0;
 
 /// Estado de construção de uma coluna a meio de uma troca de LOD: as caixas
 /// do `target` nascem escondidas (`staged`) sob o orçamento do frame; quando
@@ -347,6 +356,12 @@ fn update_voxel_columns(
         } else {
             1
         };
+    let budget_ms = if boost.as_deref().is_some_and(|b| b.0) {
+        VOXEL_BUILD_BUDGET_BOOST_MS
+    } else {
+        VOXEL_BUILD_BUDGET_MS
+    };
+    let deadline = Instant::now() + Duration::from_secs_f32(budget_ms);
     state.pending = false;
 
     let spec = &runtime.spec;
@@ -377,7 +392,12 @@ fn update_voxel_columns(
     // colunas — 2 km de distância, inúteis, e a coluna da borda era depois
     // colada ao herói como se fosse o chão dele. Intersectar dá o conjunto
     // vazio, que é a verdade: ali não há terreno.
-    let lo = |axis: f32| ((axis - render_distance + half) / edge).floor();
+    // Menor índice de coluna cujo CENTRO ainda cabe no raio: o cull mede à
+    // AABB do chunk, logo o centro pode estar até `rd + edge/2` fora. O
+    // `floor` simples omitia a coluna exactamente no limite (expressão
+    // inteira) — ela ficava fora do `lod_field`: sem clamp 2:1 e sem células
+    // de transição para as vizinhas (costura furada na orla da janela).
+    let lo = |axis: f32| ((axis - render_distance + half - edge) / edge).ceil();
     let hi = |axis: f32| ((axis + render_distance + half) / edge).floor();
     let first = |v: f32| v.max(0.0).min(rows as f32 - 1.0) as u32;
     let last = |v: f32| v.min(rows as f32 - 1.0).max(0.0) as u32;
@@ -504,6 +524,12 @@ fn update_voxel_columns(
                     continue;
                 };
                 while budget > 0 {
+                    // Teto de tempo: uma caixa refinada pode custar 5 ms; não
+                    // começar outra quando o frame já gastou o orçamento.
+                    if Instant::now() >= deadline {
+                        state.pending = true;
+                        break;
+                    }
                     let Some(box_spec) = b.remaining.pop() else {
                         break;
                     };
@@ -512,9 +538,11 @@ fn update_voxel_columns(
                         &base,
                         voxel,
                         &box_spec,
-                        matches!(material, crate::terrain::runtime::ChunkMaterialHandle::Layer(_)),
-                    )
-                    else {
+                        matches!(
+                            material,
+                            crate::terrain::runtime::ChunkMaterialHandle::Layer(_)
+                        ),
+                    ) else {
                         // Provou-se vazio depois de tudo — sem custo de
                         // orçamento, segue para a próxima caixa.
                         continue;
@@ -606,7 +634,7 @@ fn update_voxel_columns(
             None => {}
         }
     }
-    if budget == 0 {
+    if budget == 0 || Instant::now() >= deadline {
         state.pending = true;
     }
 
@@ -620,7 +648,7 @@ fn update_voxel_columns(
     }
     for cz in min_cz..=max_cz {
         for cx in min_cx..=max_cx {
-            if budget == 0 {
+            if budget == 0 || Instant::now() >= deadline {
                 state.pending = true;
                 return;
             }
@@ -1063,9 +1091,10 @@ mod tests {
         app
     }
 
-    /// Move a câmara (única) e corre dois updates: o 1.º sincroniza
-    /// Transform → GlobalTransform (PostUpdate), o 2.º corre o passe de LOD
-    /// contra a posição nova.
+    /// Move a câmara (única) e corre updates até o streaming drenar: o passe
+    /// LOD constrói `ColumnBuild`s encenados sob orçamento por frame, e o
+    /// número de caixas por coluna depende da altura (uma coluna cuja
+    /// superfície toca a face de uma caixa planeia a caixa vizinha).
     fn move_camera(app: &mut bevy::app::App, x: f32, z: f32) {
         let mut cam = app
             .world_mut()
@@ -1073,8 +1102,9 @@ mod tests {
             .single_mut(app.world_mut())
             .expect("one camera");
         cam.1.translation = Vec3::new(x, 20.0, z);
-        app.update();
-        app.update();
+        for _ in 0..12 {
+            app.update();
+        }
     }
 
     /// Uma edição viva (cratera) re-mesha SÓ as colunas cujo rect cobre — e
@@ -1371,47 +1401,82 @@ mod tests {
             runtime.spec.render_distance = Some(10_000.0);
         }
 
-        // Fly far away → coarser LOD everywhere (budget 4 covers 4 chunks).
-        // Três updates no caminho voxel: o 1.º sincroniza a transform e
-        // agenda o ColumnBuild (deferido), o 2.º constrói as caixas staged e
-        // faz o swap; o 3.º cobre colunas cujas caixas não couberam no
-        // orçamento do 2.º. (O heightfield reconstruía inline no próprio
-        // passe; o voxel constrói caixas staged sob orçamento.)
+        // Fly far away → coarser LOD everywhere. O caminho voxel constrói as
+        // caixas staged sob orçamento: drena até todas as colunas terem feito
+        // o swap (o número de caixas por coluna depende da altura, por isso
+        // uma contagem fixa de frames era frágil).
         let mut cam = app
             .world_mut()
             .query::<(&Camera3d, &mut Transform)>()
             .single_mut(app.world_mut())
             .expect("one camera");
         cam.1.translation = Vec3::new(half + 500.0, 20.0, half);
-        app.update();
-        app.update();
-        app.update();
+        for _ in 0..24 {
+            app.update();
+            let done = {
+                let mut q = app.world_mut().query::<&TerrainChunk>();
+                q.iter(app.world()).all(|c| c.built_lod == 2)
+            };
+            if done {
+                break;
+            }
+        }
         assert_eq!(lod(&mut app), vec![2, 2, 2, 2], "far camera: coarsest LOD");
 
         // Render distance: cull everything, then respawn on approach.
         let mut runtime = app.world_mut().resource_mut::<TerrainRuntime>();
         runtime.spec.render_distance = Some(100.0);
-        app.update();
+        // O passe de LOD só corre com a câmara em movimento (> reselect) ou
+        // com trabalho pendente; mudar o `render-distance` ao vivo não é
+        // "movimento", por isso dá-se um empurrão à câmara — sem ele o cull
+        // ficava para a próxima vez que o jogador andasse. O raio novo
+        // continua a excluir tudo (AABB ~500 m).
+        {
+            let mut cam = app
+                .world_mut()
+                .query::<(&Camera3d, &mut Transform)>()
+                .single_mut(app.world_mut())
+                .expect("one camera");
+            cam.1.translation.x += 12.0;
+        }
+        for _ in 0..12 {
+            app.update();
+            if app.world().resource::<ChunkLodState>().tracked_chunks() == 0 {
+                break;
+            }
+        }
         {
             let state = app.world().resource::<ChunkLodState>();
             assert_eq!(state.tracked_chunks(), 0, "all chunks culled");
         }
-        let count = |app: &mut bevy::app::App| {
+        // Caixas voxel (uma coluna pode ter mais do que uma).
+        let boxes = |app: &mut bevy::app::App| {
             let mut q = app
                 .world_mut()
                 .query::<&crate::terrain::voxel::VoxelChunk>();
             q.iter(app.world()).count()
         };
-        assert_eq!(count(&mut app), 0);
+        assert_eq!(boxes(&mut app), 0);
         let mut cam = app
             .world_mut()
             .query::<(&Camera3d, &mut Transform)>()
             .single_mut(app.world_mut())
             .expect("one camera");
         cam.1.translation = Vec3::new(half, 20.0, half);
-        app.update();
-        app.update();
-        assert_eq!(count(&mut app), 4, "chunks respawned near the camera");
+        // O respawn constrói as colunas inline, mas sob o orçamento de caixas
+        // por frame: drena até as quatro colunas estarem de volta.
+        for _ in 0..12 {
+            app.update();
+            if app.world().resource::<ChunkLodState>().tracked_chunks() == 4 {
+                break;
+            }
+        }
+        assert_eq!(
+            app.world().resource::<ChunkLodState>().tracked_chunks(),
+            4,
+            "chunks respawned near the camera"
+        );
+        assert!(boxes(&mut app) >= 4, "as caixas voltaram com as colunas");
         // O respawn constrói já no LOD cru da distância ao centro, MAS o piso
         // da banda de colisão (chunk 16 × 3 = 48, limitado a lod_distance 32
         // — e este mundo de teste de 32 m cabe inteiro nela) força LOD 0 em
@@ -1497,6 +1562,18 @@ mod tests {
             lods,
             vec![2, 2, 2, 2],
             "respawn constrói já no LOD 2 da distância, não em LOD 0"
+        );
+    }
+
+    #[test]
+    fn voxel_time_budget_leaves_room_for_a_frame() {
+        assert!(
+            VOXEL_BUILD_BUDGET_MS < 16.0,
+            "o passe voxel não pode gastar o frame inteiro"
+        );
+        assert!(
+            VOXEL_BUILD_BUDGET_BOOST_MS > VOXEL_BUILD_BUDGET_MS,
+            "o corte de cinemática (ecrã negro) pode gastar mais"
         );
     }
 

@@ -356,8 +356,11 @@ impl CliffBand {
         let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
         let crest_higher_plus = mean(&ip) >= mean(&im);
         let (mut top_y, mut bot_y, drop_sign) = match spec.side {
-            CliffSide::Left => (ip, op_, 1.0f32),
-            CliffSide::Right => (im, om, -1.0f32),
+            // `Left` = a parede desce para o lado +normal: o planalto está em
+            // `-n` (`im`) e a base em `+n` (`op_`). A versão anterior lia o
+            // topo já 1,5 texels abaixo da crista, o que anulava o degrau.
+            CliffSide::Left => (im, op_, 1.0f32),
+            CliffSide::Right => (ip, om, -1.0f32),
             CliffSide::Auto if crest_higher_plus => (ip, om, -1.0f32),
             CliffSide::Auto => (im, op_, 1.0f32),
         };
@@ -623,11 +626,7 @@ impl VoxelMod for CliffFaceMod {
         // (o density ignora mods fora de bounds()). Expandir os DOIS lados
         // punha o corpo da parede dentro do SDF, que o escavava; cada eixo
         // cresce apenas no sentido do undercut.
-        let lo = lo
-            - Vec2::new(
-                back * self.normal.x.max(0.0),
-                back * self.normal.y.max(0.0),
-            );
+        let lo = lo - Vec2::new(back * self.normal.x.max(0.0), back * self.normal.y.max(0.0));
         let hi = hi
             + Vec2::new(
                 back * (-self.normal.x).max(0.0),

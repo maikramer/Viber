@@ -182,21 +182,41 @@ impl AdaptiveQuality {
     }
 
     /// Amostra um frame de `dt` segundos reais; devolve o tier novo quando
-    /// houve transição.
+    /// houve transição. Atalho para [`Self::step_timed`] quando amostra e
+    /// relógio são o mesmo valor (sem frame pacing).
     pub fn step(&mut self, dt: f32) -> Option<u8> {
-        let sample_ms = dt * 1000.0;
+        self.step_timed(dt, dt)
+    }
+
+    /// `sample_s` alimenta a EMA (o TRABALHO do frame); `wall_s` é o tempo
+    /// real decorrido, que move cooldowns e aquecimento. Com frame pacing os
+    /// dois divergem: o pacer dorme o resto do período pelo que medir o
+    /// trabalho no relógio fazia um cooldown de 10 s durar ~30 s reais a
+    /// 60 fps (o tier levava uma eternidade a recuperar).
+    pub fn step_timed(&mut self, sample_s: f32, wall_s: f32) -> Option<u8> {
+        let sample_ms = sample_s * 1000.0;
         // Tab em background/breakpoint: amostra absurda envenenava a EMA.
         if !(sample_ms > 0.0 && sample_ms <= 1000.0) {
             return None;
         }
-        self.since_transition += dt;
-        self.elapsed += dt;
+        let wall_s = if wall_s.is_finite() && wall_s > 0.0 {
+            wall_s
+        } else {
+            0.0
+        };
+        self.since_transition += wall_s;
+        self.elapsed += wall_s;
+        let target_ms = 1000.0 / self.target_fps;
         let ema = match self.ema_ms {
             Some(prev) => prev * (1.0 - EMA_ALPHA) + sample_ms * EMA_ALPHA,
             None => sample_ms,
         };
         self.ema_ms = Some(ema);
-        if self.elapsed >= FLOOR_WARMUP_S {
+        // Chão só de amostras plausíveis: um delta quase-zero (troca de
+        // present mode, resolução do timer) grudava o chão em ~0 e a
+        // recuperação por vsync (`ema <= floor * 1.05`) nunca mais acontecia.
+        // Abaixo de meio alvo a folga lê-se na mesma pela histerese normal.
+        if self.elapsed >= FLOOR_WARMUP_S && ema >= target_ms * 0.5 {
             self.floor_ms = Some(self.floor_ms.map_or(ema, |floor| floor.min(ema)));
         }
         let QualityMode::Auto = self.mode else {
@@ -206,14 +226,15 @@ impl AdaptiveQuality {
         if self.last_up && self.since_transition >= PROBE_FAIL_WINDOW_S {
             self.upscale_backoff = 1.0;
         }
-        let target_ms = 1000.0 / self.target_fps;
         self.hot_frames = if ema > target_ms * DOWNSCALE_HYSTERESIS {
             self.hot_frames + 1
         } else {
             0
         };
         let pegged_at_floor = self.vsync
-            && ema < target_ms
+            // `ema < target` estrito nunca conta quando o vsync entrega
+            // exatamente o alvo (60 fps a 60 Hz); 2% de folga cobre o jitter.
+            && ema <= target_ms * 1.02
             && self
                 .floor_ms
                 .is_some_and(|floor| ema <= floor * VSYNC_FLOOR_TOLERANCE);
@@ -304,6 +325,7 @@ fn install_adaptive_quality(mut commands: Commands, configs: Option<Res<EngineCo
 
 fn drive_adaptive_quality(
     time: Res<Time<Real>>,
+    pacer: Option<Res<crate::frame_pacing::FramePacer>>,
     state: Option<ResMut<AdaptiveQuality>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     cinematic: Option<Res<crate::cinematic::CinematicPlayback>>,
@@ -325,9 +347,21 @@ fn drive_adaptive_quality(
         );
         if state.vsync != vsync {
             state.vsync = vsync;
+            // O `floor_ms` é o intervalo de refresh: trocar de uncapped para
+            // 60 Hz deixava um chão de ~5 ms inatingível e o tier nunca mais
+            // subia. Reaprende-o no modo novo.
+            state.floor_ms = None;
         }
     }
-    if let Some(tier) = state.step(time.delta_secs()) {
+    // Com o frame pacing ativo o frame real fica preso ao período (o pacer
+    // dorme o resto): medir isso fazia o escalonador descer de tier por um
+    // "atraso" que é só sono. Mede-se o trabalho do frame.
+    let frame = pacer
+        .as_deref()
+        .filter(|p| p.period.is_some() && p.last_work > 0.0)
+        .map_or(time.delta_secs(), |p| p.last_work);
+    // Amostra = trabalho; relógio = frame real (o pacer dorme o resto).
+    if let Some(tier) = state.step_timed(frame, time.delta_secs()) {
         apply_tier(tier);
         info!(
             "adaptive-quality: tier → {} (EMA {:.1} ms, alvo {:.1} ms)",
@@ -458,6 +492,23 @@ mod tests {
             second as f32 * 0.0167 >= TRANSITION_COOLDOWN_S * 1.5 * 2.0,
             "2.ª tentativa espera o dobro ({second} frames vs {first_probe})"
         );
+    }
+
+    /// Com frame pacing o trabalho do frame é menor do que o período real: os
+    /// cooldowns contam o RELÓGIO, não o trabalho. Antes, 10 s de cooldown a
+    /// 60 fps com 5 ms de trabalho valiam ~30 s reais.
+    #[test]
+    fn test_pacing_work_does_not_stretch_cooldowns() {
+        let mut q = AdaptiveQuality::new(60.0, QualityMode::Auto);
+        // 300 frames a 40 ms: desce a 1 no cooldown de 10 s e fica lá.
+        assert_eq!(run(&mut q, 300, 40.0), vec![1]);
+        // 1000 frames de folga: 4 ms de trabalho, 16,7 ms reais. O cooldown
+        // de subida (15 s) tem de correr no relógio real (~780 frames), não
+        // no trabalho (que pediria ~3750).
+        let changes: Vec<u8> = (0..1000)
+            .filter_map(|_| q.step_timed(0.004, 1.0 / 60.0))
+            .collect();
+        assert_eq!(changes, vec![0], "tier 1 → 0 no cooldown real");
     }
 
     #[test]

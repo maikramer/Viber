@@ -30,7 +30,7 @@
 //! é lido neste caminho (as vertex colors transportam dados de
 //! parede/região, não tint).
 
-use bevy::asset::Asset;
+use bevy::asset::{Asset, AssetId};
 use bevy::math::Vec4;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
@@ -755,6 +755,7 @@ pub fn terrain_daynight_tint(
     mut chunk_materials: ResMut<Assets<TerrainChunkMaterial>>,
     mut standards: ResMut<Assets<StandardMaterial>>,
     mut last_step: Local<Option<f32>>,
+    mut last_material: Local<Option<AssetId<TerrainChunkMaterial>>>,
     mut sweep: Local<Option<(Vec4, Vec4)>>,
 ) {
     let day = clock
@@ -778,11 +779,20 @@ pub fn terrain_daynight_tint(
 
     let Some(chunks) = chunks else { return };
     if let Some(layers) = &chunks.layer {
+        // O `Local` sobrevive à troca de cena, mas o material de chunk é
+        // RECRIADO pelo bootstrap seguinte (novo `AssetId`). Sem este reset o
+        // passo do dia já publicado contava como feito e o material novo
+        // ficava com o `day_tint` de fábrica (`w = 0`, perspectiva aérea
+        // desligada) até o factor de luz mudar de degrau.
+        let material_id = layers.material.id();
+        if last_material.as_ref() != Some(&material_id) {
+            *last_material = Some(material_id);
+            *last_step = None;
+        }
         // Tocar no material recria o seu bind group: o passo quantizado
         // (16 por dia de jogo) tira a frequência.
         let step = (day * DAY_TINT_STEPS).round() / DAY_TINT_STEPS;
         if last_step.is_none_or(|prev| (step - prev).abs() > 1e-4) {
-            *last_step = Some(step);
             // r2 — AERIAL PERSPECTIVE: o campo `day_tint` passa a transportar
             // o TINT DO HORIZONTE (não o antigo multiplicador de dia/noite —
             // a luz real da r1 já trata o escurecer). O shader mistura o
@@ -802,9 +812,12 @@ pub fn terrain_daynight_tint(
                 Vec4::ZERO
             };
             // Sem atmosfera não há o que publicar (o default de
-            // `TerrainChunkParams::new` mantém o caminho desligado).
+            // `TerrainChunkParams::new` mantém o caminho desligado) — e o
+            // passo NÃO conta como publicado, senão o tint nunca chegava ao
+            // material quando a atmosfera aparecesse um frame depois.
             if let Some(sky4) = sky4 {
                 *sweep = Some((sky4, sun4));
+                *last_step = Some(step);
             }
         }
         if let Some((sky4, sun4)) = sweep.take()
@@ -842,6 +855,7 @@ pub fn terrain_rain_wetness(
     mut throttle: Local<f32>,
     mut current: Local<f32>,
     mut published: Local<Option<f32>>,
+    mut last_material: Local<Option<AssetId<TerrainChunkMaterial>>>,
     mut sweep: Local<Option<f32>>,
 ) {
     *throttle -= time.delta_secs();
@@ -859,6 +873,15 @@ pub fn terrain_rain_wetness(
     let Some(layers) = &chunks.layer else {
         return;
     };
+    // Material recriado (troca de cena): o "já publicado" era do material
+    // ANTIGO. O novo nasce com `walls_b.w = 0`; sem o reset, uma chuva
+    // constante (o valor não muda) deixava o chão novo seco para sempre —
+    // o gate de escrita nunca disparava.
+    let material_id = layers.material.id();
+    if last_material.as_ref() != Some(&material_id) {
+        *last_material = Some(material_id);
+        *published = None;
+    }
     // O `walls_b.w` de fábrica é 0 (seco): um mundo que nunca choveu já está
     // publicado a 0 e não paga uma passagem só para escrever zeros.
     if sweep.is_none() && (published.unwrap_or(0.0) - *current).abs() > WETNESS_PUBLISH_EPS {

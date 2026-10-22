@@ -376,6 +376,24 @@ fn erode_once(bits: &mut [u64], width: usize, depth: usize) {
 }
 
 impl CliffMask {
+    /// Hash do CONTEÚDO da máscara. A cache do splat inclui-o: cliffs não
+    /// tocam no `raw()` do heightmap, e sem isto mover um `<Cliff>`/mudar o
+    /// `cliff-angle` reutilizava a cache antiga (cores de rocha no sítio
+    /// errado).
+    pub fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.core.hash(&mut hasher);
+        self.bits.hash(&mut hasher);
+        self.talus.hash(&mut hasher);
+        self.authored.hash(&mut hasher);
+        self.wall.hash(&mut hasher);
+        self.width.hash(&mut hasher);
+        self.depth.hash(&mut hasher);
+        self.world_size.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Full pipeline over `grid` with the filter thresholds of the spec.
     pub fn build(grid: &BrushGrid, spec: &super::spec::TerrainSpec) -> Self {
         Self::build_with(

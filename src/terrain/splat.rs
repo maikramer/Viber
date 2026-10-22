@@ -599,7 +599,10 @@ impl SplatInputs<'_> {
 /// position).
 pub fn generate_splats(inputs: SplatInputs) -> SplatMap {
     let size = inputs.size();
-    let texel = inputs.texel();
+    // `size()` é limitado a 4096: usar o texel AUTORADO depois do clamp
+    // encolhia a cobertura (um `splat-texel` fino num mundo grande deixava a
+    // metade exterior a amostrar a borda). O texel efetivo cobre o mundo.
+    let texel = inputs.grid.world_size() / size as f32;
     let mut map = SplatMap {
         size,
         texel,
@@ -682,7 +685,9 @@ fn bake_rows(map: &mut SplatMap, inputs: SplatInputs, x0: u32, x1: u32, z0: u32,
                 let y = grid.sample(x, z);
                 let normal = grid.sample_normal(x, z, epsilon);
                 let mut w = weights_at(x, z, y, normal.y, grid.max_height(), &mut ctx);
-                if let Some((slot, weight)) = inputs.paint.and_then(|paint| paint.sample(x, z)) {
+                if let Some((slot, weight)) = inputs.paint.and_then(|paint| paint.sample(x, z))
+                    && slot < LAYER_COUNT
+                {
                     for value in w.iter_mut() {
                         *value *= 1.0 - weight;
                     }
@@ -742,8 +747,11 @@ pub fn load_cache(path: &std::path::Path, key: u64) -> Option<SplatMap> {
     }
     let size = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
     let texel = f32::from_le_bytes(bytes[20..24].try_into().ok()?);
-    let plane = (size as usize) * (size as usize) * 4;
-    if bytes.len() != header + plane * 4 {
+    if !(16..=4096).contains(&size) || !texel.is_finite() || texel <= 0.0 {
+        return None;
+    }
+    let plane = (size as usize).checked_mul(size as usize)?.checked_mul(4)?;
+    if bytes.len() != header.checked_add(plane.checked_mul(4)?)? {
         return None;
     }
     let planes =

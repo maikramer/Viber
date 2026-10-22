@@ -96,7 +96,11 @@ fn draw_diag(
             Some(path) => path.to_string(),
             None => name
                 .map(|n| n.as_str().to_string())
-                .or_else(|| parent.and_then(|p| names.get(p.parent()).ok()).map(|n| n.as_str().to_string()))
+                .or_else(|| {
+                    parent
+                        .and_then(|p| names.get(p.parent()).ok())
+                        .map(|n| n.as_str().to_string())
+                })
                 .unwrap_or_else(|| "<procedural>".to_string()),
         };
         Some((label, tris))
@@ -123,9 +127,7 @@ fn draw_diag(
                 .get(*e)
                 .ok()
                 .and_then(|m| materials.get(&m.0))
-                .is_some_and(|m| {
-                    !matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_))
-                })
+                .is_some_and(|m| !matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)))
         };
         tally(
             &mut visible
@@ -212,7 +214,9 @@ fn asset_churn(
     let mut by_owner: HashMap<String, (usize, usize)> = HashMap::new();
     let mut seen = std::collections::HashSet::new();
     for (entity, mesh) in &owners {
-        let Some(n) = modified.get(&mesh.0.id()) else { continue };
+        let Some(n) = modified.get(&mesh.0.id()) else {
+            continue;
+        };
         if !seen.insert(mesh.0.id()) {
             continue;
         }

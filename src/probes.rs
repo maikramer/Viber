@@ -29,7 +29,14 @@ use crate::terrain::sampler::ResolvedPad;
 use crate::worldsys::{AtmosphereState, BiomeRegionData, BiomeRegions, DayCycleState};
 
 /// Teto de probes regionais (98 KB/cubemap CPU + filtro GPU por fase).
-const MAX_PROBES: usize = 8;
+///
+/// Um dos `MAX_VIEW_LIGHT_PROBES` (8) do Bevy fica reservado ao probe MUNDIAL
+/// do IBL (`crate::ibl`), que também é um `LightProbe` regional de 4 km. Com 8
+/// regionais o mundial era o 9.º e a lista da vista (ordenada pela distância à
+/// câmara) descartava-o — fora dos AABBs regionais o fragmento ficava sem
+/// ambiente NENHUM (o fallback `view_cubemap_index` só existe para mapas
+/// presos à câmara, que este motor não usa).
+const MAX_PROBES: usize = bevy::pbr::MAX_VIEW_LIGHT_PROBES - 1;
 /// Pads mais perto do que isto colapsam para um probe (fica o 1.º).
 const MIN_SPACING_M: f32 = 40.0;
 /// Meia-extensão horizontal do influence volume (m) — clampada.
@@ -122,9 +129,11 @@ fn pick_pads<'a>(
 /// ([`crate::ibl`]); os regionais acompanham para o tint acompanhar a luz.
 fn day_phase(clock: Option<&DayCycleState>) -> Option<u32> {
     let clock = clock?;
-    let day =
-        crate::worldsys::daylight_factor(clock.minute_of_day, clock.dawn_minute, clock.dusk_minute);
-    Some((day.clamp(0.0, 1.0) * 6.0).floor() as u32)
+    // Minuto VISUAL (com night-cap), não o `daylight_factor` binário — ver
+    // `ibl::day_phase`: o dia inteiro dava sempre a mesma fase.
+    let minute = clock.visual_minute().rem_euclid(1440.0);
+    let per_phase = 1440.0 / crate::ibl::DAY_PHASES as f32;
+    Some(((minute / per_phase).floor() as u32).min(crate::ibl::DAY_PHASES - 1))
 }
 
 /// Nasce uma vez (quando o bootstrap publica o `TerrainRuntime`) e repinta
@@ -140,9 +149,21 @@ fn update_regional_probes(
     mut images: ResMut<Assets<Image>>,
     probes: Query<(Entity, &ProbeTint, &GeneratedEnvironmentMapLight), With<RegionalProbe>>,
     mut spawned: Local<bool>,
+    // Quantos probes a última passagem de spawn criou. Distingue "ainda não
+    // há pads com tint" (0) de "a cena foi descarregada e levou os probes".
+    mut spawned_count: Local<usize>,
     mut last_phase: Local<Option<Option<u32>>>,
 ) {
     let phase = day_phase(clock.as_deref());
+    // Os probes não são Persistent: um unload de cena despacha-os, mas o
+    // `Local` ficava true e nunca voltavam a nascer. Só repõe `spawned` se
+    // HAVIA probes — com `probes.is_empty()` puro, um mundo sem pads com tint
+    // (ou ainda sem pads) refazia o `pick_pads` (todos os pads × regiões) em
+    // TODOS os frames.
+    if *spawned && *spawned_count > 0 && probes.is_empty() {
+        *spawned = false;
+        *spawned_count = 0;
+    }
     if *spawned && last_phase.is_some_and(|last| last == phase) {
         return;
     }
@@ -162,6 +183,7 @@ fn update_regional_probes(
 
     if !*spawned {
         *spawned = true;
+        *spawned_count = pads.len();
         for (pad, tint) in &pads {
             let handle = images.add(crate::ibl::sky_cubemap_tinted(
                 &atmosphere,
@@ -231,6 +253,14 @@ mod tests {
             pp_bloom_strength: None,
             rain_scale: None,
         }
+    }
+
+    /// O probe mundial do IBL ocupa um slot da lista da vista: os regionais
+    /// têm de caber nos restantes, senão o mundo perde o ambiente fora dos
+    /// AABBs regionais.
+    #[test]
+    fn test_world_ibl_probe_fits_in_the_view_list() {
+        assert!(MAX_PROBES + 1 <= bevy::pbr::MAX_VIEW_LIGHT_PROBES);
     }
 
     #[test]

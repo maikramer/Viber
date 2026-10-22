@@ -143,10 +143,19 @@ impl VoxelField {
         }
         let (gmin, gmax) =
             base.range_over(bounds.min.x, bounds.min.z, bounds.max.x, bounds.max.z)?;
+        // `min.y >= gmax`: todas as amostras da caixa são ≥ 0 (fora da rocha)
+        // — não há travessia lá dentro, provar "céu" é seguro mesmo quando a
+        // superfície encosta à face de baixo.
         if bounds.min.y >= gmax {
             return Some(false);
         }
-        if bounds.max.y <= gmin {
+        // `max.y <= gmin` NÃO é seguro: com `<=` a caixa cuja face de cima
+        // coincide com a cota mínima (um planalto a y = múltiplo do `extent`,
+        // o caso comum é y = 0) era provada "bedrock" e a de cima "céu" — e
+        // NENHUMA meshava a superfície, que fica exactamente nessa face:
+        // uma faixa inteira do mundo invisível e sem collider. A caixa de
+        // baixo tem de ser amostrada para desenhar o zero.
+        if bounds.max.y < gmin {
             return Some(true);
         }
         None
@@ -633,6 +642,31 @@ mod tests {
             "deep is solid"
         );
         assert_eq!(field.region_state(&base, &surface), None, "must be meshed");
+    }
+
+    /// A superfície EXACTAMENTE na face de uma caixa (planalto a y = múltiplo
+    /// do `extent`; y = 0 num mundo plano é o caso comum) tem de ser meshada
+    /// pela caixa de BAIXO. Com `bounds.max.y <= gmin` ela era provada
+    /// "bedrock" enquanto a de cima provava "céu": nenhuma meshava a
+    /// superfície.
+    #[test]
+    fn test_region_state_keeps_the_box_that_touches_the_surface() {
+        let field = VoxelField::flat(512.0, 64.0);
+        let base = RangedFlat(0.0);
+        let below = Bounds3::from_corners(Vec3::new(0.0, -32.0, 0.0), Vec3::new(32.0, 0.0, 32.0));
+        let above = Bounds3::from_corners(Vec3::new(0.0, 0.0, 0.0), Vec3::new(32.0, 32.0, 32.0));
+        assert_eq!(
+            field.region_state(&base, &below),
+            None,
+            "a caixa que toca a superfície pela face de cima tem de ser meshada"
+        );
+        // A de cima não contém rocha nenhuma (todas as amostras ≥ 0) e não
+        // pode ser forçada a amostrar só porque a de baixo passou a ser.
+        assert_eq!(
+            field.region_state(&base, &above),
+            Some(false),
+            "acima da superfície é céu, mesmo encostando à face de baixo"
+        );
     }
 
     #[test]

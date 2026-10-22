@@ -426,20 +426,23 @@ pub struct TerrainSplat {
 }
 
 /// Chave da cache do splat: hash do CONTEÚDO que o determina (alturas da
-/// grelha, pintura, água, estradas, parâmetros e a versão do formato) — nunca
-/// fica velha por um mtime.
+/// grelha, suavização, máscara de cliffs, pintura, água, estradas, parâmetros
+/// e a versão do formato) — nunca fica velha por um mtime.
 fn splat_cache_key(
     grid: &BrushGrid,
     paint: &crate::terrain::paint::PaintGrid,
     result: &FeatureResult,
     params: &SplatParams,
+    cliff: Option<&crate::terrain::cliffs::CliffMask>,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "viber-splat-v3".hash(&mut hasher);
+    "viber-splat-v4".hash(&mut hasher);
     grid.raw().hash(&mut hasher);
     grid.world_size().to_bits().hash(&mut hasher);
     grid.max_height().to_bits().hash(&mut hasher);
+    grid.smoothing().to_bits().hash(&mut hasher);
+    cliff.map(|mask| mask.content_hash()).hash(&mut hasher);
     paint.to_bytes().hash(&mut hasher);
     format!("{:?}|{:?}|{:?}", result.water, result.roads, params).hash(&mut hasher);
     hasher.finish()
@@ -476,7 +479,8 @@ fn load_or_bake_splat(
     } else {
         heightmap.and_then(splat_cache_path)
     };
-    let key = paint.map(|paint| splat_cache_key(inputs.grid, paint, result, inputs.params));
+    let key =
+        paint.map(|paint| splat_cache_key(inputs.grid, paint, result, inputs.params, inputs.cliff));
     if let (Some(path), Some(key)) = (&cache, key)
         && let Some(map) = super::splat::load_cache(path, key)
     {
@@ -1821,10 +1825,13 @@ fn spawn_terrain_material(
     let side = map.size as f32 * map.texel;
     let pick = |list: &[Handle<Image>], i: usize| list[i].clone();
     let mut chunk_params = TerrainChunkParams::new([origin.x, origin.y], side, config);
-    // Mapa de roughness ainda em carga: mix 0 (a constante). O watch
-    // repõe `ROUGH_MAP_MIX` quando a imagem entra no material.
+    // Mapa de roughness não RESIDENTE: mix 0 (a constante). Isto inclui o
+    // slot SEM mapa nenhum — o fallback plano é BRANCO (1.0) e num slot
+    // `Smooth` o shader inverte-o (`1 − 1 = 0`): o chão ficava quase
+    // espelhado (roughness ≈ 0.15·constante) em vez de usar a rugosidade
+    // autoral. O watch repõe `ROUGH_MAP_MIX` quando a imagem real entra.
     for slot in 0..super::splat::LAYER_COUNT {
-        if layer_roughs[slot] != flat_rough && bound_roughs[slot] == flat_rough {
+        if bound_roughs[slot] == flat_rough {
             chunk_params.roughs[slot].y = 0.0;
         }
     }
@@ -2144,9 +2151,10 @@ fn spawn_water(
         let foam_positions: Vec<(Vec2, f32)> = if is_lake {
             let lake = &features.lakes[spec_i];
             let shape = super::water::LakeShape::from_authoring(lake.at, &lake.shape);
-            let reach = (super::water::waterline_reach(lake.depth, lake.water_offset)
-                * super::water::CARVE_MARGIN)
-                .clamp(0.5, 1.6);
+            // A MESMA linha de água do espelho (e do registry): o antigo
+            // `clamp(0.5, 1.6)` punha o anel de espuma a 50% do contorno nos
+            // lagos rasos — fora da água, a flutuar sobre a margem seca.
+            let reach = super::water::lake_mirror_reach(lake.depth, lake.water_offset);
             let perimeter = 2.0 * std::f32::consts::PI * lake.radius * reach;
             let n = ((perimeter / FOAM_SPACING) as usize).clamp(4, FOAM_MAX_PER_BODY);
             (0..n)

@@ -466,8 +466,16 @@ fn fragment(
     // Espuma de CRISTA (jacobian, estilo bevy_water): onde o campo empina a
     // onda quebra — independe da margem, aparece em todo o corpo com vento.
     // `damp`/`shore` seguram as cristas ao longe e na beira.
-    let crest = (1.0 - smoothstep(0.0, 0.7, wave_jacobian(world.xz, t)))
-        * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) * 0.75 * damp * shore;
+    //
+    // 2026-10-21 (crítica de mundo): a 0,75 e com limiar 0..0,7 a espuma
+    // cobria o corpo em PASTILHAS redondas alinhadas (os quatro trens de
+    // onda ainda dominam o jacobian). O lago parecia ladrilhado. Agora:
+    // limiar mais exigente (só convergência forte quebra), amplitude 0,22 e
+    // uma máscara de noise lento — a espuma vira mancha esparsa, não padrão.
+    let crest_mask = smoothstep(0.38, 0.78,
+        value_noise(world.xz * 0.045 + vec2<f32>(t * 0.02, 0.0)));
+    let crest = (1.0 - smoothstep(0.10, 0.55, wave_jacobian(world.xz, t)))
+        * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) * 0.22 * damp * shore * crest_mask;
     let foam = clamp(foam_band * foam_band * foam_noise + crest, 0.0, 1.0) * shore * 0.75;
 
     // Corpo: cor rasa → cor profunda ao longo da absorção. O reflexo do CÉU
@@ -494,8 +502,11 @@ fn fragment(
     // Base 0.22 (era 0.14): com reflectance 1.0 o lóbulo especular do IBL
     // espelhava o céu pálido como um borrão branco ("água leitosa") — mais
     // rugosidade espalha o reflexo e deixa a COR do corpo dominar.
+    // 2026-10-21: 0,22 refletia o céu claro em PASTILHAS brancas alinhadas
+    // (o IBL especular sobre o campo de ondas lia-se como ladrilho). 0,42
+    // espalha o lóbulo: a água mantém o brilho sem o padrão de mosaico.
     pbr_input.material.perceptual_roughness = clamp(
-        0.22 + 0.06 * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) + 0.35 * foam,
+        0.42 + 0.06 * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) + 0.30 * foam,
         0.02,
         1.0,
     );
@@ -513,7 +524,7 @@ fn fragment(
     // o glint.
     let sparkle_dir = normalize(vec2<f32>(CFG_WIND_X, CFG_WIND_Z) + vec2(1e-4, 0.0));
     let sparkle = pow(value_noise(world.xz * 9.0 + sparkle_dir * t * 2.1), 3.0);
-    let glint = lobe * sparkle * 1.8 * glint_strength * glint_color * damp * (1.0 - foam);
+    let glint = lobe * sparkle * 0.7 * glint_strength * glint_color * damp * (1.0 - foam);
     pbr_input.material.emissive = vec4<f32>(glint, 1.0);
 
     var out: FragmentOutput;

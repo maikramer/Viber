@@ -138,7 +138,7 @@ pub fn radiance(dir: Vec3, sun: Vec3, cam_height: f32, model: &NishitaModel) -> 
     let k_rlh = Vec3::from_array(model.rayleigh);
     let k_mie = model.mie;
     let g = model.g.clamp(0.0, 0.96);
-    let i_sun = SUN_INTENSITY_BASE * model.sun_intensity.max(0.0) * model.gain;
+    let i_sun = SUN_INTENSITY_BASE * model.sun_intensity.clamp(0.0, 32.0) * model.gain;
 
     let mut p = ray_sphere_intersection(r, r0, ATMOSPHERE_RADIUS);
     if p.0 > p.1 {
@@ -205,6 +205,25 @@ mod tests {
 
     fn noon_sun() -> Vec3 {
         Vec3::new(0.0, 1.0, 0.0)
+    }
+
+    /// O WGSL do domo clampa `CFG_SUN_INTENSITY` a 32 (sol autorado acima
+    /// disso não queima mais); o port CPU tem de fazer o mesmo, senão o IBL
+    /// pinta um céu mais claro que o próprio domo.
+    #[test]
+    fn intensidade_do_sol_respeita_o_teto_do_wgsl() {
+        let hot = NishitaModel {
+            sun_intensity: 64.0,
+            ..Default::default()
+        };
+        let capped = NishitaModel {
+            sun_intensity: 32.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            radiance(Vec3::Y, Vec3::Y, 1.0, &hot),
+            radiance(Vec3::Y, Vec3::Y, 1.0, &capped)
+        );
     }
 
     #[test]

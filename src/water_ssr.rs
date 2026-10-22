@@ -42,11 +42,12 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
     Buffer, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages, CachedRenderPipelineId,
-    Canonical, ColorTargetState, ColorWrites, Extent3d, FragmentState, Operations, PipelineCache,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, Specializer, SpecializerKey,
-    Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureView, TextureViewDimension, TextureViewId, Variants, VertexState,
+    Canonical, ColorTargetState, ColorWrites, Extent3d, FilterMode, FragmentState,
+    MipmapFilterMode, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderStages, Specializer, SpecializerKey, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDimension,
+    TextureViewId, Variants, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::{ExtractedView, ViewTarget};
@@ -218,6 +219,18 @@ fn ground_strength_for(mode: ReflectionMode, wet_ground: Option<bool>) -> f32 {
 }
 
 fn ground_strength() -> f32 {
+    // `VIBER_WATER_SSR=water` documenta "só água": o passe liga, mas o
+    // raymarch do chão não pode correr.
+    let water_only = matches!(
+        std::env::var("VIBER_WATER_SSR")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("water" | "water-only" | "cheap")
+    );
+    if water_only {
+        return 0.0;
+    }
     ground_strength_for(effective_mode(), profile().wet_ground)
 }
 
@@ -228,6 +241,8 @@ fn ssr_steps() -> u32 {
         .filter(|steps| *steps > 0)
         .or(profile().steps)
         .unwrap_or(STEPS)
+        // Um milhão de passos por pixel trava o GPU.
+        .clamp(1, 128)
 }
 
 fn ssr_max_distance() -> f32 {
@@ -237,6 +252,7 @@ fn ssr_max_distance() -> f32 {
         .filter(|distance| distance.is_finite() && *distance > 0.0)
         .or(profile().max_distance)
         .unwrap_or(MAX_DIST_M)
+        .clamp(1.0, 5000.0)
 }
 
 /// Marcador na câmara 3D que recebe o passe (postfx insere com o gate on).
@@ -358,6 +374,11 @@ fn edge_fade(uv: vec2<f32>, fade_px: f32) -> f32 {
 fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     let uv = in.uv;
     var src = textureSampleLevel(input_color, samp, uv, 0.0);
+    // Normal + derivadas em FLUXO UNIFORME: `dpdx/dpdy` depois de um `return`
+    // ou dentro de um ramo são indefinidas (WGSL) e faziam a máscara de
+    // rugosidade tremer nas bordas/céu.
+    let n_world = normalize(textureLoad(prepass_normal, px_of(uv), 0).rgb * 2.0 - 1.0);
+    let n_var = clamp((length(dpdx(n_world)) + length(dpdy(n_world))) * 2.0, 0.0, 1.0);
     if (ssr_params.count < 0.5) { return SsrOut(src, vec4<f32>(0.0)); }
 
     let d0 = textureLoad(prepass_depth, px_of(uv), 0);
@@ -381,7 +402,6 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     // 2) chão molhado SUAVE — chuva × força × "para cima" (rua molhada,
     //    não paredes); sem cortes, tudo smoothstep.
     let wet = ssr_params.rain * ssr_params.ground;
-    let n_world = normalize(textureLoad(prepass_normal, px_of(uv), 0).rgb * 2.0 - 1.0);
     let ground_m = wet * smoothstep(0.5, 0.8, n_world.y) * (1.0 - water_m);
     let effect = max(ssr_params.strength * water_m, ground_m);
     if (effect < 0.003) { return SsrOut(src, vec4<f32>(0.0)); }
@@ -490,7 +510,6 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
     // malha) alarga o reflexo. Sem isto um espelho duro em água ondulada
     // "dança" pixel a pixel e lê-se como piscação; com isto vira brilho
     // suave — é o que os AAA fazem (SSR + GGX aproximado).
-    let n_var = clamp((length(dpdx(n_world)) + length(dpdy(n_world))) * 2.0, 0.0, 1.0);
     let spread = clamp(
         sqrt(hit_t) * 0.0008 + n_var * 0.012,
         0.0006,
@@ -699,7 +718,15 @@ fn init_pipeline(
         },
     ];
     let layout = BindGroupLayoutDescriptor::new("water_ssr_layout", &entries);
-    let sampler = render_device.create_sampler(&SamplerDescriptor::default());
+    let sampler = render_device.create_sampler(&SamplerDescriptor {
+        label: Some("water_ssr_sampler"),
+        // O omissão do wgpu é Nearest: o histórico reprojetado e o blur de
+        // 5 taps liam sempre o mesmo texel (jitter em vez de mistura).
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: MipmapFilterMode::Linear,
+        ..Default::default()
+    });
     let shader = asset_server.load("shaders/water_ssr.wesl");
     let vertex_state = VertexState {
         shader: fullscreen_shader.shader(),

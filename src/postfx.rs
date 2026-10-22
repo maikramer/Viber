@@ -1421,7 +1421,11 @@ pub fn grade_temperature_full(golden: f32, low_sun: f32, night: f32) -> f32 {
 /// média do fog/ambiente é dessaturada. O +0.15 separa o azul do céu e o
 /// quente das poças sem voltar à "lama" do −0.22 (que dessaturava tudo).
 pub fn grade_saturation(golden: f32, night: f32) -> f32 {
-    let n = if night.is_finite() { night.clamp(0.0, 1.0) } else { 0.0 };
+    let n = if night.is_finite() {
+        night.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     1.0 + golden * 0.18 + n * 0.15
 }
 
@@ -1449,14 +1453,15 @@ pub fn grade_saturation(golden: f32, night: f32) -> f32 {
 /// poças quentes visíveis, céu azul B:R ≈ 1.9.
 ///
 /// O dia (night=0) fica EXACTAMENTE como estava — desvio 0.
-/// **−3,0 + teto do medidor (2026-10-21).** O ND de −4,5/−4,0 era CANCELADO:
+/// **−2,5 + teto do medidor (2026-10-21).** O ND de −4,5/−4,0 era CANCELADO:
 /// o `AutoExposure` soma a compensação ao MESMO campo `ColorGrading.exposure`
 /// e, com o medidor livre, a noite pedia +4 → net 0 (meio-cinza, o "dia
 /// enevoado" medido: média 0,46). Com o teto do medidor em 1,5 EV
-/// ([`NIGHT_LIFT_CAP_EV`]) o net passa a **−1,5 EV**: o chão ao luar fica
-/// escuro (~0,18 display), o céu/névoa escurecem e as poças/tochas/lanterna
-/// (60× o ambiente) ficam acima do fundo e POPAM.
-pub const NIGHT_GRADING_EXPOSURE_EV: f32 = -3.0;
+/// ([`NIGHT_LIFT_CAP_EV`]) o net passa a **−1,0 EV** (era −1,5; o pedido
+/// "menos 30 % de escuridão" puxou o ND de −3,0 para −2,5): o chão ao luar
+/// sobe ~30 %, o céu/névoa mantêm o azul e as poças/tochas/lanterna
+/// (60× o ambiente) continuam acima do fundo e POPAM.
+pub const NIGHT_GRADING_EXPOSURE_EV: f32 = -2.5;
 
 /// Desvio de exposição (stops) para a fração de noite corrente — rampa
 /// linear até [`NIGHT_GRADING_EXPOSURE_EV`] na noite cheia.
@@ -2454,23 +2459,29 @@ fn aerial_schedule_configs()
             .before(motion_blur)
             .before(tonemapping_pass)
             .into_configs()
-    } else {
-        // Braço default: entre o `MainPass` e o `EarlyPostProcess` INTEIRO —
-        // ordena o passe contra TUDO o que vem depois (TAA, DLSS, water SSR,
-        // motion blur, bloom, DOF, effect stack, auto-exposure, tonemap) sem
-        // criar ciclo. Antes era `in_set(EarlyPostProcess)` +
-        // `before(temporal_anti_alias)`, mas o DLSS (feature `dlss`) vive no
-        // MESMO set com sistemas PRIVADOS no crate (não há símbolo contra o
-        // qual ordenar) — e dois passes sem ordem no mesmo set serializam em
-        // ordem ARBITRÁRIA frame a frame (o fetch_xor do
-        // `post_process_write`, ver water_ssr.rs). Ordenar contra os SETS
-        // públicos é determinístico contra os dois. Com DLSS o main pass
-        // corre à resolução reduzida (`MainPassResolutionOverride`): o grade
-        // aéreo aplica-se ANTES do upscale — o scattering é low-frequency, o custo de
-        // o desenhar a render-res é zero em qualidade e poupa pixeis.
+    } else if cfg!(feature = "dlss") {
+        // DLSS (feature `dlss`) vive no MESMO set com sistemas PRIVADOS no
+        // crate (não há símbolo contra o qual ordenar): ficar FORA e antes do
+        // set é a única ordenação determinística contra o upscaler.
         aerial_pass
             .after(Core3dSystems::MainPass)
             .before(Core3dSystems::EarlyPostProcess)
+            .into_configs()
+    } else {
+        // Braço default: DENTRO do `EarlyPostProcess`. O outro passe da
+        // janela `MainPass→EarlyPostProcess` é o VOLUMÉTRICO
+        // (`volumetric_fog`, também `after(MainPass).before(EarlyPostProcess)`)
+        // e não há símbolo público dele. Os dois usam `post_process_write` e o
+        // `chain_weak` dos sets do Bevy não cria aresta entre sistemas que não
+        // conflituam: sem esta posição eles corriam em PARALELO e o
+        // `fetch_xor(1)` do `ViewTarget` trocava source/destination (o
+        // ping-pong que já foi bisectado no split-tone/CAS). Estando no set, a
+        // aresta `volumetric_fog.before(EarlyPostProcess)` garante o froxel
+        // primeiro; `.before(taa)` mantém o grade em HDR antes do TAA.
+        aerial_pass
+            .in_set(Core3dSystems::EarlyPostProcess)
+            .after(Core3dSystems::MainPass)
+            .before(temporal_anti_alias)
             .into_configs()
     }
 }
@@ -2656,9 +2667,13 @@ fn drive_postfx(
 fn drive_dof_focus(
     time: Res<Time>,
     players: Query<&GlobalTransform, With<Player>>,
-    mut cameras: Query<(&GlobalTransform, &mut DepthOfField), With<Camera3d>>,
+    mut cameras: Query<(Entity, &GlobalTransform, &mut DepthOfField), With<Camera3d>>,
     cinematic: Option<Res<crate::cinematic::CinematicPlayback>>,
-    mut focus: Local<Option<f32>>,
+    // Estado POR câmara. Um `Option` partilhado fazia cada câmara perseguir o
+    // foco da anterior (com a câmara de editor + a de jogo, ambas com
+    // `DepthOfField`, o segundo valor vinha contaminado) e não resetava
+    // quando a câmara mudava de cena.
+    mut focus: Local<std::collections::HashMap<Entity, f32>>,
 ) {
     let Ok(player) = players.single() else {
         return;
@@ -2668,16 +2683,19 @@ fn drive_dof_focus(
     // Numa cinemática o foco é o que a CÂMARA olha (o herói pode estar a 1 km
     // — com o foco nele o plano inteiro saía desfocado); nos cortes salta.
     let scene_focus = cinematic.as_deref().and_then(|c| c.focus());
-    for (camera_tf, mut dof) in &mut cameras {
+    // Câmaras despawnadas não voltam: poda o histórico (a lista é minúscula).
+    let live: Vec<Entity> = cameras.iter_mut().map(|(entity, _, _)| entity).collect();
+    focus.retain(|entity, _| live.contains(entity));
+    for (entity, camera_tf, mut dof) in &mut cameras {
         let (target, snap) = match scene_focus {
             Some((distance, cut)) => (distance, cut),
             None => (camera_tf.translation().distance(player_pos).max(0.5), false),
         };
-        let next = match *focus {
-            Some(prev) if !snap => prev + (target - prev) * t,
+        let next = match (focus.get(&entity).copied(), snap) {
+            (Some(prev), false) => prev + (target - prev) * t,
             _ => target,
         };
-        *focus = Some(next);
+        focus.insert(entity, next);
         if (dof.focal_distance - next).abs() > 1e-3 {
             dof.focal_distance = next;
         }
@@ -3066,6 +3084,50 @@ mod tests {
         );
     }
 
+    /// Dois `Camera3d` com `DepthOfField` (jogo + editor, `--camera free`):
+    /// cada uma persegue o SEU foco. Antes o `Local<Option<f32>>` era
+    /// partilhado e a segunda câmara herdava o valor da primeira (e não
+    /// resetava quando a câmara mudava).
+    #[test]
+    fn test_dof_focus_is_per_camera() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .add_systems(Update, drive_dof_focus);
+        app.world_mut()
+            .spawn((Player::default(), GlobalTransform::default()));
+        let near = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 5.0)),
+                dof_component(),
+            ))
+            .id();
+        let far = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 80.0)),
+                dof_component(),
+            ))
+            .id();
+        app.update();
+        let near_focus = app
+            .world()
+            .get::<DepthOfField>(near)
+            .unwrap()
+            .focal_distance;
+        let far_focus = app.world().get::<DepthOfField>(far).unwrap().focal_distance;
+        assert!(
+            (near_focus - 5.0).abs() < 0.1,
+            "foco da câmara perto: {near_focus}"
+        );
+        assert!(
+            (far_focus - 80.0).abs() < 0.1,
+            "foco da câmara longe: {far_focus}"
+        );
+    }
+
     /// O passe de perspetiva aérea corre ANTES do TAA por omissão: é
     /// depth-aware e a depth do prepass vem jitterada, por isso mascarar
     /// DEPOIS do resolve devolve o aliasing às cristas (vibração no
@@ -3155,10 +3217,10 @@ mod tests {
         assert!(lift < 3.0, "a noite não abre para o meio-cinza");
         // A golden hour (−2,6) continua em medição cheia.
         assert!((auto_exposure_target_lift(-2.6) - 2.6).abs() < 1e-5);
-        // O NET da noite: teto do medidor (1,5) + ND (−3,0) = −1,5 EV — a
+        // O NET da noite: teto do medidor (1,5) + ND (−2,5) = −1,0 EV — a
         // noite fica ABAIXO da paleta crua e as luzes (60× o ambiente) POPAM.
         let net = auto_exposure_target_lift(-3.9) + grade_night_exposure_offset(1.0);
-        assert!((net + 1.5).abs() < 1e-5, "net da noite: {net}");
+        assert!((net + 1.0).abs() < 1e-5, "net da noite: {net}");
         assert!(net < 0.0);
         assert_eq!(grade_night_exposure_offset(0.0), 0.0);
         assert_eq!(auto_exposure_compensation(-1.0), 0.0);
@@ -3188,7 +3250,10 @@ mod tests {
         assert_eq!(grade_night_exposure_offset(0.0), 0.0);
         // Noite cheia: o desvio completo (o teto do medidor soma 1,5 → net −2,5).
         assert_eq!(grade_night_exposure_offset(1.0), NIGHT_GRADING_EXPOSURE_EV);
-        assert!(NIGHT_GRADING_EXPOSURE_EV <= -2.0, "a noite tem de escurecer");
+        assert!(
+            NIGHT_GRADING_EXPOSURE_EV <= -2.0,
+            "a noite tem de escurecer"
+        );
         // Rampa linear e monotónica com a fração de noite (o shutter não dá
         // degraus ao anoitecer).
         let half = grade_night_exposure_offset(0.5);
@@ -3638,9 +3703,9 @@ mod tests {
         // 2026-09-13, golden 07:30: 1M lm no XML fechava o frame ~1,2 EV).
         assert_eq!(torch_pool_gain(0.0), 1.0);
         assert_eq!(warm_fill_gain(0.0), 1.0);
-        // Noite plena: TOCHAS ×8 (raio ×2 vs LOOP C, falloff 1/d³ no chão)
-        // e o fill quente (janelas/braseiros) só ×2 — os rácios da variante
-        // XML-1M validada (11 poças, estrelas vivas, noite ainda noite).
+        // Noite plena: TOCHAS ×64 (Bevy calibra 1M lm para uma exposição ~10
+        // stops mais clara; a ×8 as poças liam-se ténues) e o fill quente
+        // (janelas/braseiros) ×8 — ainda sem competir com as poças.
         assert_eq!(torch_pool_gain(1.0), TORCH_POOL_NIGHT_GAIN);
         assert_eq!(warm_fill_gain(1.0), WARM_FILL_NIGHT_GAIN);
         assert!(TORCH_POOL_NIGHT_GAIN >= 8.0, "poças 2×: ganho ≥ 8");
@@ -3653,16 +3718,16 @@ mod tests {
         assert!((half - (1.0 + (TORCH_POOL_NIGHT_GAIN - 1.0) * 0.5)).abs() < 1e-6);
         assert_eq!(torch_pool_gain(f32::NAN), 1.0);
         assert_eq!(warm_fill_gain(f32::NAN), 1.0);
-        // Composição: tocha 120k→960k, janela 160k→320k.
+        // Composição: tocha 120k→7,68M, janela 160k→1,28M.
         assert_eq!(
             torch_pool_target(120_000.0, TORCH_POOL_NIGHT_GAIN),
-            960_000.0,
-            "tocha de rua 120k → 960k (raio ×2)"
+            120_000.0 * TORCH_POOL_NIGHT_GAIN,
+            "tocha de rua 120k × ganho nocturno"
         );
         assert_eq!(
             torch_pool_target(160_000.0, WARM_FILL_NIGHT_GAIN),
-            320_000.0,
-            "janela 160k → 320k (fill)"
+            160_000.0 * WARM_FILL_NIGHT_GAIN,
+            "janela 160k × fill"
         );
         assert_eq!(
             torch_pool_target(120_000.0, 1.0),

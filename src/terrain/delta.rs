@@ -165,7 +165,11 @@ impl DeltaGrid {
             }
             let cols = patch.cols as usize;
             let rows = patch.rows as usize;
-            if patch.data.len() != cols * rows || patch.data.iter().any(|h| !h.is_finite()) {
+            if patch.data.len() != cols * rows
+                || patch.data.iter().any(|h| !h.is_finite())
+                || patch.step.iter().any(|s| !s.is_finite() || *s <= 0.0)
+                || patch.min.iter().any(|m| !m.is_finite())
+            {
                 continue;
             }
             let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);

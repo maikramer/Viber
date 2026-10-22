@@ -205,7 +205,14 @@ impl PaintGrid {
 
     /// Snapshot dos bytes (slot,peso) de uma janela — a inversa de um pincel.
     pub fn snapshot(&self, window: CellWindow) -> Vec<u8> {
-        let mut out = Vec::with_capacity(window.cols * window.rows * 2);
+        let Some(cap) = window
+            .cols
+            .checked_mul(window.rows)
+            .and_then(|n| n.checked_mul(2))
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(cap);
         for j in window.j0..window.j0 + window.rows {
             for i in window.i0..window.i0 + window.cols {
                 match self.cell_index(i, j) {
@@ -225,7 +232,17 @@ impl PaintGrid {
 
     /// Repõe os bytes de uma janela (mesmo formato do snapshot).
     pub fn restore(&mut self, window: CellWindow, data: &[u8]) -> Result<()> {
-        let expected = window.cols * window.rows * 2;
+        // `CellWindow` vem do documento do mundo (undo/sync), não só do
+        // `window_around`: `cols * rows * 2` num retângulo corrompido
+        // transbordava `usize` (pânico em debug) antes de a comparação de
+        // tamanho poder recusar. O `snapshot` já usa contas verificadas.
+        let Some(expected) = window
+            .cols
+            .checked_mul(window.rows)
+            .and_then(|n| n.checked_mul(2))
+        else {
+            anyhow::bail!("paint: janela {window:?} transborda");
+        };
         if data.len() != expected {
             anyhow::bail!("paint: esperados {expected} bytes, vieram {}", data.len());
         }
@@ -235,7 +252,9 @@ impl PaintGrid {
                 let (Some(slot), Some(weight)) = (bytes.next(), bytes.next()) else {
                     break;
                 };
-                if let Some(index) = self.cell_index(i, j) {
+                if let Some(index) = self.cell_index(i, j)
+                    && (*slot as usize) < LAYER_COUNT
+                {
                     self.slots[index] = *slot;
                     self.weights[index] = *weight;
                 }
@@ -264,15 +283,26 @@ impl PaintGrid {
         }
         let world_size = f32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes"));
         let side = u32::from_le_bytes(bytes[12..16].try_into().expect("4 bytes")) as usize;
+        if !world_size.is_finite() || world_size <= 0.0 || side < 2 {
+            anyhow::bail!("paint: cabeçalho inválido (world {world_size}, lado {side})");
+        }
         let cells = side.saturating_mul(side);
-        if bytes.len() != 16 + cells * 2 {
+        let Some(expected) = cells.checked_mul(2).and_then(|n| n.checked_add(16)) else {
+            anyhow::bail!("paint: lado {side} transborda");
+        };
+        if bytes.len() != expected {
             anyhow::bail!("paint: tamanho inesperado (lado {side})");
         }
         let mut slots = vec![0u8; cells];
         let mut weights = vec![0u8; cells];
         for (cell, pair) in bytes[16..].as_chunks::<2>().0.iter().enumerate() {
-            slots[cell] = pair[0];
-            weights[cell] = pair[1];
+            // Um slot fora da paleta (ficheiro de outra versão/corrompido)
+            // indexava `[f32; LAYER_COUNT]` fora dos limites e rebentava o
+            // bake do splat. Descarta a célula em vez de panicar.
+            if (pair[0] as usize) < LAYER_COUNT {
+                slots[cell] = pair[0];
+                weights[cell] = pair[1];
+            }
         }
         Ok(Self {
             world_size,
@@ -324,6 +354,25 @@ mod tests {
         assert_eq!(slot_for_alias("dirt_trail"), Some(3));
         assert_eq!(slot_for_alias("nope"), None);
         assert_eq!(alias_for_slot(12), Some("pebbles"));
+    }
+
+    #[test]
+    fn out_of_palette_slots_are_discarded_instead_of_panicking() {
+        // Um `.paint` de outra versão (ou corrompido) com slot 200 indexava
+        // `[f32; LAYER_COUNT]` fora dos limites no bake do splat.
+        let grid = PaintGrid::new(64.0, 8);
+        let mut bytes = grid.to_bytes();
+        bytes[16] = 200; // primeiro slot
+        bytes[17] = 255; // peso
+        let loaded = PaintGrid::from_bytes(&bytes).expect("cabeçalho válido");
+        assert!(
+            loaded
+                .slots
+                .iter()
+                .all(|slot| (*slot as usize) < LAYER_COUNT)
+        );
+        assert!(loaded.weights.iter().all(|weight| *weight == 0));
+        assert_eq!(loaded.sample(0.0, 0.0), None);
     }
 
     #[test]

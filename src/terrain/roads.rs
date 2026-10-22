@@ -795,8 +795,39 @@ impl RoadPath {
                 } else {
                     0.0
                 };
+                // Constrói o sample a partir do troço conhecido em vez de
+                // re-projetar no caminho TODO: num cruzamento em X (flyover)
+                // o `nearest_on_path` podia devolver o outro braço e o `s`,
+                // `heading` e `deck` vinham da estrada errada.
                 let p = a.lerp(b, t);
-                return self.sample_at(p);
+                let tangent = (b - a).normalize_or_zero();
+                let lane = |values: &[f32]| {
+                    let lo = values.get(i).copied().unwrap_or(0.0);
+                    let hi = values.get(i + 1).copied().unwrap_or(lo);
+                    lo + (hi - lo) * t
+                };
+                let deck_a = if self.deck.get(i).copied().unwrap_or(false) {
+                    1.0
+                } else {
+                    0.0
+                };
+                let deck_b = if self.deck.get(i + 1).copied().unwrap_or(false) {
+                    1.0
+                } else {
+                    0.0
+                };
+                return Some(RoadSample {
+                    s,
+                    length,
+                    half_width: lane(&self.half_width),
+                    lateral: 0.0,
+                    deck: deck_a + (deck_b - deck_a) * t > 0.5,
+                    deck_y: lane(&self.surface),
+                    heading: tangent.x.atan2(tangent.y),
+                    center_dist: 0.0,
+                    cx: p.x,
+                    cz: p.y,
+                });
             }
             acc += seg;
         }
@@ -971,7 +1002,9 @@ pub fn carve_road(
         None => {
             let mut d = natural.clone();
             let window = (spec.flatten_window / spacing).round();
-            let half_window = (window as usize).max(1);
+            // `1e30 as usize` satura em usize::MAX e `i + half + 1`
+            // transborda/gera NaN (0/0) em todos os pontos.
+            let half_window = (window as usize).max(1).min(d.len().max(1));
             for _ in 0..3 {
                 box_smooth(&mut d, half_window);
             }
@@ -1477,12 +1510,20 @@ fn emit_deck_pylon(mesh: &mut ChunkMeshData, center: Vec2, top_y: f32, bottom_y:
         let b = corners[(i + 1) % 4];
         // Exterior do lado a→b: perpendicular horizontal de (b−a).
         let d = b - a;
+        let side_len = d.length();
         let n = Vec2::new(-d.y, d.x).normalize_or_zero();
         let base = mesh.positions.len() as u32;
-        for (p, y) in [(a, top_y), (a, bottom_y), (b, bottom_y), (b, top_y)] {
+        // U corre AO LONGO do lado: dois lados do pilar são paralelos a Z e
+        // tinham `p.x` constante — a textura esticava uma coluna de texels.
+        for (p, y, along) in [
+            (a, top_y, 0.0),
+            (a, bottom_y, 0.0),
+            (b, bottom_y, side_len),
+            (b, top_y, side_len),
+        ] {
             mesh.positions.push([p.x, y, p.y]);
             mesh.normals.push([n.x, 0.0, n.y]);
-            mesh.uvs.push([p.x / scale, y / scale]);
+            mesh.uvs.push([along / scale, y / scale]);
             mesh.colors.push([1.0, 1.0, 1.0, 1.0]);
         }
         let (t_a, b_a, b_b, t_b) = (base, base + 1, base + 2, base + 3);

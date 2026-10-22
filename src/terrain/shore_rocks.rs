@@ -14,7 +14,7 @@
 
 use bevy::math::Vec2;
 
-use super::water::{CARVE_MARGIN, LakeShape, LakeSpec, waterline_reach};
+use super::water::{LakeShape, LakeSpec, waterline_reach};
 
 /// GLBs de pedra do pool, em ordem de "pretensão" (boulder > musgo > seixo).
 /// Um é escolhido por instância pelo RNG do grupo de spawner.
@@ -99,7 +99,15 @@ pub fn lake_candidates(spec: &LakeSpec, index: usize) -> Vec<Vec2> {
         return Vec::new();
     }
     let shape = LakeShape::from_authoring(at, &spec.shape);
-    let reach = (waterline_reach(spec.depth, spec.water_offset) * CARVE_MARGIN).clamp(0.5, 1.6);
+    // A linha de água REAL do espelho: `lake_mirror_reach` é o fator que o
+    // mesh/registry usam. O antigo `clamp(0.5, 1.6)` sobre
+    // `waterline_reach·CARVE_MARGIN` punha o anel de pedras a 50% do
+    // contorno numa taça mais rasa que a lâmina (reach 0) — pedras dentro de
+    // um lago seco — e fora da água nos lagos pouco fundos.
+    let reach = super::water::lake_mirror_reach(spec.depth, spec.water_offset);
+    if reach <= 0.0 {
+        return Vec::new();
+    }
     // Perímetro do contorno amostrado — de onde vem a contagem.
     let samples = 96;
     let mut perimeter = 0.0;

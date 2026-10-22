@@ -153,9 +153,14 @@ pub fn lake_shore_band(
     // fecha repetindo a primeira estação no fim (into_mods corta por pares).
     let segments = 96;
     let shape = super::super::water::LakeShape::from_authoring(spec.at, &spec.shape);
-    let reach = (super::super::water::waterline_reach(spec.depth, spec.water_offset)
-        * super::super::water::CARVE_MARGIN)
-        .clamp(0.5, 1.6);
+    // Fator do ESPELHO (o mesmo do mesh/registry): o `clamp(0.5, 1.6)` sobre
+    // `waterline_reach·CARVE_MARGIN` punha a crista da parede a 50% do
+    // contorno numa taça seca (reach 0) — uma parede de pedra longe da água
+    // (ou a meio do leito, num lago seco).
+    let reach = super::super::water::lake_mirror_reach(spec.depth, spec.water_offset);
+    if reach <= 0.0 {
+        return None;
+    }
     let mut stations = Vec::with_capacity(segments + 1);
     let mut top_y = Vec::with_capacity(segments + 1);
     let mut bot_y = Vec::with_capacity(segments + 1);
@@ -251,9 +256,12 @@ pub fn spring_band(
     let mut prev = Vec2::ZERO;
     for k in 0..=segments {
         // α: 0 = montante (−downstream), π = jusante. Ignora o arco central
-        // da abertura (|α − π| < opening).
-        let alpha =
-            opening + (std::f32::consts::TAU - 2.0 * opening) * (k as f32 / segments as f32);
+        // da abertura (|α − π| < opening): o arco COMEÇA em π+opening para
+        // que a boca fique virada a jusante (antes começava em +opening e a
+        // rocha tapava a saída do rio).
+        let alpha = std::f32::consts::PI
+            + opening
+            + (std::f32::consts::TAU - 2.0 * opening) * (k as f32 / segments as f32);
         let radial = -downstream * alpha.cos() + perp * alpha.sin();
         let crest = center + radial * radius;
         stations.push(crest);

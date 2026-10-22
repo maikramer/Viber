@@ -53,7 +53,10 @@ pub fn hit_stop_system(
     mut was_active: Local<bool>,
     a11y: Option<Res<crate::a11y::A11y>>,
 ) {
-    if a11y.as_deref().is_some_and(|a| !crate::a11y::hitstop_allowed(a)) {
+    if a11y
+        .as_deref()
+        .is_some_and(|a| !crate::a11y::hitstop_allowed(a))
+    {
         stop.timer = 0.0;
     }
     let active = stop.timer > 0.0;

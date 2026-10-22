@@ -411,12 +411,40 @@ pub fn resolve(spec: &ParticleSpec) -> ResolvedEmitter {
         resolved.speed = speed;
     }
     if let Some(size) = spec.size {
+        // `size_y` é a extensão VERTICAL do quad. Nos presets quadrados
+        // (fogo, fumo, magia…) tem de acompanhar o override — senão o quad
+        // fica esticado (as chamas autoram `start-size` 0.14×0.30 e o preset
+        // deixa 0.35×0.70 em Y). Nos esticados (rain/spray) a proporção do
+        // preset mantém-se: o override é a largura da gota.
+        let square = resolved.size_y == resolved.size;
         resolved.size = size;
+        if square {
+            resolved.size_y = size;
+        }
     }
     if let Some(color) = spec.color {
         resolved.color_a = color;
         resolved.color_b = color;
     }
+    // Valores finitos mas absurdos (`1e30`) travavam o `while` de emissão
+    // (≈1e29 spawns/frame) e transbordavam a capacidade.
+    resolved.emission_rate = if resolved.emission_rate.is_finite() {
+        resolved.emission_rate.clamp(0.0, 10_000.0)
+    } else {
+        0.0
+    };
+    let (a, b) = resolved.life;
+    let a = if a.is_finite() {
+        a.clamp(0.0, 60.0)
+    } else {
+        0.0
+    };
+    let b = if b.is_finite() {
+        b.clamp(0.0, 60.0)
+    } else {
+        0.0
+    };
+    resolved.life = (a.min(b), a.max(b));
     if let Some(radius) = spec.shape_radius {
         resolved.radius = radius.max(0.0);
     }
@@ -1008,9 +1036,7 @@ pub fn particle_emitter_update(
         // uploads não caírem todos no mesmo frame. A transição para vazio
         // (acima) escreve sempre.
         let interval = write_interval(distance);
-        if interval > 1
-            && !emitter.idle
-            && (frame.wrapping_add(entity.index_u32())) % interval != 0
+        if interval > 1 && !emitter.idle && (frame.wrapping_add(entity.index_u32())) % interval != 0
         {
             continue;
         }
@@ -1323,7 +1349,14 @@ fn mount_ambient_fx(
     // degrau e o `write_billboards` exige a capacidade exata — com 31 pedido e uma malha de
     // 32 reciclada, a asserção rebentava (repro: troca de cena, que monta dezenas de
     // emissores de uma vez com malhas recicladas).
-    let capacity = mesh_bucket(emitter_capacity(&resolved));
+    // O teto é o de AMBIENTE (1024), não o declarativo (512): estes são os
+    // emissores da engine (espuma/névoa/spray), com rates acima do que um
+    // `<ParticleSystem>` paga — com `emitter_capacity` o mesh truncava em 512.
+    let capacity = mesh_bucket(capacity_quads(
+        resolved.emission_rate,
+        resolved.life.1,
+        AMBIENT_MESH_CAP,
+    ));
     let mesh = match pool.take_mesh(capacity) {
         Some(handle) => handle,
         None => meshes.add(particle_mesh(capacity)),
@@ -1954,6 +1987,34 @@ mod tests {
         let mut big = preset("fire");
         big.emission_rate = 10_000.0;
         assert_eq!(emitter_capacity(&big), EMITTER_MESH_CAP);
+    }
+
+    /// `start-size-min/max` governa os DOIS eixos do quad nos presets
+    /// quadrados: antes só `size` mudava e o Y ficava no valor do preset —
+    /// todas as chamas autoradas (0.14×0.30) desenhavam-se esticadas
+    /// 0.14×0.35..0.70. Nos presets esticados (rain/spray) o override é a
+    /// largura e a proporção do preset mantém-se.
+    #[test]
+    fn test_size_override_keeps_square_presets_square() {
+        let mut fire = fire_spec();
+        fire.size = Some((0.14, 0.30));
+        let resolved = resolve(&fire);
+        assert_eq!(resolved.size, (0.14, 0.30));
+        assert_eq!(
+            resolved.size_y, resolved.size,
+            "fogo é quadrado: Y acompanha"
+        );
+
+        let mut rain = fire_spec();
+        rain.preset = "rain".into();
+        rain.size = Some((0.02, 0.03));
+        let resolved = resolve(&rain);
+        assert_eq!(resolved.size, (0.02, 0.03));
+        assert_eq!(
+            resolved.size_y,
+            preset("rain").size_y,
+            "gota esticada mantém a proporção do preset"
+        );
     }
 
     /// O asset store NÃO cresce com os bursts: a malha volta ao pool no

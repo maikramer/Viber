@@ -169,6 +169,11 @@ impl HeightMapU16 {
                 "AHGT: worldSize {world_size} above the {MAX_AHGT_WORLD_SIZE} m cap (corrupt meta?)"
             );
         }
+        // maxHeight entra no spec e vira `iy1 = ceil(y/extent)`: 1e30
+        // saturava i32 e o bootstrap iterava ~2e9 células por coluna.
+        if !max_height.is_finite() || max_height > 100_000.0 {
+            bail!("AHGT: maxHeight {max_height} above the 100 km cap (corrupt meta?)");
+        }
 
         // The payload accepts both raw deflate and the RFC1950 zlib wrapper.
         let payload = &bytes[meta_start + meta_len..];
@@ -194,7 +199,7 @@ impl HeightMapU16 {
             use std::io::Read;
             let mut zlib_failed = false;
             if zlib_wrapped {
-                let mut decoder = flate2::read::ZlibDecoder::new(payload);
+                let mut decoder = flate2::read::ZlibDecoder::new(payload).take(expected as u64 + 1);
                 if decoder.read_to_end(&mut raw).is_err() {
                     zlib_failed = true;
                     raw.clear();
@@ -202,7 +207,8 @@ impl HeightMapU16 {
             }
             if !zlib_wrapped || zlib_failed {
                 raw.clear();
-                let mut decoder = flate2::read::DeflateDecoder::new(payload);
+                let mut decoder =
+                    flate2::read::DeflateDecoder::new(payload).take(expected as u64 + 1);
                 decoder
                     .read_to_end(&mut raw)
                     .context("AHGT: deflate decompress failed")?;
