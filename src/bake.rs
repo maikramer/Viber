@@ -69,9 +69,12 @@ pub fn data_dir(world_path: &Path) -> PathBuf {
 
 /// `true` quando a raiz do ficheiro XML declara `static="true"`.
 pub fn is_static_root(attrs: &[(String, String)]) -> bool {
-    attrs
-        .iter()
-        .any(|(key, value)| key == "static" && matches!(value.trim(), "true" | "1"))
+    attrs.iter().any(|(key, value)| {
+        key == "static"
+            // O parser do mundo aceita `yes/on/TRUE`; este grampeava só
+            // `true|1` e um mundo `static="yes"` era cozido como procedural.
+            && crate::xml::values::parse_bool(value, "world@static").unwrap_or(false)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +462,12 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
     let config = crate::config::load(&world_dir)?;
     let loaded = crate::xml::include::load_world(world_path)?;
     let parsed = crate::recipes::parse_world(&loaded.root_attrs, &loaded.nodes)?;
+    let asset_roots = config.asset_roots(&world_dir);
+    // Props AUTORAIS ocupam espaço antes de qualquer gerador: a vegetation
+    // (e as pedras de margem) têm de os ver. Sem estes discos, a folhagem
+    // gerada nascia dentro de uma pedra/estátua posta à mão — o mesmo bug
+    // que o `viber tool scatter` corrige via `doc_occupancy`.
+    let authored_discs = crate::placement::authored_prop_discs(&parsed.entities, &asset_roots);
 
     let mut app = headless_app(world_path, &config, parsed)?;
     app.add_systems(
@@ -547,6 +556,9 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
     for exclusion in &pending.exclusions {
         occupancy.register_exclusion(exclusion.center.x, exclusion.center.y, exclusion.radius);
     }
+    for (x, z, radius) in &authored_discs {
+        occupancy.register(*x, *z, *radius);
+    }
 
     let mut total_instances = 0usize;
     let mut scatter_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -588,9 +600,19 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
         } else {
             String::new()
         };
+        // `avoid-overlaps` sem `footprint-radius`: o runtime preenche a
+        // pegada com a meia-largura do GLB ANTES de colocar
+        // (`instantiate_spawn_groups`); o bake saltava esse passo e testava
+        // com raio 0 — as instâncias do MESMO grupo podiam sobrepor-se e o
+        // bake.json/estático divergiam do passe do jogo.
+        let mut spec = group.spec.clone();
+        if spec.avoid_overlaps && spec.footprint_radius <= 0.0 {
+            spec.footprint_radius =
+                crate::scene::tools::auto_footprint(&spec.template_urls, &asset_roots);
+        }
         let (instances, _stats) = {
             let (mut instances, stats) =
-                crate::placement::place(&group.spec, &mut occupancy, &runtime, cliffs.as_ref());
+                crate::placement::place(&spec, &mut occupancy, &runtime, cliffs.as_ref());
             if group.dynamic {
                 crate::spawner::stand_upright(&mut instances);
             }
@@ -602,7 +624,7 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
             kind,
             name,
             scatter_id,
-            spec: group.spec.clone(),
+            spec,
             instances,
         });
     }
@@ -638,7 +660,9 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
     };
     let ahgt_bytes = map.to_ahgt(&meta)?;
     let ahgt_path = out_dir.join(BAKE_AHGT);
-    std::fs::write(&ahgt_path, &ahgt_bytes)
+    // Escrita ATÓMICA: um crash a meio deixava um heightmap truncado que o
+    // runtime seguinte lê em silêncio.
+    crate::scene::doc::write_atomic(&ahgt_path, &ahgt_bytes)
         .with_context(|| format!("escrever {}", ahgt_path.display()))?;
     report.ahgt_path = ahgt_path.clone();
     // 1b. A camada de PINTEL segue o heightmap: o mesmo sidecar do runtime
@@ -659,9 +683,11 @@ pub fn run_bake(world_path: &Path, out_dir: &Path) -> Result<BakeReport> {
         &pending,
     );
     let bake_json_path = out_dir.join(BAKE_JSON);
-    std::fs::write(
+    crate::scene::doc::write_atomic(
         &bake_json_path,
-        serde_json::to_string_pretty(&doc).context("serializar bake.json")?,
+        serde_json::to_string_pretty(&doc)
+            .context("serializar bake.json")?
+            .as_bytes(),
     )
     .with_context(|| format!("escrever {}", bake_json_path.display()))?;
     report.bake_json_path = bake_json_path;
@@ -1101,7 +1127,9 @@ fn build_static_scene(
                 .join("veg")
                 .join(format!("{vegetation_index:03}.vinst"));
             vegetation_index += 1;
-            crate::vinst::write(&file, &group.instances)?;
+            // Atómico: um `.vinst` a meio escrever é rejeitado pelo loader e
+            // o grupo inteiro desaparece.
+            crate::vinst::write_atomic(&file, &group.instances)?;
             let file = file.canonicalize().unwrap_or(file);
             let rel = file
                 .strip_prefix(&doc.root_dir)
@@ -1644,6 +1672,13 @@ pub fn verify_static(static_path: &Path, bake_path: &Path) -> Result<usize> {
             parsed.skipped_tags
         );
     }
+    // A ocupação do verify tem de ser a MESMA do bake: os props/instâncias
+    // autorais (incluindo os grupos estáticos já escritos) entram antes da
+    // vegetation, senão a contagem por grupo diverge e o verify mente.
+    let authored_discs = crate::placement::authored_prop_discs_without_generated(
+        &parsed.entities,
+        &config.asset_roots(config_dir),
+    );
 
     let mut app = headless_app(static_path, &config, parsed)?;
     app.add_systems(
@@ -1669,6 +1704,9 @@ pub fn verify_static(static_path: &Path, bake_path: &Path) -> Result<usize> {
     let mut occupancy = SpawnOccupancy::new();
     for exclusion in &pending.exclusions {
         occupancy.register_exclusion(exclusion.center.x, exclusion.center.y, exclusion.radius);
+    }
+    for (x, z, radius) in &authored_discs {
+        occupancy.register(*x, *z, *radius);
     }
 
     let baked_veg: Vec<&BakeSpawnGroup> = baked

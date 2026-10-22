@@ -125,6 +125,11 @@ fn expand(
     root_dir: &Path,
     stack: &mut Vec<PathBuf>,
 ) -> Result<Vec<XmlNode>> {
+    // Raiz canónica uma vez: o `canonicalize` do `resolved` resolve `..` e
+    // symlinks, e é comparado com ela para impedir `<Include src="../../x">`.
+    let root_canonical = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf());
     // stack[0] is the root file; only nested includes count toward the limit.
     if stack.len() > MAX_INCLUDE_DEPTH + 1 {
         bail!(
@@ -147,6 +152,12 @@ fn expand(
         let resolved = resolve_include_path(src, dir, root_dir)
             .canonicalize()
             .with_context(|| format!("include not found: {src} (from {})", chain(stack)))?;
+        if !resolved.starts_with(&root_canonical) {
+            bail!(
+                "include `{src}` sai da raiz do projecto ({}) — caminhos `..` são recusados",
+                root_canonical.display()
+            );
+        }
         if stack.contains(&resolved) {
             bail!("include cycle detected: {} → {}", chain(stack), src);
         }

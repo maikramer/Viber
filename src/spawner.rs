@@ -229,6 +229,21 @@ impl SpawnOccupancy {
                     return true;
                 }
             }
+            // Um footprint enorme (typo de autoria) não pode iterar
+            // biliões de células: testa as listas planas. Usa os registos
+            // RECEBIDOS — a versão anterior testava sempre os de instâncias e
+            // um candidato grande ignorava todas as exclusões.
+            if radius > LARGE_DISK_RADIUS {
+                for &(fx, fz, fr) in large.iter().chain(cells.values().flatten()) {
+                    let dx = fx - x;
+                    let dz = fz - z;
+                    let min_dist = fr + radius + SPAWN_CLEARANCE;
+                    if dx * dx + dz * dz < min_dist * min_dist {
+                        return true;
+                    }
+                }
+                return false;
+            }
             let reach = radius + SPAWN_CLEARANCE;
             let x0 = ((x - reach) / OCCUPANCY_CELL).floor() as i32;
             let x1 = ((x + reach) / OCCUPANCY_CELL).floor() as i32;
@@ -461,7 +476,14 @@ pub fn compute_placements(
         0.0
     };
     let scale_span = spec.scale_min.max(spec.scale_max).max(0.0);
-    let test_radius = footprint * scale_span;
+    // A extensão XZ real inclui `scale-axis-*`; ignorá-la deixava o teste
+    // "conservador" aceitar overlaps até ~10% em vegetação.
+    let axis_span = spec
+        .scale_axis_min
+        .abs()
+        .max(spec.scale_axis_max.abs())
+        .max(1.0);
+    let test_radius = footprint * scale_span * axis_span;
     // Anel de pegada: a extensão FÍSICA do prop manda, `avoid-overlaps` não —
     // um degrau a um metro do tronco derruba a árvore independentemente do
     // overlap.
@@ -910,6 +932,26 @@ pub fn instantiate_spawn_groups(
             waiting = true;
             continue;
         }
+        // Ladder de LOD: um tier ainda em voo no frame em que o template
+        // principal aterrou fechava uma ladder CURTA para sempre — o
+        // `spawn_instance` só vê os handles resolvidos neste frame e a
+        // montagem acontece uma única vez. A espera é a mesma do
+        // `gltf_scene_spawner`; um tier `Failed` conta como resolvido (a
+        // instância nasce com a ladder curta, o grupo não morre pelo LOD).
+        let lod_pending = group
+            .lod_handles
+            .iter()
+            .flat_map(|(lod1, lod2, _, _)| [lod1, lod2])
+            .flatten()
+            .any(|handle| {
+                !matches!(
+                    server.get_load_state(handle),
+                    Some(LoadState::Loaded | LoadState::Failed(_))
+                )
+            });
+        if lod_pending {
+            waiting = true;
+        }
     }
     if waiting {
         if *age < SPAWN_WAIT_TIMEOUT {
@@ -1021,7 +1063,16 @@ pub fn instantiate_spawn_groups(
             .collect();
         // Mundo estático: instâncias pré-geradas, já com os gates aplicados no bake.
         let (mut instances, stats) = match &group.spec.preplaced {
-            Some(preplaced) => ((**preplaced).clone(), PlacementStats::default()),
+            Some(preplaced) => {
+                // Instâncias pré-geradas também ocupam espaço: sem as
+                // registar, um grupo runtime posterior nascia por cima.
+                for inst in preplaced.iter() {
+                    let r = group.spec.footprint_radius.max(0.0)
+                        * inst.scale.x.abs().max(inst.scale.z.abs());
+                    occupancy.register(inst.position.x, inst.position.z, r);
+                }
+                ((**preplaced).clone(), PlacementStats::default())
+            }
             None => crate::placement::place(&group.spec, occupancy, &runtime, cliffs.as_deref()),
         };
         if group.dynamic {
@@ -1106,6 +1157,15 @@ fn spawn_instance(
     if !group.spec.cast_shadows {
         entity.insert(crate::render_lod::NoShadowSubtree);
     }
+    // Vegetação/props estáticos SEM ladder de LOD: candidatos ao batch
+    // multi-mesh por tile. Com LOD a subárvore troca e o tile fundido
+    // ficaria com a geometria velha — esses continuam entidades.
+    if !group.dynamic
+        && lod_scenes.iter().all(Option::is_none)
+        && group.spec.template_props.is_empty()
+    {
+        entity.insert(crate::foliage::FoliageCandidate { multi: true });
+    }
     if !group.spec.template_links.is_empty() {
         let (groups, connections) =
             crate::luau::link_components(&group.spec.template_links, "template de spawner");
@@ -1142,7 +1202,9 @@ fn spawn_instance(
             // Hostilidade e HP vêm do TEMPLATE (`role="enemy"`/`hostile`,
             // `health`), não do path do script.
             if group.template_hostile {
-                let hp = group.template_health.unwrap_or(crate::vitals::DEFAULT_HEALTH);
+                let hp = group
+                    .template_health
+                    .unwrap_or(crate::vitals::DEFAULT_HEALTH);
                 entity.insert((
                     crate::vitals::Hostile,
                     crate::vitals::Health {
@@ -1161,7 +1223,9 @@ fn spawn_instance(
                 },
             ));
             if group.template_hostile {
-                let hp = group.template_health.unwrap_or(crate::vitals::DEFAULT_HEALTH);
+                let hp = group
+                    .template_health
+                    .unwrap_or(crate::vitals::DEFAULT_HEALTH);
                 entity.insert((
                     crate::vitals::Hostile,
                     crate::vitals::Health {

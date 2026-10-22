@@ -480,8 +480,11 @@ impl SceneDoc {
             );
         }
         let file = &mut self.files[id];
-        // Esquecido = o `save` apaga-o do disco.
-        file.created = true;
+        // NÃO marca `created`: o `save` apaga do disco tudo o que é
+        // `detached && created`. Marcar aqui um ficheiro AUTORAL fazia um
+        // `drop_file` + guardar apagar `scenes/foo.xml` do repo. Só quem foi
+        // criado nesta sessão (já `created`) é apagado; os outros ficam
+        // apenas esquecidos do documento.
         let empty = XmlDocument {
             root_tag: file.doc.root_tag.clone(),
             root_attrs: Vec::new(),

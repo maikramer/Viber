@@ -202,6 +202,11 @@ pub fn apply(doc: &mut SceneDoc, op: &EditOp) -> Result<Applied> {
             keys.sort();
             keys.dedup();
             doc.touch(node.file);
+            // A inversa de um `set src` repõe o `<Include>` antigo: reindexa
+            // também, senão o undo deixava o mapa a apontar para o novo alvo.
+            if value(&previous, "src") != value(attrs, "src") {
+                relink_include(doc, &node);
+            }
             let selector = doc.selector(&node);
             Ok(Applied {
                 forward: EditOp::ReplaceAttrs {
@@ -473,6 +478,9 @@ pub fn apply_batch(doc: &mut SceneDoc, label: &str, ops: &[EditOp]) -> Result<Tr
 pub struct History {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
+    /// `undo.len()` no último save; `None` quando nunca foi guardado ou a
+    /// posição guardada deixou de ser alcançável (edição nova por cima).
+    saved: Option<usize>,
 }
 
 impl History {
@@ -485,6 +493,7 @@ impl History {
     ) -> Result<Transaction> {
         let tx = apply_batch(doc, label, ops)?;
         if !tx.forward.is_empty() {
+            self.invalidate_saved_at_tip();
             self.undo.push(tx.clone());
             self.redo.clear();
         }
@@ -505,6 +514,7 @@ impl History {
         if tx.forward.is_empty() {
             return Ok(tx);
         }
+        self.invalidate_saved_at_tip();
         self.redo.clear();
         match self.undo.last_mut() {
             Some(last) if last.coalesce == Some(key) => {
@@ -577,10 +587,34 @@ impl History {
         self.undo.last().map(|tx| tx.label.as_str())
     }
 
+    /// `(undos disponíveis, redos disponíveis)` — a posição atual no histórico.
+    pub fn position(&self) -> (usize, usize) {
+        (self.undo.len(), self.redo.len())
+    }
+
+    /// Marca o estado atual como guardado (Save/Ctrl+S).
+    pub fn mark_saved(&mut self) {
+        self.saved = Some(self.undo.len());
+    }
+
+    /// Posição (undos até ao estado guardado) do último save, se ainda for
+    /// alcançável.
+    pub fn saved_position(&self) -> Option<usize> {
+        self.saved
+    }
+
+    /// Uma transação nova no topo torna o ponto guardado inalcançável.
+    fn invalidate_saved_at_tip(&mut self) {
+        if self.saved.is_some_and(|saved| saved >= self.undo.len()) {
+            self.saved = None;
+        }
+    }
+
     /// Esquece tudo (ex.: o documento foi recarregado do disco).
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.saved = None;
     }
 }
 
@@ -649,6 +683,12 @@ fn set_attrs(
         }
     }
     doc.touch(node.file);
+    // Um `<Include src>` novo tem de carregar/reindexar o alvo: sem isto o
+    // mapa `includes` (e o sync, o `ls` e o `spawn_node`) continuava a
+    // apontar para o ficheiro antigo.
+    if attrs.contains_key("src") {
+        relink_include(doc, &node);
+    }
     let selector = doc.selector(&node);
     Ok(Applied {
         forward: EditOp::Set {
@@ -664,6 +704,18 @@ fn set_attrs(
             keys: attrs.keys().cloned().collect(),
         }],
     })
+}
+
+/// Se `node` é um `<Include>`, recarrega e reindexa o ficheiro que ele aponta
+/// (`link_includes`); noutro nó é um no-op. Chamado depois de mexer em `src`
+/// (a inversa `ReplaceAttrs` também reindexa).
+fn relink_include(doc: &mut SceneDoc, node: &NodeRef) {
+    if doc
+        .node(node)
+        .is_some_and(|xml| xml.tag.eq_ignore_ascii_case("include"))
+    {
+        doc.link_includes(node.file);
+    }
 }
 
 /// Os atributos de um nó (do raiz: os do elemento raiz do ficheiro). O nó tem de existir.

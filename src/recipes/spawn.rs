@@ -1272,8 +1272,12 @@ fn collect_spawn_groups(
                 });
             }
             EntityKind::SpawnExclusion { center, radius } => {
+                // Os grupos são contentores só de transform: o disco de uma
+                // exclusão dentro de um `<Group translation>`/`<Include
+                // translation>` desloca-se com ele (o parse já somou a
+                // translation do próprio nó).
                 exclusions.push(crate::spawner::SpawnExclusion {
-                    center: bevy::math::Vec2::new(center[0], center[1]),
+                    center: bevy::math::Vec2::new(center[0], center[1]) + offset,
                     radius: *radius,
                 });
             }
@@ -1355,6 +1359,9 @@ fn attach_physics(entity: &mut EntityWorldMut, ctx: &mut SpawnCtx, spec: &Entity
     let scripted = spec.script.is_some();
     if let Some((body, gravity)) = body_bundle(physics.body, physics.gravity_scale) {
         entity.insert((body, gravity));
+        if let Some(mass) = crate::physics::mass_properties(physics.mass) {
+            entity.insert(mass);
+        }
     }
     match &physics.collider {
         ColliderShape::None => {}
@@ -1562,8 +1569,14 @@ fn spawn_entity(
             if ctx.static_world {
                 // Pose final já no XML (o bake resolveu `place` e o assentamento).
             } else if let Some(place) = place {
+                // `place.at` é XZ MUNDO (contrato do [`PlaceSpec`]): o parse
+                // não conhece os ancestrais, por isso a soma dos XZ deles
+                // entra aqui — um `<Composition place>` dentro de um grupo
+                // transladado (ou de um `<Include translation>`) ficava no
+                // sítio errado, deslocado do grupo.
+                let ancestor = ancestor_xz(entity.world(), parent);
                 entity.insert(crate::worldsys::PendingPlace {
-                    at: Vec2::new(place.at[0], place.at[1]),
+                    at: Vec2::new(place.at[0], place.at[1]) + ancestor,
                     align_to_terrain: place.align_to_terrain,
                     base_y_offset: place.base_y_offset,
                 });
@@ -1620,6 +1633,10 @@ fn spawn_entity(
             } else {
                 (lod1.clone(), lod2.clone())
             };
+            // Corte por tamanho no ecrã quando a cena aterrar (ver
+            // `render_lod::AUTO_CULL_PER_RADIUS`): as instâncias cozidas do
+            // mundo estático não tinham culling nenhum.
+            entity.insert(crate::render_lod::AutoCull);
             entity.insert(GltfScenePending {
                 handle,
                 lod1: lod_load(&lod1),
@@ -1630,8 +1647,10 @@ fn spawn_entity(
             // Candidato ao batch de vegetação (`foliage::arm_candidates`
             // confirma um só mesh e nenhum colisor/script nos ancestrais).
             // Props com física ou script ficam entidades normais.
-            if spec.script.is_none() && spec.physics.is_empty() {
-                entity.insert(crate::foliage::FoliageCandidate);
+            // Destrutíveis/colhíveis têm `props` e o scripts de colheita
+            // precisa de os despawnar/tombar; um mesh fundido não saberia.
+            if spec.script.is_none() && spec.physics.is_empty() && spec.props.is_empty() {
+                entity.insert(crate::foliage::FoliageCandidate { multi: false });
             }
         }
         EntityKind::Primitive { shape, material } => {
@@ -1882,13 +1901,21 @@ fn spawn_entity(
             // borrow holds `world`).
             ctx.chips.borrow_mut().push((index, resource.clone()));
         }
-        EntityKind::AudioMixer { master, music, sfx } => {
+        EntityKind::AudioMixer {
+            master,
+            music,
+            sfx,
+            voice,
+            ambience,
+        } => {
             // Buses em 0..=1: um volume negativo do XML tocava a 200 % no
             // driver (`Volume::Linear` não faz clamp).
             ctx.mixer.replace(Some(crate::music::AudioMixerSettings {
                 master: master.clamp(0.0, 1.0),
                 music: music.clamp(0.0, 1.0),
                 sfx: sfx.clamp(0.0, 1.0),
+                voice: voice.clamp(0.0, 1.0),
+                ambience: ambience.clamp(0.0, 1.0),
             }));
         }
         EntityKind::MusicLayer {
@@ -1992,6 +2019,9 @@ fn spawn_entity(
             max_sun_elevation,
             sun_azimuth_base,
             min_sun_elevation,
+            day_speed_scale,
+            night_speed_scale,
+            night_cap_minute,
         } => {
             ctx.worldsys.day_cycle = Some(crate::worldsys::DayCycleState::from_parts(
                 *minute_of_day,
@@ -2004,6 +2034,9 @@ fn spawn_entity(
                 *max_sun_elevation,
                 *sun_azimuth_base,
                 *min_sun_elevation,
+                *day_speed_scale,
+                *night_speed_scale,
+                *night_cap_minute,
             ));
         }
         EntityKind::Weather {
@@ -2572,7 +2605,19 @@ pub fn apply_script_spawns(world: &mut World) {
     };
     let mut stats = SpawnStats::default();
     let mut ambient: Option<GlobalAmbientLight> = None;
-    let mut spawned: Vec<(Entity, Option<mlua::Function>, Option<String>, Vec3)> = Vec::new();
+    // `self_name`/`self_props` viajam com o pedido: a callback corre DEPOIS do
+    // `ctx` morrer, e ler os componentes exige o `World` (que o `host` já
+    // empresta em `&mut`). Sem estes campos `viber.entity_name()` devolvia nil
+    // e `viber.prop` lia os default em vez dos props do protótipo.
+    type SpawnedMeta = Option<std::sync::Arc<Vec<(String, String)>>>;
+    let mut spawned: Vec<(
+        Entity,
+        Option<mlua::Function>,
+        Option<String>,
+        Vec3,
+        Option<String>,
+        SpawnedMeta,
+    )> = Vec::new();
     for ((request, spec), seat_y) in requests.into_iter().zip(seat_ys) {
         let Some(spec) = spec.as_ref() else {
             continue;
@@ -2588,7 +2633,20 @@ pub fn apply_script_spawns(world: &mut World) {
             .get::<Transform>(root)
             .map(|t| t.translation)
             .unwrap_or(request.pos);
-        spawned.push((root, request.on_spawned, request.caller_path, origin));
+        let self_name = world
+            .get::<Name>(root)
+            .map(|name| name.as_str().to_string());
+        let self_props = world
+            .get::<crate::luau::ScriptProps>(root)
+            .map(|props| props.0.clone());
+        spawned.push((
+            root,
+            request.on_spawned,
+            request.caller_path,
+            origin,
+            self_name,
+            self_props,
+        ));
     }
     // Devolve os Assets (o mundo não pode ficar sem eles); o ctx tem de
     // morrer ANTES — toma &mut deles.
@@ -2605,12 +2663,14 @@ pub fn apply_script_spawns(world: &mut World) {
             return;
         };
         let host = &mut *host;
-        for (entity, cb, caller_path, origin) in spawned {
+        for (entity, cb, caller_path, origin, self_name, self_props) in spawned {
             let Some(cb) = cb else { continue };
             if let Some(mut c) = host.lua.app_data_mut::<crate::luau::ScriptCtx>() {
                 c.entity = Some(entity);
                 c.path = caller_path;
                 c.origin = origin;
+                c.self_name = self_name;
+                c.self_props = self_props;
             }
             let result = {
                 let _budget = host.budget_guard();
@@ -2695,6 +2755,21 @@ mod terrain_collect_tests {
             Vec2::new(13.0, 24.0),
             "via offset applied"
         );
+    }
+
+    /// `place.at` é XZ mundo: o spawn soma o XZ dos ancestrais (o parse só vê
+    /// a própria composição). Sem isto, uma composition com `place` dentro
+    /// de um grupo transladado ficava no sítio errado.
+    #[test]
+    fn ancestor_xz_sums_parent_translations() {
+        let mut world = World::new();
+        let outer = world.spawn(Transform::from_xyz(10.0, 5.0, 20.0)).id();
+        let inner = world
+            .spawn((Transform::from_xyz(1.0, 0.0, 2.0), ChildOf(outer)))
+            .id();
+        assert_eq!(ancestor_xz(&world, Some(inner)), Vec2::new(11.0, 22.0));
+        assert_eq!(ancestor_xz(&world, Some(outer)), Vec2::new(10.0, 20.0));
+        assert_eq!(ancestor_xz(&world, None), Vec2::ZERO);
     }
 }
 

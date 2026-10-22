@@ -30,9 +30,36 @@ pub struct DayCycleState {
     /// Piso da elevação usada pela LUZ direcional (`min-sun-elevation`) —
     /// o sol astronómico continua a descer; só a luz não segue abaixo.
     pub min_sun_elevation: f32,
+    /// Multiplicador do relógio durante o DIA (`day-speed-scale`). `<1`
+    /// alonga o dia em tempo real; `1` = `minutes-per-real-second` puro.
+    pub day_speed_scale: f32,
+    /// Multiplicador do relógio durante a NOITE (`night-speed-scale`).
+    /// `>1` encurta a noite em tempo real.
+    pub night_speed_scale: f32,
+    /// Minuto do dia em que o **visual** da noite CONGELA
+    /// (`night-cap-minute`, 0 = desligado). O relógio continua a andar para
+    /// quests/HUD; sol, céu, névoa, ambiente e luzes usam este minuto durante
+    /// a noite. Era o pedido "às 20:00 já é a escuridão máxima, não continua".
+    pub night_cap_minute: f32,
 }
 
 impl DayCycleState {
+    /// Minuto usado pela ATMOSFERA/SOL/AMBIENTE. Durante a noite (depois do
+    /// cap ou antes do amanhecer) devolve o `night-cap-minute`; de dia
+    /// devolve o relógio real. O `minute_of_day` continua a avançar.
+    pub fn visual_minute(&self) -> f32 {
+        let cap = self.night_cap_minute;
+        if cap <= 0.0 || cap >= 24.0 * 60.0 {
+            return self.minute_of_day;
+        }
+        let m = self.minute_of_day;
+        if m >= cap || m < self.dawn_minute {
+            cap
+        } else {
+            m
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         minute_of_day: f32,
@@ -45,6 +72,9 @@ impl DayCycleState {
         max_sun_elevation: f32,
         sun_azimuth_base: f32,
         min_sun_elevation: f32,
+        day_speed_scale: f32,
+        night_speed_scale: f32,
+        night_cap_minute: f32,
     ) -> Self {
         Self {
             minute_of_day,
@@ -59,6 +89,9 @@ impl DayCycleState {
             max_sun_elevation,
             sun_azimuth_base,
             min_sun_elevation,
+            day_speed_scale,
+            night_speed_scale,
+            night_cap_minute,
         }
     }
 }
@@ -1005,10 +1038,21 @@ pub fn daycycle_drive(
     // minutes_per_real_second é MINUTOS de jogo por segundo real (default
     // 1.2 → dia de 20 min): o /60 antigo tratava-o como fração de segundo
     // e o dia durava ~20 h — o dusk autoral nunca chegava numa sessão.
+    // `day-speed-scale` / `night-speed-scale` (XML) multiplicam a velocidade
+    // por fase: 0.5 faz o dia durar o DOBRO em tempo real e 2.0 faz a noite
+    // durar METADE. O corte é a meio da rampa dawn/dusk (daylight 0.5), com
+    // um passo de VELOCIDADE (não de posição) — não há salto no relógio.
     // rem_euclid: um relógio a andar para trás (velocidade negativa) ficava
     // com minutos negativos e o sol/rampas liam noite eterna.
-    clock.minute_of_day = (clock.minute_of_day + clock.minutes_per_real_second * time.delta_secs())
-        .rem_euclid(24.0 * 60.0);
+    let daylight = daylight_factor(clock.minute_of_day, clock.dawn_minute, clock.dusk_minute);
+    let speed_scale = if daylight >= 0.5 {
+        clock.day_speed_scale
+    } else {
+        clock.night_speed_scale
+    };
+    clock.minute_of_day = (clock.minute_of_day
+        + clock.minutes_per_real_second * speed_scale.max(0.0) * time.delta_secs())
+    .rem_euclid(24.0 * 60.0);
     if !clock.drive_ambient {
         return;
     }
@@ -1039,7 +1083,7 @@ pub fn daycycle_drive(
     if clock.ambient_reference <= 0.0 {
         clock.ambient_reference = ambient.brightness.max(1.0);
     }
-    let day = daylight_factor(clock.minute_of_day, clock.dawn_minute, clock.dusk_minute);
+    let day = daylight_factor(clock.visual_minute(), clock.dawn_minute, clock.dusk_minute);
     // `ambient-day-intensity` / `ambient-night-intensity` are the legacy
     // three.js ambient *intensities* — a 0..1 scale. Bevy's
     // `AmbientLight::brightness` is in lux and the same worlds author it in the
@@ -1101,14 +1145,17 @@ pub fn sun_drive(
     let Some(clock) = clock else {
         return;
     };
+    // O `night-cap-minute` congela o VISUAL (sol/céu/névoa/ambiente) no
+    // minuto do cap; o relógio continua a andar para quests/HUD.
+    let visual = clock.visual_minute();
     let elevation_deg = sun_elevation(
-        clock.minute_of_day,
+        visual,
         clock.dawn_minute,
         clock.dusk_minute,
         clock.max_sun_elevation,
     );
     let azimuth_deg = sun_azimuth(
-        clock.minute_of_day,
+        visual,
         clock.dawn_minute,
         clock.dusk_minute,
         clock.sun_azimuth_base,
@@ -1123,7 +1170,7 @@ pub fn sun_drive(
     // A luz direcional NÃO segue o sol abaixo do horizonte: passa a ser a
     // lua (alta, fria, fraca) com um crossfade pelo mesmo ramp dawn/dusk do
     // ambiente. Sem isto a noite ficava com o chão preto e o resto lavado.
-    let day = daylight_factor(clock.minute_of_day, clock.dawn_minute, clock.dusk_minute);
+    let day = daylight_factor(visual, clock.dawn_minute, clock.dusk_minute);
     let sun_dir = sky_direction(
         elevation_deg.max(clock.min_sun_elevation.max(0.0)),
         azimuth_deg,
@@ -1983,7 +2030,7 @@ mod tests {
         app.insert_resource(DayCycleState::from_parts(
             600.0, // midday
             0.0,   // clock frozen, so the test is about the ramp only
-            330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0,
+            330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0, 0.0,
         ));
         // Sol a pino: fill de sombras (golden/night) a 0 — o teste isola o
         // ramp dia/noite do ambiente, não o lift do fill.
@@ -2029,7 +2076,7 @@ mod tests {
         app.insert_resource(DayCycleState::from_parts(
             600.0, // midday
             0.0,   // clock frozen: the test is about the ramp only
-            330.0, 1170.0, 0.26, 0.13, true, 62.0, 205.0, 8.0,
+            330.0, 1170.0, 0.26, 0.13, true, 62.0, 205.0, 8.0, 1.0, 1.0, 0.0,
         ));
         let light = app
             .world_mut()

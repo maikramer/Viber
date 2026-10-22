@@ -504,6 +504,8 @@ pub enum EntityKind {
         master: f32,
         music: f32,
         sfx: f32,
+        voice: f32,
+        ambience: f32,
     },
     /// `<MusicLayer layer sound base-volume>` — looped BGM bus layer; the
     /// driver crossfades layers by player zone (`src/music.rs`).
@@ -527,6 +529,12 @@ pub enum EntityKind {
         sun_azimuth_base: f32,
         /// Floor for the directional-light elevation (`min-sun-elevation`).
         min_sun_elevation: f32,
+        /// Relógio durante o dia (`day-speed-scale`, default 1).
+        day_speed_scale: f32,
+        /// Relógio durante a noite (`night-speed-scale`, default 1).
+        night_speed_scale: f32,
+        /// Minuto em que o visual da noite congela (`night-cap-minute`).
+        night_cap_minute: f32,
     },
     /// `<Weather>` — wind/clouds/rain config (rain spawns a rain emitter).
     Weather {
@@ -619,6 +627,9 @@ pub struct DayCycleConfig {
     pub max_sun_elevation: f32,
     pub sun_azimuth_base: f32,
     pub min_sun_elevation: f32,
+    pub day_speed_scale: f32,
+    pub night_speed_scale: f32,
+    pub night_cap_minute: f32,
 }
 
 /// `<Weather>` config (wind/clouds/rain).
@@ -800,7 +811,13 @@ impl VegetationSpec {
     /// Instance count: density × area, clamped to the safety cap.
     pub fn instance_count(&self) -> u32 {
         let target = (self.area_km2() * self.density_per_km2).ceil();
-        target.min(self.max_instances as f32) as u32
+        // `max-instances="0"` é "sem teto" (o mesmo contrato do
+        // `<StaticSpawner>`): com `min(0)` a vegetação desaparecia toda.
+        if self.max_instances == 0 {
+            target.max(0.0) as u32
+        } else {
+            target.min(self.max_instances as f32) as u32
+        }
     }
 
     /// Convert to a placement spec consumable by the spawner runtime.
@@ -2152,9 +2169,11 @@ fn collect_template_traits(node: &XmlNode) -> (bool, Option<f32>) {
         let role_enemy = node
             .attr("role")
             .is_some_and(|role| role.trim().eq_ignore_ascii_case("enemy"));
-        let flag = node
-            .attr("hostile")
-            .is_some_and(|value| matches!(value.trim(), "true" | "1" | "yes"));
+        let flag = node.attr("hostile").is_some_and(|value| {
+            // Mesma convenção booleana do resto do parser (`on/yes/TRUE`):
+            // aqui `TRUE` virava criatura pacífica.
+            crate::xml::values::parse_bool(value, "hostile").unwrap_or(false)
+        });
         if role_enemy || flag {
             *hostile = true;
         }
@@ -2509,14 +2528,17 @@ fn finish_particle_system(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySp
 fn finish_spawn_exclusion(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
     let (common, rest) = parse_common(node, ctx)?;
     let ctx_tag = format!("<{}>", node.tag);
-    let mut center = [0.0_f32, 0.0];
+    // A `translation` do próprio nó desloca o disco como em qualquer feature
+    // de terreno com `at` (o grupo ancestral é somado no `collect` do spawn).
+    let off = terrain_offset(&common, node, ctx);
+    let mut center = [off.x, off.y];
     let mut radius = 0.0_f32;
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
         match key.as_str() {
             "at" => {
                 let v = values::parse_vec2(&value, &kctx)?;
-                center = [v[0], v[1]];
+                center = [v[0] + off.x, v[1] + off.y];
             }
             "radius" => radius = values::parse_f32(&value, &kctx)?,
             other => ctx
@@ -2732,12 +2754,16 @@ fn finish_audio_mixer(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
     let mut master = 1.0;
     let mut music = 1.0;
     let mut sfx = 1.0;
+    let mut voice = 1.0;
+    let mut ambience = 1.0;
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
         match key.as_str() {
             "master" => master = values::parse_f32(&value, &kctx)?,
             "music" => music = values::parse_f32(&value, &kctx)?,
             "sfx" => sfx = values::parse_f32(&value, &kctx)?,
+            "voice" => voice = values::parse_f32(&value, &kctx)?,
+            "ambience" | "ambient" => ambience = values::parse_f32(&value, &kctx)?,
             other => ctx
                 .warnings
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
@@ -2752,7 +2778,13 @@ fn finish_audio_mixer(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
         links: common.links,
         transform: common.transform,
         physics: common.physics,
-        kind: EntityKind::AudioMixer { master, music, sfx },
+        kind: EntityKind::AudioMixer {
+            master,
+            music,
+            sfx,
+            voice,
+            ambience,
+        },
         children: Vec::new(),
         source: None,
     })
@@ -2808,6 +2840,9 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         max_sun_elevation: 62.0,
         sun_azimuth_base: 205.0,
         min_sun_elevation: crate::worldsys::MIN_LIGHT_ELEVATION_DEG,
+        day_speed_scale: 1.0,
+        night_speed_scale: 1.0,
+        night_cap_minute: 0.0,
     };
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
@@ -2824,6 +2859,9 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "max-sun-elevation" => c.max_sun_elevation = values::parse_f32(&value, &kctx)?,
             "min-sun-elevation" => c.min_sun_elevation = values::parse_f32(&value, &kctx)?,
             "sun-azimuth-base" => c.sun_azimuth_base = values::parse_f32(&value, &kctx)?,
+            "day-speed-scale" => c.day_speed_scale = values::parse_f32(&value, &kctx)?,
+            "night-speed-scale" => c.night_speed_scale = values::parse_f32(&value, &kctx)?,
+            "night-cap-minute" => c.night_cap_minute = values::parse_f32(&value, &kctx)?,
             other => ctx
                 .warnings
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
@@ -2861,6 +2899,9 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             max_sun_elevation: c.max_sun_elevation,
             sun_azimuth_base: c.sun_azimuth_base,
             min_sun_elevation: c.min_sun_elevation,
+            day_speed_scale: c.day_speed_scale,
+            night_speed_scale: c.night_speed_scale,
+            night_cap_minute: c.night_cap_minute,
         },
         children: Vec::new(),
         source: None,
@@ -3870,12 +3911,13 @@ fn finish_river(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             // Superfícies explícitas por estação (contrato idempotente do
             // bake) — uma por estação re-amostrada.
             "water-levels" => {
-                spec.water_levels = Some(
-                    value
-                        .split_whitespace()
-                        .map(|tok| tok.parse::<f32>().unwrap_or(0.0))
-                        .collect(),
-                )
+                // Cada token tem de ser um número finito: `unwrap_or(0.0)`
+                // transformava um typo ("13.x") numa cota 0 no leito do rio.
+                let mut levels = Vec::new();
+                for tok in value.split_whitespace() {
+                    levels.push(values::parse_f32(tok, &kctx)?);
+                }
+                spec.water_levels = Some(levels);
             }
             "bank-width" => spec.bank_width = values::parse_f32(&value, &kctx)?,
             "bank-height" => spec.bank_height = values::parse_f32(&value, &kctx)?,
@@ -5057,6 +5099,35 @@ mod tests {
         assert_eq!(spec.transform.translation, [0.0; 3]);
     }
 
+    /// `<SpawnExclusion>` é uma feature com `at`: a translation do PRÓPRIO nó
+    /// entra no centro (o grupo ancestral entra no `collect` do spawn). Sem
+    /// isto, uma exclusão dentro de um grupo deslocado protegia a origem do
+    /// mundo em vez do sítio onde o acampamento está.
+    #[test]
+    fn test_spawn_exclusion_center_includes_translation() {
+        let (spec, _) = parse_one(&node(
+            "SpawnExclusion",
+            &[("translation", "50 0 60"), ("radius", "10")],
+        ))
+        .unwrap();
+        let EntityKind::SpawnExclusion { center, radius } = spec.kind else {
+            panic!("expected exclusion");
+        };
+        assert_eq!(center, [50.0, 60.0]);
+        assert_eq!(radius, 10.0);
+
+        // `at` é local ao nó, como em todas as features de terreno.
+        let (spec, _) = parse_one(&node(
+            "SpawnExclusion",
+            &[("translation", "50 0 60"), ("at", "1 2"), ("radius", "4")],
+        ))
+        .unwrap();
+        let EntityKind::SpawnExclusion { center, .. } = spec.kind else {
+            panic!("expected exclusion");
+        };
+        assert_eq!(center, [51.0, 62.0]);
+    }
+
     #[test]
     fn test_procedural_world_info_points_to_bake() {
         // Geradores num mundo procedural: um finding INFORMATIVO (não warning,
@@ -5524,16 +5595,31 @@ mod tests {
     fn test_audio_mixer_parses_buses() {
         let (spec, w) = parse_one(&node(
             "AudioMixer",
-            &[("master", "1"), ("music", "0.7"), ("sfx", "0.8")],
+            &[
+                ("master", "1"),
+                ("music", "0.7"),
+                ("sfx", "0.8"),
+                ("voice", "0.9"),
+                ("ambience", "0.6"),
+            ],
         ))
         .unwrap();
         assert!(w.is_empty(), "{w:?}");
-        let EntityKind::AudioMixer { master, music, sfx } = spec.kind else {
+        let EntityKind::AudioMixer {
+            master,
+            music,
+            sfx,
+            voice,
+            ambience,
+        } = spec.kind
+        else {
             panic!("expected audio mixer");
         };
         assert_eq!(master, 1.0);
         assert_eq!(music, 0.7);
         assert_eq!(sfx, 0.8);
+        assert_eq!(voice, 0.9);
+        assert_eq!(ambience, 0.6);
     }
 
     #[test]

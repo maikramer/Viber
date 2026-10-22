@@ -78,11 +78,39 @@ pub fn sync_scene(world: &mut World) {
         return;
     }
     let mut plan = Plan::default();
+    let mut failures: Vec<String> = Vec::new();
     for change in edits.iter().flat_map(|edit| &edit.changes) {
         match change {
             Change::Attrs { node, keys } => {
+                // Atributos de uma RAIZ de ficheiro (`ficheiro#`, ex. `<world
+                // static="true">`): não há entidade viva para re-spawnar e o
+                // `despawn_subtree` com caminho vazio varreria a cena inteira
+                // daquele ficheiro sem a repor. Só um reload os aplica.
+                if node.is_root() {
+                    let selector = world.resource::<SceneDoc>().selector(node);
+                    failures.push(format!(
+                        "{selector}: atributos da raiz só mudam ao recarregar o mundo"
+                    ));
+                    continue;
+                }
                 let is_pose = |key: &String| POSE_KEYS.contains(&key.as_str());
                 let is_prop = |key: &String| crate::luau::exports::prop_name(key).is_some();
+                // `<Include src>` novo: o conteúdo do ficheiro antigo tem
+                // origens no ficheiro dele (o `despawn_subtree` do include
+                // não lhe toca) e o `spawn_node` só ACRESCENTA a cena nova —
+                // ficavam duas cópias. Só um reload troca a cena incluída.
+                if keys.iter().any(|key| key == "src")
+                    && world
+                        .resource::<SceneDoc>()
+                        .node(node)
+                        .is_some_and(|xml| xml.tag.eq_ignore_ascii_case("include"))
+                {
+                    let selector = world.resource::<SceneDoc>().selector(node);
+                    failures.push(format!(
+                        "{selector}: <Include src> só muda ao recarregar o mundo"
+                    ));
+                    continue;
+                }
                 // Num `<Use>` os props da entidade são o merge protótipo+instância: o nó
                 // sozinho não chega para os patchar — re-spawn.
                 let use_node = world
@@ -130,7 +158,6 @@ pub fn sync_scene(world: &mut World) {
             }
         }
     }
-    let mut failures = Vec::new();
     for node in plan.respawn {
         if plan.spawn.contains(&node) {
             continue;
@@ -266,17 +293,26 @@ fn spawn_node(world: &mut World, node: &NodeRef) -> Result<(), String> {
     let top_level = parent_ref.is_root();
     // Topo de um ficheiro INCLUÍDO: o pai natural é o Group do `<Include>` quando ele tem
     // entidade (include com transform) — nasce dentro do referencial do ficheiro.
-    let includer = if top_level && node.file != 0 {
-        (0..doc.files.len()).find_map(|file| {
-            doc.files[file]
-                .includes
-                .iter()
-                .find(|(_, target)| *target == node.file)
-                .map(|(path, _)| NodeRef::new(file, path.clone()))
-        })
-    } else {
-        None
-    };
+    // O MESMO ficheiro pode ser incluído por vários `<Include>`; o respawn
+    // apaga todas as cópias e reconstruía só a primeira. Recusa em vez de
+    // perder instâncias em silêncio.
+    let mut includers = Vec::new();
+    if top_level && node.file != 0 {
+        for (file, entry) in doc.files.iter().enumerate() {
+            for (path, target) in &entry.includes {
+                if *target == node.file {
+                    includers.push(NodeRef::new(file, path.clone()));
+                }
+            }
+        }
+    }
+    if includers.len() > 1 {
+        return Err(format!(
+            "{selector}: ficheiro incluído por {} <Include> — recarrega o mundo para editar",
+            includers.len()
+        ));
+    }
+    let includer = includers.into_iter().next();
     let parsed = crate::recipes::parse_world(&[], std::slice::from_ref(&xml))
         .map_err(|e| format!("{selector}: {e:#}"))?;
     // Sem entidade (um `<Prototype>`, uma tag desconhecida): nada a spawnar.
@@ -907,5 +943,61 @@ mod tests {
         let status = app.world().resource::<SceneSyncStatus>();
         assert_eq!(status.needs_reload.len(), 1, "{:?}", status.needs_reload);
         assert!(status.needs_reload[0].contains("recarregar"));
+    }
+
+    /// Atributos da RAIZ de um ficheiro (`#`, ex. `<world static>`) não têm
+    /// entidade para re-spawnar; o plano antigo despawnava a subárvore do
+    /// caminho vazio (a cena inteira) e não repunha nada. Tem de pedir reload
+    /// e deixar a cena viva.
+    #[test]
+    fn root_attr_edit_asks_for_reload_and_keeps_the_scene() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        let hero = named(&mut app, "hero");
+        assert_eq!(hero.len(), 1);
+        edit(&mut app, &[set("#", "title", "Novo Título")]);
+        assert_eq!(named(&mut app, "hero"), hero, "a cena continua viva");
+        let status = app.world().resource::<SceneSyncStatus>();
+        assert_eq!(status.needs_reload.len(), 1, "{:?}", status.needs_reload);
+        assert!(
+            status.needs_reload[0].contains("raiz"),
+            "{:?}",
+            status.needs_reload
+        );
+    }
+
+    /// Trocar o `src` de um `<Include>` não pode re-spawnar: o conteúdo do
+    /// ficheiro antigo tem origens no ficheiro dele (o `despawn_subtree` do
+    /// include não lhe toca) e a cena nova seria ACRESCENTADA — duas cópias.
+    #[test]
+    fn include_src_change_asks_for_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("world")).unwrap();
+        std::fs::write(
+            tmp.path().join("world/house.xml"),
+            r#"<world><Entity name="tower" /></world>"#,
+        )
+        .unwrap();
+        let mut app = app(tmp.path());
+        assert_eq!(named(&mut app, "well").len(), 1);
+        edit(&mut app, &[set("#2", "src", "/world/house.xml")]);
+        assert_eq!(
+            named(&mut app, "well").len(),
+            1,
+            "a cena antiga continua inteira"
+        );
+        assert!(
+            named(&mut app, "tower").is_empty(),
+            "a cena nova não é acrescentada por cima"
+        );
+        let status = app.world().resource::<SceneSyncStatus>();
+        assert!(
+            status
+                .needs_reload
+                .iter()
+                .any(|message| message.contains("<Include src>")),
+            "{:?}",
+            status.needs_reload
+        );
     }
 }

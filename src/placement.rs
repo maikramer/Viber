@@ -8,14 +8,155 @@
 //! módulo existe para não haver segunda: qualquer gate novo (`avoid-*`)
 //! muda AQUI e propaga aos quatro consumos.
 
-use bevy::math::{Vec2, Vec3};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::recipes::StaticSpawnerSpec;
+use bevy::math::{Affine3A, EulerRot, Quat, Vec2, Vec3};
+
+use crate::recipes::{EntityKind, EntitySpec, StaticSpawnerSpec, TransformSpec};
 use crate::spawner::{
     PlacedInstance, PlacementStats, SpawnOccupancy, TerrainSample, compute_placements,
 };
 use crate::terrain::cliffs::CliffMask;
 use crate::terrain::runtime::TerrainRuntime;
+
+/// Transform local de uma entidade, com a mesma convenção do spawn
+/// (quaternião ganha ao euler; euler em graus, ordem XYZ).
+pub fn entity_affine(transform: &TransformSpec) -> Affine3A {
+    let rotation = transform
+        .rotation_quat
+        .map(|q| Quat::from_xyzw(q[0], q[1], q[2], q[3]))
+        .unwrap_or_else(|| {
+            transform.euler_deg.map_or(Quat::IDENTITY, |e| {
+                Quat::from_euler(
+                    EulerRot::XYZ,
+                    e[0].to_radians(),
+                    e[1].to_radians(),
+                    e[2].to_radians(),
+                )
+            })
+        });
+    Affine3A::from_scale_rotation_translation(
+        Vec3::from_array(transform.scale),
+        rotation,
+        Vec3::from_array(transform.translation),
+    )
+}
+
+/// Resolve `/assets/...` contra as roots do jogo (a primeira que tiver o
+/// ficheiro ganha). Duplicar isto no audit dava mensagens com paths
+/// diferentes para o mesmo asset.
+fn resolve_prop(roots: &[PathBuf], url: &str) -> PathBuf {
+    let rel = url.trim_start_matches('/');
+    roots
+        .iter()
+        .map(|root| root.join(rel))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            roots
+                .first()
+                .map(|root| root.join(rel))
+                .unwrap_or_else(|| PathBuf::from(rel))
+        })
+}
+
+/// Discos XZ `(x, z, raio)` dos props AUTORAIS visíveis (cada `<GltfScene>`
+/// com o seu AABB real, escala da hierarquia incluída). O bake chama isto
+/// ANTES de mover o `ParsedWorld` para a App e regista-os na ocupação: sem
+/// eles, a vegetação gerada nascia dentro da pedra de musgo que o autor pôs
+/// à mão. Templates de spawner/vegetação e definições de protótipo ficam de
+/// fora — não são entidades no sítio.
+pub fn authored_prop_discs(entities: &[EntitySpec], roots: &[PathBuf]) -> Vec<(f32, f32, f32)> {
+    authored_prop_discs_impl(entities, roots, true)
+}
+
+/// Variante do `verify_static`: um mundo ESTÁTICO já tem as instâncias geradas
+/// (`inst-…`) como `<GltfScene>`; registá-las todas aqui daria ao verify uma
+/// ocupação que o bake não teve (a ordem/`avoid-overlaps` dos grupos importa).
+pub fn authored_prop_discs_without_generated(
+    entities: &[EntitySpec],
+    roots: &[PathBuf],
+) -> Vec<(f32, f32, f32)> {
+    authored_prop_discs_impl(entities, roots, false)
+}
+
+fn authored_prop_discs_impl(
+    entities: &[EntitySpec],
+    roots: &[PathBuf],
+    include_generated: bool,
+) -> Vec<(f32, f32, f32)> {
+    fn collect(
+        entities: &[EntitySpec],
+        parent: Affine3A,
+        roots: &[PathBuf],
+        include_generated: bool,
+        cache: &mut HashMap<PathBuf, Option<crate::glb_bounds::GlbBounds>>,
+        out: &mut Vec<(f32, f32, f32)>,
+    ) {
+        for entity in entities {
+            if matches!(
+                entity.kind,
+                EntityKind::StaticSpawner { .. }
+                    | EntityKind::DynamicSpawner { .. }
+                    | EntityKind::Vegetation { .. }
+            ) {
+                continue;
+            }
+            let generated = entity
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("inst-"));
+            let world = parent * entity_affine(&entity.transform);
+            if (include_generated || !generated)
+                && let EntityKind::GltfScene { url, .. } = &entity.kind
+            {
+                let path = resolve_prop(roots, url);
+                let bounds = *cache
+                    .entry(path.clone())
+                    .or_insert_with(|| crate::glb_bounds::read(&path));
+                if let Some(bounds) = bounds {
+                    let (scale, _, translation) = world.to_scale_rotation_translation();
+                    let radius = bounds.footprint_radius() * scale.x.abs().max(scale.z.abs());
+                    if radius > 0.0 && translation.is_finite() {
+                        out.push((translation.x, translation.z, radius));
+                    }
+                }
+            }
+            collect(
+                &entity.children,
+                world,
+                roots,
+                include_generated,
+                cache,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    let mut cache = HashMap::new();
+    collect(
+        entities,
+        Affine3A::IDENTITY,
+        roots,
+        include_generated,
+        &mut cache,
+        &mut out,
+    );
+    out
+}
+
+/// Conveniência: registra os discos de [`authored_prop_discs`] na ocupação.
+pub fn register_authored_props(
+    entities: &[EntitySpec],
+    roots: &[PathBuf],
+    occupancy: &mut SpawnOccupancy,
+) -> usize {
+    let discs = authored_prop_discs(entities, roots);
+    for (x, z, radius) in &discs {
+        occupancy.register(*x, *z, *radius);
+    }
+    discs.len()
+}
 
 /// Raio de "perto de água" e a folga da máscara de cliff para um spec.
 ///
@@ -192,5 +333,42 @@ mod tests {
         // o que este teste crava é a fórmula da folga de cliff.
         assert_eq!(near, s.near_water_radius);
         assert!((clearance - 2.75).abs() < 1e-5, "{clearance}");
+    }
+
+    /// Props autorais entram na ocupação com a pegada REAL do GLB e a escala
+    /// da hierarquia; templates de spawner ficam de fora (não são entidades
+    /// no sítio). É o contrato que impede a vegetation de nascer dentro de
+    /// uma pedra autoral.
+    #[test]
+    fn authored_props_register_real_footprint_and_skip_spawner_templates() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let meshes = dir.path().join("assets/meshes");
+        std::fs::create_dir_all(&meshes).unwrap();
+        let json = r#"{"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],"accessors":[{"componentType":5126,"type":"VEC3","count":8,"min":[-1,-1,-1],"max":[1,1,1]}]}"#;
+        let mut glb = Vec::from(&b"glTF"[..]);
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(12 + 8 + json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(json.as_bytes());
+        std::fs::write(meshes.join("rock.glb"), glb).unwrap();
+
+        let xml = r#"<Group name="g" translation="10 0 20">
+            <Entity translation="1 0 2" scale="2">
+              <GltfScene url="/assets/meshes/rock.glb" />
+            </Entity>
+          </Group>
+          <StaticSpawner count="1" region-min="0 0 0" region-max="1 0 1">
+            <GameObject><GLTFLoader url="/assets/meshes/rock.glb" /></GameObject>
+          </StaticSpawner>"#;
+        let nodes = crate::xml::parse_fragment(xml).expect("fragmento parseia");
+        let parsed = crate::recipes::parse_world(&[], &nodes).expect("mundo parseia");
+        let discs = authored_prop_discs(&parsed.entities, &[dir.path().to_path_buf()]);
+        assert_eq!(discs.len(), 1, "só a entidade autoral: {discs:?}");
+        let (x, z, radius) = discs[0];
+        assert!((x - 11.0).abs() < 1e-4, "x={x}");
+        assert!((z - 22.0).abs() < 1e-4, "z={z}");
+        // AABB de 2 m de lado (meia-largura 1) × escala 2 = raio 2.
+        assert!((radius - 2.0).abs() < 1e-4, "raio={radius}");
     }
 }

@@ -48,6 +48,48 @@ fn roundtrip(ops: &[EditOp], check: impl FnOnce(&SceneDoc)) {
 }
 
 #[test]
+fn saved_marker_tracks_the_undo_position() {
+    let (_tmp, mut doc) = load();
+    let mut history = History::default();
+    history
+        .apply(
+            &mut doc,
+            "a",
+            &[set("name=hero", &[("translation", Some("1 2 3"))])],
+        )
+        .unwrap();
+    history
+        .apply(&mut doc, "b", &[set("name=hero", &[("scale", Some("2"))])])
+        .unwrap();
+    assert_eq!(history.position(), (2, 0));
+    assert_eq!(history.saved_position(), None);
+    history.mark_saved();
+    assert_eq!(history.saved_position(), Some(2));
+    history.undo(&mut doc).unwrap();
+    assert_eq!(
+        history.saved_position(),
+        Some(2),
+        "o redo ainda alcança o ponto guardado"
+    );
+    history.redo(&mut doc).unwrap();
+    assert_eq!(history.saved_position(), Some(2));
+    history.undo(&mut doc).unwrap();
+    history.undo(&mut doc).unwrap();
+    history
+        .apply(
+            &mut doc,
+            "c",
+            &[set("name=hero", &[("translation", Some("4 5 6"))])],
+        )
+        .unwrap();
+    assert_eq!(
+        history.saved_position(),
+        None,
+        "editar depois de desfazer abaixo do save invalida o ponto"
+    );
+}
+
+#[test]
 fn set_changes_and_removes_attributes() {
     roundtrip(
         &[set(
@@ -1084,4 +1126,39 @@ fn schema_reports_signals_methods_and_connections() {
     assert_eq!(targets[1]["target"], "@loot");
     assert_eq!(targets[1]["nodes"], 1);
     assert_eq!(targets[2]["nodes"], 0, "alvo partido");
+}
+
+#[test]
+fn set_include_src_relinks_the_document() {
+    let (tmp, mut doc) = load();
+    std::fs::write(
+        tmp.path().join("world/house.xml"),
+        r#"<world><Entity name="tower" /></world>"#,
+    )
+    .unwrap();
+    // Trocar o `src` de um `<Include>` tem de carregar o ficheiro novo e
+    // reindexar o mapa: `ls`, o sync e o spawn leem `include_target`, que
+    // ficava a apontar para o ficheiro antigo até recarregar o mundo.
+    let tx = apply_batch(
+        &mut doc,
+        "relink",
+        &[set("#2", &[("src", Some("/world/house.xml"))])],
+    )
+    .unwrap();
+    let include = NodeRef::new(0, vec![2]);
+    let target = doc.include_target(&include).expect("include reindexado");
+    assert_eq!(
+        doc.children(&NodeRef::root(target)).unwrap()[0].attr("name"),
+        Some("tower")
+    );
+    // A inversa (`ReplaceAttrs`) repõe o alvo antigo.
+    apply_batch(&mut doc, "undo", &tx.inverse).unwrap();
+    let target = doc
+        .include_target(&include)
+        .expect("include reindexado no undo");
+    assert!(
+        doc.files[target].path.ends_with("world/village.xml"),
+        "{:?}",
+        doc.files[target].path
+    );
 }

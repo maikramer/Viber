@@ -231,6 +231,21 @@ impl TerrainDoc {
 
     /// Os valores crus de um retângulo, codificados (o `terrain_patch` / a inversa exata).
     pub fn snapshot(&self, rect: CellRect) -> String {
+        // `terrain_patch` vem de agentes/CLI: um rect fora dos limites
+        // indexava fora do vec (panic) antes do `check` do restore.
+        let in_bounds = rect.cols > 0
+            && rect.rows > 0
+            && rect
+                .i0
+                .checked_add(rect.cols)
+                .is_some_and(|end| end <= self.map.width)
+            && rect
+                .j0
+                .checked_add(rect.rows)
+                .is_some_and(|end| end <= self.map.depth);
+        if !in_bounds {
+            return String::new();
+        }
         let mut bytes = Vec::with_capacity(rect.cols * rect.rows * 2);
         for j in rect.j0..rect.j0 + rect.rows {
             for i in rect.i0..rect.i0 + rect.cols {
@@ -269,11 +284,19 @@ impl TerrainDoc {
     }
 
     fn check(&self, rect: CellRect) -> Result<()> {
-        if rect.cols == 0
-            || rect.rows == 0
-            || rect.i0 + rect.cols > self.map.width
-            || rect.j0 + rect.rows > self.map.depth
-        {
+        // `i0 + cols` com `i0 = usize::MAX` transbordava (panic em debug;
+        // range vazio/corrompido em release). A op chega do bridge/editor.
+        let inside = rect.cols != 0
+            && rect.rows != 0
+            && rect
+                .i0
+                .checked_add(rect.cols)
+                .is_some_and(|end| end <= self.map.width)
+            && rect
+                .j0
+                .checked_add(rect.rows)
+                .is_some_and(|end| end <= self.map.depth);
+        if !inside {
             bail!(
                 "terrain: retângulo {rect:?} fora do mapa {}×{}",
                 self.map.width,
