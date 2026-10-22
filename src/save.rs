@@ -98,6 +98,91 @@ pub fn save_path_for(world_key: Option<&str>, save_dir: Option<&Path>) -> PathBu
     }
 }
 
+/// Caminho de um slot. `None` = save legado; `0` = autosave; `1..` = slots
+/// manuais. O sufixo entra antes de `.save.json`, por isso o save antigo do
+/// mundo continua no sítio e é lido pelo `load_save()` sem migração.
+pub fn save_path_for_slot(
+    world_key: Option<&str>,
+    save_dir: Option<&Path>,
+    slot: Option<u32>,
+) -> PathBuf {
+    let base = save_path_for(world_key, save_dir);
+    let Some(slot) = slot else {
+        return base;
+    };
+    let suffix = if slot == 0 {
+        "auto".to_string()
+    } else {
+        format!("slot{slot}")
+    };
+    let file = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(SAVE_FILENAME);
+    let name = file
+        .strip_suffix(".save.json")
+        .map(|stem| format!("{stem}.{suffix}.save.json"))
+        .unwrap_or_else(|| format!("{file}.{suffix}"));
+    base.with_file_name(name)
+}
+
+/// Sumário de um slot para o menu (o jogo não abre o JSON à mão).
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveSlotInfo {
+    pub slot: u32,
+    pub path: String,
+    pub exists: bool,
+    pub bytes: u64,
+    /// Unix seconds: campo do save, ou mtime do ficheiro nos saves antigos.
+    pub saved_at: Option<f64>,
+    pub level: u32,
+    pub gold: u32,
+    pub scene: Option<String>,
+    pub playtime: Option<f64>,
+    pub title: Option<String>,
+}
+
+/// Lê os metadados dos slots 0..=3 (0 = autosave) e, se existir, do save
+/// legado (slot 4 — `viber.load_save()`, não `load_slot(4)`). Nunca falha:
+/// um JSON corrompido lista o slot como existente mas sem nível/ouro.
+pub fn list_save_slots(world_key: Option<&str>, save_dir: Option<&Path>) -> Vec<SaveSlotInfo> {
+    fn info(slot: u32, path: std::path::PathBuf) -> SaveSlotInfo {
+        let meta = std::fs::metadata(&path).ok();
+        let exists = meta.is_some();
+        let bytes = meta.as_ref().map_or(0, |m| m.len());
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64());
+        let game = exists
+            .then(|| load_from_disk(&path).ok())
+            .flatten()
+            .unwrap_or_default();
+        SaveSlotInfo {
+            slot,
+            path: path.display().to_string(),
+            exists,
+            bytes,
+            saved_at: game.saved_at.or(mtime),
+            level: game.level,
+            gold: game.gold,
+            scene: game.scene.clone(),
+            playtime: game.playtime,
+            title: game.title.clone(),
+        }
+    }
+
+    let mut rows: Vec<SaveSlotInfo> = (0..=3)
+        .map(|slot| info(slot, save_path_for_slot(world_key, save_dir, Some(slot))))
+        .collect();
+    let legacy = info(4, save_path_for(world_key, save_dir));
+    if legacy.exists {
+        rows.push(legacy);
+    }
+    rows
+}
+
 // ── estrutura do save ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -108,6 +193,16 @@ pub struct SaveGame {
     /// campos novos perdem-se ao regravar por cima.
     #[serde(default)]
     pub version: u32,
+    /// Unix seconds da gravação. Saves antigos não têm; o menu cai no mtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<f64>,
+    /// Tempo de jogo acumulado (segundos), escrito pelo jogo em `world_kv`
+    /// ou directamente aqui.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtime: Option<f64>,
+    /// Rótulo do slot (ex. "Discórdia — Capítulo I").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     // Campos nucleares com `#[serde(default)]`: um save antigo/parcial sem
     // `volumes`/`nota_marked`/`items`/… carrega em vez de ser recusado inteiro.
     // XP, vitais, posição e volumes são `Option`: o zero do tipo matava o
@@ -151,6 +246,10 @@ pub struct SaveGame {
     /// Volumes (master, music, sfx) 0..=1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<(f32, f32, f32)>,
+    /// Volumes dos buses novos (voice, ambience) 0..=1. Campo separado
+    /// porque o save antigo é uma tupla de 3 e não pode mudar de forma.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volumes_extra: Option<(f32, f32)>,
     /// Estado de JOGO world-scoped do Luau (`viber.game()`), JSON plano
     /// (string/número/bool). É o gancho de persistência para lógica de jogo
     /// que vive em Lua — sem ele, scripts não conseguiam guardar nada.
@@ -163,6 +262,9 @@ pub struct SaveGame {
     /// `(cena, portal)` por onde se entrou na cena gravada — o `@back` da porta de saída.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub came_from: Option<(String, String)>,
+    /// Idioma do save (`pt`, `en`); ausente = o do arranque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     /// LEGADO: nomes de props colhidos. A colheita atual guarda a marca no
     /// `world_kv` do jogo; o campo fica só para ler saves antigos.
     #[serde(default)]
@@ -245,6 +347,8 @@ impl Plugin for SavePlugin {
 pub struct SaveRequest {
     pub save: bool,
     pub load: bool,
+    /// `None` = save legado; `0` = autosave; `1..` = slot manual.
+    pub slot: Option<u32>,
 }
 
 /// Linha selecionada na tab Opções (0=master, 1=música, 2=sfx, 3=save,
@@ -264,6 +368,10 @@ pub fn apply_save(game: &SaveGame, mixer: &mut AudioMixerSettings) {
         mixer.music = music.clamp(0.0, 1.0);
         mixer.sfx = sfx.clamp(0.0, 1.0);
     }
+    if let Some((voice, ambience)) = game.volumes_extra {
+        mixer.voice = voice.clamp(0.0, 1.0);
+        mixer.ambience = ambience.clamp(0.0, 1.0);
+    }
 }
 
 /// Opções e gravação: linhas ↑↓, volumes ←→, [J] grava, [L] carrega — e os
@@ -280,6 +388,7 @@ fn options_system(
     mut ui_actions: MessageReader<crate::ui::actions::UiAction>,
     mut rows: ResMut<OptionsRows>,
     mut mixer: ResMut<AudioMixerSettings>,
+    mut locale: Option<ResMut<crate::locale::Locale>>,
     mut world_save_host_request: (
         Option<Res<WorldSaveKey>>,
         Option<Res<SaveDir>>,
@@ -305,17 +414,19 @@ fn options_system(
             _ => {}
         }
     }
-    // `viber.save()` / `viber.load()` (scripts) valem sempre.
-    let (script_save, script_load) = world_save_host_request
+    // `viber.save()` / `viber.load()` (scripts) valem sempre. O slot vem
+    // junto: `None` = save legado, `0` = autosave, `1..` = manual.
+    let (script_save, script_load, script_slot) = world_save_host_request
         .3
         .as_mut()
         .map(|r| {
-            let pair = (r.save, r.load);
+            let trio = (r.save, r.load, r.slot);
             r.save = false;
             r.load = false;
-            pair
+            r.slot = None;
+            trio
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, None));
     let save_requested = save_requested || script_save;
     let load_requested = load_requested || script_load;
     if !open.modal && !save_requested && !load_requested {
@@ -361,9 +472,37 @@ fn options_system(
             .map(|(_, t, _player)| [t.translation.x, t.translation.y, t.translation.z]);
         if let Some(position) = hero_state {
             let mut game = capture(position, (mixer.master, mixer.music, mixer.sfx));
+            game.volumes_extra = Some((mixer.voice, mixer.ambience));
             if let Some(host) = host.as_mut() {
                 game.world_kv = crate::luau::game::game_to_json(&host.lua);
             }
+            // Metadados que o menu lê sem abrir o JSON: hora da gravação,
+            // tempo de jogo e rótulo (o jogo escreve-os em `viber.game()`).
+            game.saved_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs_f64());
+            game.playtime = game
+                .world_kv
+                .get("playtime_secs")
+                .and_then(serde_json::Value::as_f64);
+            // Metadados genéricos que um jogo pode publicar no `game()`.
+            game.level = game
+                .world_kv
+                .get("save_level")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            game.gold = game
+                .world_kv
+                .get("save_gold")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            game.title = game
+                .world_kv
+                .get("save_title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            game.locale = locale.as_deref().map(|locale| locale.lang.clone());
             if let Some(terrain) = world_save_host_request.6.as_deref() {
                 game.terrain_patches = terrain.deltas.export_patches();
             }
@@ -387,7 +526,9 @@ fn options_system(
                 game.scene = scene.id.clone();
                 game.came_from = scene.came_from.clone();
             }
-            if let Err(e) = save_to_disk(&save_path_for(world_key, save_dir), &game) {
+            if let Err(e) =
+                save_to_disk(&save_path_for_slot(world_key, save_dir, script_slot), &game)
+            {
                 toasts.write(ScriptToast(format!("Falha ao gravar: {e}")));
                 sfx.write(crate::ambient::SfxEvent {
                     clip: crate::ambient::SfxClip::Error,
@@ -409,17 +550,31 @@ fn options_system(
         }
     }
     if (on_system_tab && keys.just_pressed(KeyCode::KeyL)) || load_requested {
-        match load_from_disk(&save_path_for(world_key, save_dir)) {
+        match load_from_disk(&save_path_for_slot(world_key, save_dir, script_slot)) {
             Ok(game) => {
                 if game.version > SAVE_VERSION {
                     bevy::log::warn!(
                         "save '{}' é da versão {} (esta engine escreve {}) — campos novos perdem-se se gravares por cima",
-                        save_path_for(world_key, save_dir).display(),
+                        save_path_for_slot(world_key, save_dir, script_slot).display(),
                         game.version,
                         SAVE_VERSION
                     );
                 }
                 apply_save(&game, &mut mixer);
+                // O idioma do save ganha ao do arranque; a tabela Lua é
+                // recarregada no mesmo frame.
+                if let Some(lang) = game.locale.clone() {
+                    if let Some(locale) = locale.as_deref_mut() {
+                        locale.set_lang(&lang);
+                    }
+                    if let Some(host) = host.as_mut()
+                        && let Some(locale) = locale.as_deref()
+                        && let Some(mut ctx) = host.lua.app_data_mut::<crate::luau::ScriptCtx>()
+                    {
+                        ctx.locale_table = Some(std::sync::Arc::new(locale.table.clone()));
+                        ctx.locale_lang = Some(locale.lang.clone());
+                    }
+                }
                 let patches = game.terrain_patches.clone();
                 let keys = game.action_keys.clone();
                 world_save_host_request.4.queue(move |world: &mut World| {
@@ -490,6 +645,17 @@ fn options_system(
                             });
                         }
                         transform.translation = position.into();
+                        // Mesma cena: o `came_from` do save tem de voltar
+                        // também, senão o `@back` saía pelo portal da sessão
+                        // atual em vez do que o save gravou.
+                        let came_from = game.came_from.clone();
+                        world_save_host_request.4.queue(move |world: &mut World| {
+                            if let Some(mut current) =
+                                world.get_resource_mut::<crate::scene_loader::CurrentScene>()
+                            {
+                                current.came_from = came_from;
+                            }
+                        });
                         crate::player::settle_after_teleport(
                             &mut world_save_host_request.4,
                             entity,
@@ -570,6 +736,7 @@ mod tests {
             master: 0.6,
             music: 0.4,
             sfx: 0.8,
+            ..AudioMixerSettings::default()
         };
         apply_save(&loaded, &mut mixer);
         assert_eq!((mixer.master, mixer.music, mixer.sfx), (0.6, 0.4, 0.8));
@@ -628,6 +795,42 @@ mod tests {
             save_path_for(None, Some(dir.path())),
             dir.path().join(SAVE_FILENAME)
         );
+    }
+
+    /// Um save antigo (sem campos de skills) carrega sem falhar.
+    #[test]
+    fn test_slot_paths_and_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = save_path_for(Some("vael"), Some(dir.path()));
+        let auto = save_path_for_slot(Some("vael"), Some(dir.path()), Some(0));
+        let slot1 = save_path_for_slot(Some("vael"), Some(dir.path()), Some(1));
+        assert_eq!(
+            save_path_for_slot(Some("vael"), Some(dir.path()), None),
+            legacy,
+            "sem slot continua no path legado"
+        );
+        assert_eq!(auto, dir.path().join("vael.auto.save.json"));
+        assert_eq!(slot1, dir.path().join("vael.slot1.save.json"));
+
+        let mut game = capture([1.0, 2.0, 3.0], (1.0, 1.0, 1.0));
+        game.level = 7;
+        game.gold = 123;
+        game.saved_at = Some(42.0);
+        game.playtime = Some(3_600.0);
+        game.title = Some("Discórdia".into());
+        save_to_disk(&slot1, &game).unwrap();
+
+        let list = list_save_slots(Some("vael"), Some(dir.path()));
+        assert_eq!(list.len(), 4, "autosave + 3 slots");
+        let auto_row = list.iter().find(|row| row.slot == 0).unwrap();
+        assert!(!auto_row.exists, "autosave ainda não existe");
+        let row = list.iter().find(|row| row.slot == 1).unwrap();
+        assert!(row.exists);
+        assert_eq!(row.level, 7);
+        assert_eq!(row.gold, 123);
+        assert_eq!(row.saved_at, Some(42.0));
+        assert_eq!(row.playtime, Some(3_600.0));
+        assert_eq!(row.title.as_deref(), Some("Discórdia"));
     }
 
     /// Um save antigo (sem campos de skills) carrega sem falhar.
