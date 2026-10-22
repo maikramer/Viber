@@ -180,7 +180,11 @@ pub fn hot_reload_poll(
     for abs in state.ready_paths() {
         // O watcher entrega caminhos absolutos com o prefixo da raiz
         // canónica; o registry indexa caminhos relativos (com `/` — o
-        // mesmo formato dos paths no XML).
+        // mesmo formato dos paths no XML). Canonicalizar antes de casar:
+        // alguns backends (FSEvents, symlinks, `./`) entregam a MESMA
+        // entrada noutra grafia e o `strip_prefix` falhava em silêncio —
+        // hot-reload morto sem um único aviso.
+        let abs = abs.canonicalize().unwrap_or(abs);
         let Some(rel) = abs
             .strip_prefix(&state.root)
             .ok()

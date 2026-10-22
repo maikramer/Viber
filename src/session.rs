@@ -200,9 +200,20 @@ fn write_tmp(tmp: &Path, contents: &str) -> Result<()> {
 /// que seria lido como "corrupto = livre/sem sessão" pelos outros processos.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     let tmp = unique_tmp(path);
-    write_tmp(&tmp, contents)?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("a promover {} → {}", tmp.display(), path.display()))
+    if let Err(error) = write_tmp(&tmp, contents) {
+        // Sem isto um ENOSPC/disco cheio deixava o `.tmp` órfão na pasta da
+        // sessão para sempre (o nome é único por processo+chamada).
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    std::fs::rename(&tmp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::Error::new(error).context(format!(
+            "a promover {} → {}",
+            tmp.display(),
+            path.display()
+        ))
+    })
 }
 
 /// Publica um ficheiro NOVO com árbitro atómico: conteúdo completo num tmp
@@ -403,7 +414,15 @@ impl SessionPaths {
     /// Estado do lease, do ponto de vista de FORA (não exige ser dono):
     /// `None` = livre.
     pub fn busy(&self) -> Option<(String, Duration)> {
-        let lease = self.read_lease()?;
+        // `read_lease` devolve `None` também para um `lease.json` ilegível, e
+        // o `try_claim` trata esse caso como OCUPADO (dono "?"). Dizer
+        // "livre" aqui deixava o agente num claim que nunca passa.
+        let Some(lease) = self.read_lease() else {
+            return self
+                .lease_file()
+                .exists()
+                .then(|| ("?".to_string(), LEASE_PENDING));
+        };
         let remaining = lease.expires_at_ms.saturating_sub(now_ms());
         if remaining == 0 {
             None
