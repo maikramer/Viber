@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy_kira_audio::prelude::{Mix, ReverbHandle};
 use bevy_kira_audio::{AudioChannel, AudioControl, AudioInstance, AudioTween};
 
 /// Piso de silêncio em dB — kira trata ≤ −60 dB como inaudível.
@@ -36,6 +37,18 @@ pub struct MusicBus;
 #[derive(Resource)]
 pub struct SfxBus;
 
+/// Bus de VOZ (`<AudioMixer voice>` × master) — falas, barks e grunhidos.
+/// Separado do SFX para o ducking de diálogo/cinemática poder baixar música e
+/// efeitos sem calar a voz.
+#[derive(Resource)]
+pub struct VoiceBus;
+
+/// Bus de AMBIENTE (`<AudioMixer ambience>` × master) — vento, chuva, água,
+/// fogo. Separado do SFX para o jogador poder baixar o ambiente sem perder
+/// os sons de combate.
+#[derive(Resource)]
+pub struct AmbienceBus;
+
 /// Parâmetros de um loop de SFX pedido por script (`viber.sound_loop`).
 #[derive(Clone, Debug)]
 pub struct ScriptLoopParams {
@@ -43,6 +56,8 @@ pub struct ScriptLoopParams {
     pub pitch: f64,
     pub volume: f32,
     pub position: Option<Vec3>,
+    /// Entidade que pediu o loop; `None` = world-scoped (REPL/tick).
+    pub owner: Option<bevy::prelude::Entity>,
 }
 
 /// Loops que os scripts querem vivos neste frame. O driver de áudio lê
@@ -67,6 +82,10 @@ pub struct AudioMixerSettings {
     pub master: f32,
     pub music: f32,
     pub sfx: f32,
+    /// Falas/barks (`<AudioMixer voice>`).
+    pub voice: f32,
+    /// Ambiente/loops de mundo (`<AudioMixer ambience>`).
+    pub ambience: f32,
 }
 
 impl Default for AudioMixerSettings {
@@ -75,7 +94,198 @@ impl Default for AudioMixerSettings {
             master: 1.0,
             music: 1.0,
             sfx: 1.0,
+            voice: 1.0,
+            ambience: 1.0,
         }
+    }
+}
+
+/// Nome de bus aceite por `viber.audio.duck`/`reverb` e pelos saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioBus {
+    Master,
+    Music,
+    Sfx,
+    Voice,
+    Ambience,
+}
+
+impl AudioBus {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "master" => Some(Self::Master),
+            "music" => Some(Self::Music),
+            "sfx" => Some(Self::Sfx),
+            "voice" => Some(Self::Voice),
+            "ambience" | "ambient" => Some(Self::Ambience),
+            _ => None,
+        }
+    }
+}
+
+/// Um duck temporário: `gain` linear e o instante (elapsed_secs) em que expira.
+///
+/// `stack` guarda os pedidos ATIVOS: ducks sobrepostos (diálogo + cinemática)
+/// não se cancelam — o gain efetivo é o MENOR e cada um expira por si. Com um
+/// único slot, o pedido mais recente substituía o anterior (o diálogo subia a
+/// meio da fala) ou, com `min`, ficava preso até ao fim do mais longo.
+#[derive(Debug, Clone)]
+pub struct DuckLevel {
+    pub gain: f32,
+    pub until: f64,
+    stack: Vec<(f32, f64)>,
+}
+
+impl Default for DuckLevel {
+    fn default() -> Self {
+        Self {
+            // 1.0 e não o 0.0 derivado: um bus sem ducks não pode nascer mudo.
+            gain: 1.0,
+            until: 0.0,
+            stack: Vec::new(),
+        }
+    }
+}
+
+impl DuckLevel {
+    pub fn active(&self, now: f64) -> f32 {
+        self.stack
+            .iter()
+            .filter(|(_, until)| now < *until)
+            .map(|(gain, _)| gain.clamp(0.0, 1.0))
+            .fold(1.0, f32::min)
+    }
+}
+
+/// Ducking por bus, pedido por scripts (`viber.audio.duck`). O
+/// [`mixer_sync`] multiplica o volume do bus por este fator; expira sozinho.
+#[derive(Debug, Clone, Resource, Default)]
+pub struct AudioDuck {
+    pub master: DuckLevel,
+    pub music: DuckLevel,
+    pub sfx: DuckLevel,
+    pub voice: DuckLevel,
+    pub ambience: DuckLevel,
+}
+
+impl AudioDuck {
+    pub fn level(&mut self, bus: AudioBus) -> &mut DuckLevel {
+        match bus {
+            AudioBus::Master => &mut self.master,
+            AudioBus::Music => &mut self.music,
+            AudioBus::Sfx => &mut self.sfx,
+            AudioBus::Voice => &mut self.voice,
+            AudioBus::Ambience => &mut self.ambience,
+        }
+    }
+
+    pub fn apply(&mut self, bus: AudioBus, gain: f32, secs: f32, now: f64) {
+        if !gain.is_finite() || !secs.is_finite() || secs <= 0.0 {
+            return;
+        }
+        let level = self.level(bus);
+        let requested = gain.clamp(0.0, 1.0);
+        let until = now + secs as f64;
+        level.stack.retain(|(_, until)| now < *until);
+        level.stack.push((requested, until));
+        level.gain = level
+            .stack
+            .iter()
+            .map(|(gain, _)| *gain)
+            .fold(1.0, f32::min);
+        level.until = level
+            .stack
+            .iter()
+            .map(|(_, until)| *until)
+            .fold(0.0, f64::max);
+    }
+
+    pub fn ducked(&self, bus: AudioBus, now: f64) -> f32 {
+        match bus {
+            AudioBus::Master => self.master.active(now),
+            AudioBus::Music => self.music.active(now),
+            AudioBus::Sfx => self.sfx.active(now),
+            AudioBus::Voice => self.voice.active(now),
+            AudioBus::Ambience => self.ambience.active(now),
+        }
+    }
+}
+
+/// Presets de reverb genéricos (a engine não conhece "gruta" nem "capela";
+/// o jogo escolhe o preset e a quantidade de molhado).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReverbPreset {
+    #[default]
+    Off,
+    Room,
+    Hall,
+    Cave,
+}
+
+impl ReverbPreset {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "room" => Some(Self::Room),
+            "hall" => Some(Self::Hall),
+            "cave" => Some(Self::Cave),
+            _ => None,
+        }
+    }
+
+    /// `(feedback, damping, mix)` do kira.
+    pub fn params(self) -> (f64, f64, f64) {
+        match self {
+            Self::Off => (0.0, 0.1, 0.0),
+            Self::Room => (0.72, 0.45, 0.22),
+            Self::Hall => (0.88, 0.30, 0.38),
+            Self::Cave => (0.93, 0.16, 0.55),
+        }
+    }
+}
+
+/// Pedido de reverb (`viber.audio.reverb`). `wet: None` = o mix do preset.
+#[derive(Debug, Clone, Copy, Resource, Default)]
+pub struct AudioReverb {
+    pub preset: ReverbPreset,
+    pub wet: Option<f32>,
+}
+
+/// Handles dos reverbs criados nos tracks de SFX/voz. Sem kira (apps de
+/// teste) ficam `None` e o pedido é ignorado.
+#[derive(Resource, Default)]
+pub struct ReverbHandles {
+    pub sfx: Option<ReverbHandle>,
+    pub voice: Option<ReverbHandle>,
+}
+
+/// Empurra o preset para os reverbs dos buses. Só mexe quando o pedido muda
+/// (o handle do kira não lê o valor de volta; o `Local` é a cache).
+pub fn apply_reverb(
+    request: Option<Res<AudioReverb>>,
+    mut handles: ResMut<ReverbHandles>,
+    mut last: Local<Option<(ReverbPreset, Option<u32>)>>,
+) {
+    let Some(request) = request else {
+        return;
+    };
+    let signature = (request.preset, request.wet.map(f32::to_bits));
+    if *last == Some(signature) {
+        return;
+    }
+    *last = Some(signature);
+    let (feedback, damping, mix) = request.preset.params();
+    let mix = request.wet.unwrap_or(mix as f32).clamp(0.0, 1.0);
+    let tween = || AudioTween::linear(Duration::from_millis(180));
+    if let Some(handle) = handles.sfx.as_mut() {
+        handle.set_feedback(feedback, tween());
+        handle.set_damping(damping, tween());
+        handle.set_mix(Mix(mix), tween());
+    }
+    if let Some(handle) = handles.voice.as_mut() {
+        handle.set_feedback(feedback, tween());
+        handle.set_damping(damping, tween());
+        handle.set_mix(Mix(mix), tween());
     }
 }
 
@@ -98,6 +308,13 @@ pub struct AudioLoopPending {
     /// `true` = bus de música; `false` = bus de SFX.
     pub music: bool,
 }
+
+/// Marker: o [`AudioLoopPending`] desta entidade toca no [`AmbienceBus`]
+/// (chuva, água, cachoeiras), não no bus de SFX. Sem isto o `<AudioMixer
+/// ambience>` e o duck `ambience` não tinham efeito nenhum — os loops de
+/// ambiente iam todos para o SFX.
+#[derive(Debug, Component)]
+pub struct AmbienceLoop;
 
 /// Instância kira de um loop em curso (handle para o `Assets<AudioInstance>`).
 #[derive(Debug, Component)]
@@ -130,6 +347,18 @@ pub fn bgm_zone(
         return "village";
     }
     "explore"
+}
+
+/// Zona de BGM preferida por uma cena que declara uma layer com o PRÓPRIO id
+/// (o menu declara `<MusicLayer layer="menu">`). `None` = cena principal ou
+/// cena sem layer homónima: aí manda a zona de posição do mundo aberto.
+pub fn scene_zone<'a>(
+    scene_id: Option<&'a str>,
+    has_layer: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    scene_id
+        .filter(|id| *id != crate::project::MAIN_SCENE)
+        .filter(|id| has_layer(id))
 }
 
 /// Segundos que a layer de combate sobrevive ao último evento de combate —
@@ -223,16 +452,26 @@ pub fn fade_step(current: f32, target: f32, dt: f32, speed: f32) -> f32 {
 /// os pendentes ficam — os drivers ignoram-nos.
 pub fn audio_loop_starter(
     mut commands: Commands,
-    pending: Query<(Entity, &AudioLoopPending), Added<AudioLoopPending>>,
+    pending: Query<(Entity, &AudioLoopPending, Option<&AmbienceLoop>), Added<AudioLoopPending>>,
     server: Res<AssetServer>,
     music: Option<Res<AudioChannel<MusicBus>>>,
     sfx: Option<Res<AudioChannel<SfxBus>>>,
+    ambience: Option<Res<AudioChannel<AmbienceBus>>>,
 ) {
-    for (entity, pend) in &pending {
+    for (entity, pend, on_ambience) in &pending {
         // Os buses são tipos distintos e o trait de playback não é
         // dyn-compatible — o branch repete 2 linhas, mas mantém o resto único.
         let handle = if pend.music {
             let Some(channel) = music.as_deref() else {
+                continue;
+            };
+            channel
+                .play(server.load(&pend.url))
+                .looped()
+                .with_volume(DB_SILENCE)
+                .handle()
+        } else if on_ambience.is_some() {
+            let Some(channel) = ambience.as_deref() else {
                 continue;
             };
             channel
@@ -262,33 +501,64 @@ pub fn audio_loop_starter(
 /// antigo multiplicava no momento do spawn; um one-shot a meio não ouvia a
 /// mudança). Tween curto = transições sem clique.
 pub fn mixer_sync(
+    time: Res<Time>,
     mixer: Option<Res<AudioMixerSettings>>,
+    duck: Option<Res<AudioDuck>>,
     music: Option<Res<AudioChannel<MusicBus>>>,
     sfx: Option<Res<AudioChannel<SfxBus>>>,
+    voice: Option<Res<AudioChannel<VoiceBus>>>,
+    ambience: Option<Res<AudioChannel<AmbienceBus>>>,
     mut seeded: Local<bool>,
-    mut last: Local<[f32; 3]>,
+    mut last: Local<[f32; 5]>,
 ) {
     let Some(mixer) = mixer else {
         return;
     };
     // 1.º frame aplica SEMPRE (o `last` a zeros é lixo — um mixer autoral
     // 0/0/0 no arranque teria de empurrar −60 dB para os buses).
-    let values = [mixer.master, mixer.music, mixer.sfx];
-    if *seeded && *last == values {
+    let now = time.elapsed_secs_f64();
+    let d = duck.as_deref().cloned().unwrap_or_default();
+    let values = [
+        mixer.master,
+        mixer.music,
+        mixer.sfx,
+        mixer.voice,
+        mixer.ambience,
+    ];
+    let master = (values[0].clamp(0.0, 1.0)) * d.ducked(AudioBus::Master, now);
+    // Os fatores de duck mudam sem o mixer mudar; incluí-los na assinatura
+    // evita que um duck actue só no frame seguinte ao próximo slider.
+    let signature = [
+        master,
+        values[1].clamp(0.0, 1.0) * d.ducked(AudioBus::Music, now) * master,
+        values[2].clamp(0.0, 1.0) * d.ducked(AudioBus::Sfx, now) * master,
+        values[3].clamp(0.0, 1.0) * d.ducked(AudioBus::Voice, now) * master,
+        values[4].clamp(0.0, 1.0) * d.ducked(AudioBus::Ambience, now) * master,
+    ];
+    if *seeded && *last == signature {
         return;
     }
     *seeded = true;
-    *last = values;
-    let master = mixer.master.clamp(0.0, 1.0);
+    *last = signature;
     let tween_ms = || Duration::from_millis(120);
     if let Some(channel) = music {
         channel
-            .set_volume(linear_to_db(mixer.music.clamp(0.0, 1.0) * master))
+            .set_volume(linear_to_db(signature[1]))
             .linear_fade_in(tween_ms());
     }
     if let Some(channel) = sfx {
         channel
-            .set_volume(linear_to_db(mixer.sfx.clamp(0.0, 1.0) * master))
+            .set_volume(linear_to_db(signature[2]))
+            .linear_fade_in(tween_ms());
+    }
+    if let Some(channel) = voice {
+        channel
+            .set_volume(linear_to_db(signature[3]))
+            .linear_fade_in(tween_ms());
+    }
+    if let Some(channel) = ambience {
+        channel
+            .set_volume(linear_to_db(signature[4]))
             .linear_fade_in(tween_ms());
     }
 }
@@ -303,6 +573,7 @@ pub fn music_driver(
     time: Res<Time>,
     players: Query<&GlobalTransform, With<crate::player::Player>>,
     scene: Option<Res<crate::worldsys::InteriorSceneConfig>>,
+    current_scene: Option<Res<crate::scene_loader::CurrentScene>>,
     mut combat: ResMut<CombatMusicState>,
     forced: Option<Res<MusicLayerOverride>>,
     mut layers: Query<(&MusicLayerTag, &LoopInstance, &mut LoopVolume)>,
@@ -314,18 +585,30 @@ pub fn music_driver(
         return;
     };
     let pos = player.translation();
+    // Uma cena que declara a SUA layer (o menu declara `layer="menu"`) não se
+    // guia pela zona de posição do mundo aberto: o acampamento do menu fica a
+    // <55 m da origem, o `bgm_zone` dizia "village" e a layer `menu` nunca
+    // subia — menu em silêncio. Só vale quando a layer existe na cena.
+    let scene_zone = scene_zone(
+        current_scene
+            .as_deref()
+            .and_then(|current| current.id.as_deref()),
+        |id| layers.iter().any(|(tag, _, _)| tag.layer == id),
+    );
     // Script (`viber.music.layer`) ganha à zona e ao combate. Sem override,
     // combate ativo ganha à zona (boss > battle).
     let auto = combat
         .active_layer(time.elapsed_secs_f64())
-        .unwrap_or_else(|| bgm_zone(pos.x, pos.z, scene.as_deref()));
+        .map(str::to_owned)
+        .or_else(|| scene_zone.map(str::to_owned))
+        .unwrap_or_else(|| bgm_zone(pos.x, pos.z, scene.as_deref()).to_string());
     let zone = forced
         .as_ref()
-        .and_then(|over| over.0.as_deref())
+        .and_then(|over| over.0.clone())
         .unwrap_or(auto);
     let dt = time.delta_secs().clamp(0.0, 0.2);
     for (tag, instance, mut volume) in &mut layers {
-        let target = layer_target(&tag.layer, zone, tag.base_volume);
+        let target = layer_target(&tag.layer, &zone, tag.base_volume);
         let next = fade_step(volume.0, target, dt, 0.6);
         if next != volume.0 {
             let Some(mut snd) = instances.get_mut(&instance.0) else {
@@ -467,6 +750,19 @@ mod tests {
         assert_eq!(bgm_zone(300.0, 300.0, None), "explore");
     }
 
+    /// O menu declara `layer="menu"` mas o acampamento cai na zona `village`:
+    /// a cena tem de ganhar à posição (senão o BGM do menu nunca toca).
+    #[test]
+    fn test_scene_layer_wins_over_position_zone() {
+        let has_menu = |layer: &str| layer == "menu";
+        assert_eq!(scene_zone(Some("menu"), has_menu), Some("menu"));
+        // A cena principal segue a zona do mapa.
+        assert_eq!(scene_zone(Some("main"), has_menu), None);
+        // Cena sem layer homónima continua na zona de posição.
+        assert_eq!(scene_zone(Some("interiors/chapel"), has_menu), None);
+        assert_eq!(scene_zone(None, has_menu), None);
+    }
+
     #[test]
     fn test_layer_target_crossfades() {
         assert!(
@@ -521,5 +817,46 @@ mod tests {
         // "battle" tem de ser a ativa mesmo em pé na vila.
         assert!(layer_target("battle", "battle", 0.24) > 0.1);
         assert_eq!(layer_target("village", "battle", 0.2), 0.0);
+    }
+
+    #[test]
+    fn test_audio_duck_expires_and_clamps() {
+        let mut duck = AudioDuck::default();
+        assert_eq!(duck.ducked(AudioBus::Music, 0.0), 1.0);
+        duck.apply(AudioBus::Music, 0.35, 2.0, 10.0);
+        assert!((duck.ducked(AudioBus::Music, 10.5) - 0.35).abs() < 1e-6);
+        assert_eq!(duck.ducked(AudioBus::Music, 13.0), 1.0, "expirou");
+        // Ganhos fora de 0..=1 são presos; pedidos inválidos não mexem.
+        duck.apply(AudioBus::Sfx, 9.0, 1.0, 0.0);
+        assert_eq!(duck.ducked(AudioBus::Sfx, 0.5), 1.0);
+        duck.apply(AudioBus::Sfx, 0.5, 0.0, 0.0);
+        assert_eq!(duck.ducked(AudioBus::Sfx, 0.5), 1.0, "secs<=0 ignora");
+    }
+
+    #[test]
+    fn test_overlapping_ducks_do_not_cancel_each_other() {
+        let mut duck = AudioDuck::default();
+        // Diálogo a 0.35 durante 8 s…
+        duck.apply(AudioBus::Music, 0.35, 8.0, 100.0);
+        // …e uma cinemática a 0.9 a meio: o diálogo continua a mandar.
+        duck.apply(AudioBus::Music, 0.9, 30.0, 101.0);
+        assert!((duck.ducked(AudioBus::Music, 102.0) - 0.35).abs() < 1e-6);
+        // Quando o diálogo expira, fica só o duck de 0.9 (até aos 131 s).
+        assert!((duck.ducked(AudioBus::Music, 110.0) - 0.9).abs() < 1e-6);
+        assert!((duck.ducked(AudioBus::Music, 120.0) - 0.9).abs() < 1e-6);
+        assert_eq!(duck.ducked(AudioBus::Music, 132.0), 1.0, "ambos expiraram");
+    }
+
+    #[test]
+    fn test_reverb_presets_are_ordered_and_parsed() {
+        assert_eq!(ReverbPreset::parse("off"), Some(ReverbPreset::Off));
+        assert_eq!(ReverbPreset::parse("room"), Some(ReverbPreset::Room));
+        assert_eq!(ReverbPreset::parse("cave"), Some(ReverbPreset::Cave));
+        assert_eq!(ReverbPreset::parse("banheiro"), None);
+        let (_, _, off) = ReverbPreset::Off.params();
+        let (_, _, room) = ReverbPreset::Room.params();
+        let (_, _, cave) = ReverbPreset::Cave.params();
+        assert_eq!(off, 0.0);
+        assert!(room > off && cave > room, "mais molhado por preset");
     }
 }

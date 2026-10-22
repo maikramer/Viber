@@ -16,6 +16,10 @@ pub struct BusSnapshot {
     pub master: f32,
     pub music: f32,
     pub sfx: f32,
+    /// Falas/barks (`<AudioMixer voice>`).
+    pub voice: f32,
+    /// Ambiente/loops de mundo (`<AudioMixer ambience>`).
+    pub ambience: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,11 +69,15 @@ pub fn snapshot(world: &mut World) -> AudioSnapshot {
             master: m.master,
             music: m.music,
             sfx: m.sfx,
+            voice: m.voice,
+            ambience: m.ambience,
         })
         .unwrap_or(BusSnapshot {
             master: 1.0,
             music: 1.0,
             sfx: 1.0,
+            voice: 1.0,
+            ambience: 1.0,
         });
 
     let mut layers = Vec::new();
@@ -145,8 +153,8 @@ pub fn snapshot(world: &mut World) -> AudioSnapshot {
 pub fn window_lines(snap: &AudioSnapshot) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
-        "buses  master {:.2}  música {:.2}  sfx {:.2}",
-        snap.buses.master, snap.buses.music, snap.buses.sfx
+        "buses  master {:.2}  música {:.2}  sfx {:.2}  voz {:.2}  ambiente {:.2}",
+        snap.buses.master, snap.buses.music, snap.buses.sfx, snap.buses.voice, snap.buses.ambience
     ));
     lines.push(format!(
         "loops  {} total · {} a tocar · {} pausados",
@@ -236,6 +244,9 @@ mod tests {
         assert_eq!(snap.layers[0].volume, 0.18);
         let json = json(&snap);
         assert_eq!(json["total"], 2, "{json}");
+        // Os 5 buses do mixer aparecem (voice/ambience são novos).
+        assert_eq!(json["buses"]["voice"], 1.0, "{json}");
+        assert_eq!(json["buses"]["ambience"], 1.0, "{json}");
         assert_eq!(json["layers"][0]["layer"], "explore", "{json}");
         // 0.18 f32 não é exacto em JSON — comparar com tolerância.
         let json_volume = json["layers"][0]["volume"].as_f64().unwrap_or(0.0);

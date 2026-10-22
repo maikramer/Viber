@@ -53,7 +53,13 @@ impl Plugin for AudioSpacePlugin {
 
 fn ensure_listener(
     mut commands: Commands,
-    cameras: Query<Entity, (With<Camera3d>, Without<bevy_kira_audio::SpatialAudioReceiver>)>,
+    cameras: Query<
+        Entity,
+        (
+            With<Camera3d>,
+            Without<bevy_kira_audio::SpatialAudioReceiver>,
+        ),
+    >,
     existing: Query<Entity, With<bevy_kira_audio::SpatialAudioReceiver>>,
 ) {
     if existing.iter().next().is_some() {

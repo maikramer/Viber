@@ -212,6 +212,14 @@ pub enum SfxClip {
     Nitro,
     /// Kart: derrapagem (loop curto disparado por aresta).
     Skid,
+    /// Arco: corda solta.
+    BowShot,
+    /// Flecha a cravar-se (impacto).
+    ArrowHit,
+    /// Fogo a crepitar (one-shot/loop curto).
+    FireCrackle,
+    /// Item a cair ao chão.
+    ItemDrop,
 }
 
 /// Todos os clips, pela ordem do enum — alimenta o preload dos handles, o
@@ -257,15 +265,22 @@ pub const SFX_CLIPS_ALL: &[SfxClip] = &[
     SfxClip::Crash,
     SfxClip::Nitro,
     SfxClip::Skid,
+    SfxClip::BowShot,
+    SfxClip::ArrowHit,
+    SfxClip::FireCrackle,
+    SfxClip::ItemDrop,
 ];
 
-/// Loops ambientes carregados por path fixo (`setup_water_ambience`),
-/// RELATIVOS ao `sfx_dir` do config.yaml do jogo — não são clips
-/// `SfxEvent`; o audit valida a existência deles a partir daqui.
+/// Loops ambientes carregados por path fixo (`setup_water_ambience`,
+/// `setup_waterfall_ambience` e `setup_rain_ambience`), RELATIVOS ao
+/// `sfx_dir` do config.yaml do jogo — não são clips `SfxEvent`; o audit
+/// valida a existência deles a partir daqui (sem o rain_loop, um mundo com
+/// a chuva em falta passava o `analyze` mudo).
 pub const AMBIENT_LOOP_FILES: &[&str] = &[
     "world/water_lake.ogg",
     "world/water_flow.ogg",
     "world/water_waterfall.ogg",
+    "ambient/rain_loop.ogg",
 ];
 
 impl SfxClip {
@@ -312,6 +327,10 @@ impl SfxClip {
             SfxClip::Skid => "vehicles/skid.ogg",
             SfxClip::Jump => "player/jump.ogg",
             SfxClip::Dash => "player/dash.ogg",
+            SfxClip::BowShot => "combat/bow_shot.ogg",
+            SfxClip::ArrowHit => "combat/arrow_hit.ogg",
+            SfxClip::FireCrackle => "world/fire_crackle.ogg",
+            SfxClip::ItemDrop => "world/item_drop.ogg",
         }
     }
 }
@@ -354,6 +373,7 @@ impl Plugin for AmbientPlugin {
         app.init_resource::<CurrentBiome>()
             .init_resource::<PointShadowsEnabled>()
             .init_resource::<RainLook>()
+            .init_resource::<TorchLightOverride>()
             // GLUE da atmosfera (peça céu): [`crate::worldsys::AtmosphereState`]
             // é a paleta da hora partilhada por céu/fog/grading. Era escrita
             // por `atmosphere_drive` e lida por três sistemas — mas NINGUÉM a
@@ -485,7 +505,10 @@ fn mix_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 #[allow(clippy::too_many_arguments)]
 fn biome_fog_system(
     mut throttle: Local<f32>,
-    time: Res<Time>,
+    // REAL: no modo Edit o `Time` virtual está em pausa (`pause_virtual_time`)
+    // e o throttle nunca baixava — a névoa congelava no 1.º frame do editor,
+    // mesmo depois de `set_clock`/mudar de bioma.
+    time: Res<Time<bevy::time::Real>>,
     atmosphere: Res<crate::worldsys::AtmosphereState>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
     players: Query<&GlobalTransform, With<Player>>,
@@ -536,8 +559,11 @@ fn biome_fog_system(
     };
 
     // Toast só na TRANSIÇÃO (o sistema agora corre sempre, não só ao entrar).
+    // Dentro de uma cena de interior `region` é forçada a None (a bolsa fica
+    // fora do mapa): isso não é "voltar ao vale" — entrar em casa não pode
+    // anunciar que se voltou à região central (nem re-anunciar a região ao sair).
     let next_id = region.as_ref().map(|r| r.id.clone());
-    if next_id != current.id {
+    if !inside_scene && next_id != current.id {
         match &next_id {
             Some(id) => {
                 toasts.write(ScriptToast(format!("Entraste em: {id}")));
@@ -601,10 +627,8 @@ fn biome_fog_system(
     // ABRE 20 % (a base e o multiplicador do bioma continuam a mandar) e a
     // chuva soma só os 4 % de sempre.
     let rain = weather.map(|w| w.rain.clamp(0.0, 1.0)).unwrap_or(0.0);
-    let density = FOG_BASE_DENSITY
-        * smooth_mult
-        * (1.0 - 0.20 * atmosphere.night)
-        * (1.0 + 0.04 * rain);
+    let density =
+        FOG_BASE_DENSITY * smooth_mult * (1.0 - 0.20 * atmosphere.night) * (1.0 + 0.04 * rain);
 
     // Inscattering direcional — a escala NÃO é arbitrária, e errá-la lava o
     // frame inteiro de branco (r1/r2).
@@ -689,7 +713,10 @@ pub fn wants_point_shadow(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn light_budget_system(
     mut throttle: Local<f32>,
-    time: Res<Time>,
+    // REAL: com o tempo virtual em pausa (modo Edit) o throttle nunca baixava
+    // e as sombras ficavam presas às 12 luzes do 1.º frame, mesmo movendo a
+    // câmara do editor pelo mapa.
+    time: Res<Time<bevy::time::Real>>,
     editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     lights: Query<(Entity, &GlobalTransform), (With<PointLight>, Without<Camera3d>)>,
@@ -754,8 +781,11 @@ fn light_budget_system(
     let daylight = clock
         .as_deref()
         .map(|clock| {
+            // Minuto VISUAL (com night-cap): o sol/atmosfera já estão no
+            // cap, e o gate não pode desligar sombras às 05:30 com o ecrã
+            // ainda à noite.
             crate::worldsys::daylight_factor(
-                clock.minute_of_day,
+                clock.visual_minute(),
                 clock.dawn_minute,
                 clock.dusk_minute,
             )
@@ -987,6 +1017,8 @@ fn setup_water_ambience(
     ] {
         commands.spawn((
             WaterAmbienceLoop { river },
+            // Água é ambiente: obedece ao `<AudioMixer ambience>`/duck, não ao SFX.
+            crate::music::AmbienceLoop,
             crate::music::AudioLoopPending {
                 url: config.sfx_path(clip),
                 music: false,
@@ -1096,6 +1128,8 @@ fn setup_waterfall_ambience(
                     at: *st,
                     drop: c.drop,
                 },
+                // Cachoeira é ambiente (ver `AmbienceLoop`).
+                crate::music::AmbienceLoop,
                 crate::music::AudioLoopPending {
                     url: config
                         .as_deref()
@@ -1349,6 +1383,7 @@ fn rain_ripple_spawner(
     time: Res<Time>,
     mut state: Local<RainRippleState>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
+    scene: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     players: Query<&GlobalTransform, With<Player>>,
     runtime: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
     mut commands: Commands,
@@ -1364,6 +1399,13 @@ fn rain_ripple_spawner(
         return;
     };
     let origin = player.translation();
+    // Sem telhado não há ondulações (o emissor já se cala no interior).
+    if scene
+        .as_deref()
+        .is_some_and(|scene| scene.contains(origin.x, origin.z))
+    {
+        return;
+    }
     state.accumulator += RAIN_RIPPLES_PER_SEC * intensity * time.delta_secs();
     if state.accumulator < 1.0 {
         return;
@@ -1375,11 +1417,14 @@ fn rain_ripple_spawner(
         let z = origin.z + disc.y;
         let y = runtime
             .as_ref()
+            .filter(|r| r.in_field(x, z))
             .map(|r| {
                 r.surface_below(x, z, origin.y + crate::player::GROUND_PROBE)
                     .unwrap_or_else(|| r.sample(x, z))
             })
-            .unwrap_or(origin.y - RAIN_EMITTER_HEIGHT);
+            // Sem terreno o chão é o do herói, não 12 m abaixo (a altura do
+            // emissor que só faz sentido para as gotas).
+            .unwrap_or(origin.y);
         crate::particles::spawn_burst(&mut commands, &ripple_spec(), Vec3::new(x, y + 0.03, z), 2);
     }
 }
@@ -1396,6 +1441,8 @@ fn setup_rain_ambience(
     }
     commands.spawn((
         RainAmbienceLoop,
+        // Chuva é ambiente (ver `AmbienceLoop`).
+        crate::music::AmbienceLoop,
         crate::music::AudioLoopPending {
             url: config
                 .as_deref()
@@ -1410,6 +1457,8 @@ fn setup_rain_ambience(
 fn rain_ambience_driver(
     time: Res<Time>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
+    scene: Option<Res<crate::worldsys::InteriorSceneConfig>>,
+    players: Query<&GlobalTransform, With<Player>>,
     mut loops: Query<
         (&crate::music::LoopInstance, &mut crate::music::LoopVolume),
         With<RainAmbienceLoop>,
@@ -1419,7 +1468,19 @@ fn rain_ambience_driver(
     let Some(weather) = weather else {
         return;
     };
-    let intensity = weather.rain.clamp(0.0, 1.0);
+    // Dentro da bolsa de interior não chove: o emissor já se calava, mas o
+    // loop de áudio e as ondulações continuavam.
+    let indoors = scene.as_deref().is_some_and(|scene| {
+        players
+            .iter()
+            .next()
+            .is_some_and(|player| scene.contains(player.translation().x, player.translation().z))
+    });
+    let intensity = if indoors {
+        0.0
+    } else {
+        weather.rain.clamp(0.0, 1.0)
+    };
     // O bus (sfx×master) é do canal kira, não entra aqui.
     let target = RAIN_MAX_GAIN * intensity;
     let dt = time.delta_secs().clamp(0.0, 0.2);
@@ -1464,12 +1525,24 @@ const LANTERN_HEIGHT: f32 = 2.2;
 #[derive(Debug, Component)]
 pub struct TravellerLantern;
 
+/// Intensidade da lanterna controlada pelo JOGO (`viber.lantern(intensity)`).
+///
+/// A tocha/lampião equipado acende a luz mesmo de DIA (a lanterna automática
+/// só existe à noite) e reforça-a à noite. `0` (default) = só a automática.
+/// Vive num recurso para o `lantern_driver` compor sem o Lua tocar em
+/// componentes.
+#[derive(Debug, Clone, Copy, Resource, Default)]
+pub struct TorchLightOverride {
+    pub intensity: f32,
+}
+
 /// Spawna (uma vez) e conduz a lanterna: segue o herói, intensidade ∝ noite
 /// com fade exponencial suave (~0.4 s de constante — sem piscar).
 #[allow(clippy::type_complexity)]
 fn lantern_driver(
     time: Res<Time>,
     atmosphere: Option<Res<crate::worldsys::AtmosphereState>>,
+    torch: Option<Res<TorchLightOverride>>,
     players: Query<&GlobalTransform, With<Player>>,
     mut lanterns: Query<(&mut Transform, &mut PointLight, &mut Visibility), With<TravellerLantern>>,
     mut commands: Commands,
@@ -1480,7 +1553,9 @@ fn lantern_driver(
     };
     let anchor = player.translation() + Vec3::Y * LANTERN_HEIGHT;
     let night = atmosphere.map(|a| a.night.clamp(0.0, 1.0)).unwrap_or(0.0);
-    let target = LANTERN_MAX_INTENSITY * night;
+    let night_target = LANTERN_MAX_INTENSITY * night;
+    let torch_target = torch.map(|t| t.intensity.max(0.0)).unwrap_or(0.0);
+    let target = night_target.max(torch_target);
     let Ok((mut transform, mut light, mut visibility)) = lanterns.single_mut() else {
         commands.spawn((
             TravellerLantern,
@@ -1736,5 +1811,4 @@ mod tests {
             "noite ABRE a névoa ×0.80 (visibilidade): {night} vs {dry}"
         );
     }
-
 }
