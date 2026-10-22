@@ -4,21 +4,25 @@
 
 mod biomes;
 mod canvas;
+pub mod cheatsheet;
 mod console;
 pub mod context_menu;
 mod files;
 mod game;
 pub mod history;
 pub mod icons;
-mod layout;
+pub mod layout;
 mod logs;
 pub mod mode_strip;
+pub mod palette;
+pub mod plugin_panel;
 mod problems;
 mod profiler;
 pub mod scene_tabs;
 pub mod search;
 pub mod strings;
 pub mod theme;
+pub mod toast;
 mod toolbar;
 mod tools;
 pub mod tooltip;
@@ -41,6 +45,7 @@ impl Plugin for EditorUiPlugin {
             .init_resource::<toolbar::PendingPlayFrom>()
             .init_resource::<files::FilesState>()
             .init_resource::<layout::DockSizes>()
+            .init_resource::<layout::DockVisibility>()
             .init_resource::<layout::ActiveDockTab>()
             .add_plugins((
                 theme::ThemePlugin,
@@ -57,6 +62,12 @@ impl Plugin for EditorUiPlugin {
                 profiler::ProfilerPlugin,
                 scene_tabs::SceneTabsPlugin,
                 search::SearchPlugin,
+                plugin_panel::PluginPanelPlugin,
+            ))
+            .add_plugins((
+                cheatsheet::CheatSheetPlugin,
+                palette::PalettePlugin,
+                toast::ToastPlugin,
             ))
             .add_systems(
                 Startup,
@@ -68,6 +79,7 @@ impl Plugin for EditorUiPlugin {
                     layout::apply_startup_tab,
                     layout::apply_active_tab.after(layout::apply_startup_tab),
                     layout::apply_dock_sizes,
+                    layout::apply_dock_visibility,
                     layout::compact_tabs,
                     layout::update_status_bar,
                     toolbar::update_world_title,
@@ -80,6 +92,7 @@ impl Plugin for EditorUiPlugin {
                     strings::sync_lang_labels,
                     layout::target_editor_camera,
                     toolbar::update_status,
+                    toolbar::update_history_buttons,
                     toolbar::play_shortcuts,
                     toolbar::poll_pause,
                     toolbar::poll_play_from_here,

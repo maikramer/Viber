@@ -12,7 +12,7 @@ use crate::ui::strings::LangLabel;
 use bevy::feathers::controls::{ButtonVariant, FeathersToolButton};
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, ScrollArea};
 use viber::scene::doc::SceneDoc;
 use viber::scene::files::{FileEntry, FileKind};
 
@@ -192,6 +192,7 @@ pub fn script_panel() -> impl Scene {
                 border_radius: px(6),
             }
         ScriptList
+        ScrollArea
             BorderColor::all(theme::BORDER)
             BackgroundColor(theme::BG_PANEL)
             --
@@ -480,8 +481,12 @@ fn render_script_panel(
     // colhe primeiro: este rebuild destrói o editor e lê do DISCO — sem a
     // colheita, um re-scan de Ficheiros (`files.is_changed()`) apagava
     // edições não gravadas em silêncio
+    // Ler o estado com &mut marca change detection SEMPRE; captura o que
+    // mudou de facto ANTES do harvest (senão o editor era reconstruído a
+    // cada frame e o input perdia o cursor).
+    let stale = state.is_changed() || files.is_changed();
     harvest_script_buffers(&mut state, &editors);
-    if !state.is_changed() && !files.is_changed() {
+    if !stale {
         return;
     }
     let Ok(list) = lists.single() else {
@@ -650,25 +655,23 @@ fn mark_script_dirty(
 /// jogo avisa quando falha — mas o erro de sintaxe fica visível na hora.
 fn save_script(world: &mut World) {
     let mut editors = world.query::<(&mut ScriptEditor, &bevy::text::EditableText)>();
+    // Só um editor já PREENCHIDO tem o texto do ficheiro: entre o spawn do
+    // widget e o `prefill_script_editor` o `EditableText` está vazio, e um
+    // Ctrl+S nesse intervalo gravava um `.lua` de 0 bytes (perda de dados).
     let Some((path, value)) = editors
         .iter(world)
-        .next()
+        .find(|(editor, _)| editor.prefilled)
         .map(|(editor, text)| (editor.path.clone(), text.value().to_string()))
     else {
         return;
     };
     let syntax_error = syntax_check(&path, &value).err();
     world.resource_mut::<ScriptSyntaxState>().0 = syntax_error.clone();
-    let Some(file) = world
-        .resource::<SceneDoc>()
-        .world_path()
-        .parent()
-        .map(|dir| dir.join(&path))
-    else {
-        return;
-    };
+    // Caminhos de script são RELATIVOS À RAIZ do projeto (files::scan), não
+    // à pasta da cena: `scenes/scripts/x.lua` não existe.
+    let file = world.resource::<SceneDoc>().root_dir.join(&path);
     let lang = *world.resource::<Lang>();
-    let status = match std::fs::write(&file, &value) {
+    let status = match viber::scene::doc::write_atomic(&file, value.as_bytes()) {
         Ok(()) => {
             for (mut editor, _) in editors.iter_mut(world) {
                 editor.loaded.clone_from(&value);
@@ -735,9 +738,9 @@ fn render_syntax_line(
     }
 }
 
-/// O dock lista `scripts/merchant.lua` (relativo à pasta do projeto). A engine
+/// O dock lista `scripts/npc.lua` (relativo à pasta do projeto). A engine
 /// compara com o atributo XML e lê `<scripts_dir>/<path>` — o prefixo `scripts/`
-/// pedia `scripts/scripts/merchant.lua` e o reload falhava.
+/// pedia `scripts/scripts/npc.lua` e o reload falhava.
 pub fn script_bridge_path(path: &str) -> &str {
     path.strip_prefix("scripts/").unwrap_or(path)
 }
@@ -871,14 +874,10 @@ fn open_script_clicked(world: &mut World) {
     let Some(path) = world.resource::<ScriptState>().selected.clone() else {
         return;
     };
-    let Some(dir) = world
-        .resource::<SceneDoc>()
-        .world_path()
-        .parent()
-        .map(|dir| dir.join(&path))
-    else {
-        return;
-    };
+    // `path` é relativo à RAIZ do projecto (é assim que FilesState, search e
+    // problems o guardam); `world_path().parent()` apontava para `scenes/` e
+    // o `xdg-open` falhava sempre.
+    let dir = world.resource::<SceneDoc>().root_dir.join(&path);
     let lang = *world.resource::<Lang>();
     let opened = std::process::Command::new("xdg-open")
         .arg(&dir)
@@ -897,12 +896,12 @@ mod tests {
 
     #[test]
     fn reload_path_is_relative_to_the_scripts_dir() {
-        assert_eq!(script_bridge_path("scripts/merchant.lua"), "merchant.lua");
+        assert_eq!(script_bridge_path("scripts/npc.lua"), "npc.lua");
         assert_eq!(
             script_bridge_path("scripts/poi/song-seed.lua"),
             "poi/song-seed.lua"
         );
-        assert_eq!(script_bridge_path("merchant.lua"), "merchant.lua");
+        assert_eq!(script_bridge_path("npc.lua"), "npc.lua");
     }
 
     #[test]

@@ -16,6 +16,8 @@ use viber::editor_camera::EditorCamera;
 
 /// Grab radius in screen pixels.
 const GRAB_PX: f32 = 14.0;
+/// A press that travels less than this is a click, not a drag (no commit).
+const CLICK_PX: f32 = 3.0;
 const HANDLE_R: f32 = 0.9;
 
 /// The selected feature, parsed for handles: the attribute that stores the
@@ -56,6 +58,11 @@ pub struct FeatureDrag {
     index: usize,
     moved: Option<Vec2>,
     start: Vec<String>,
+    /// Cursor (viewport px) where the grab started.
+    press: Vec2,
+    /// Farthest distance from `press` while grabbed: um clique perto do
+    /// handle não pode "mover" o ponto para debaixo do cursor.
+    travel_px: f32,
 }
 
 /// True while a handle drag owns the pointer (the transform gizmo/pick stands down).
@@ -325,6 +332,8 @@ fn feature_interaction(world: &mut World) {
         drag.index = index;
         drag.moved = None;
         drag.start = current_attr(world);
+        drag.press = cursor.screen.unwrap_or_default();
+        drag.travel_px = 0.0;
         world.insert_resource(FeatureGrab);
     }
     if drag.grabbed
@@ -335,6 +344,9 @@ fn feature_interaction(world: &mut World) {
             runtime.sample(x, z)
         })
     {
+        if let Some(screen) = cursor.screen {
+            drag.travel_px = drag.travel_px.max(screen.distance(drag.press));
+        }
         drag.moved = Some(Vec2::new(at.x, at.z));
     }
     if drag.grabbed
@@ -342,7 +354,12 @@ fn feature_interaction(world: &mut World) {
     {
         drag.grabbed = false;
         world.remove_resource::<FeatureGrab>();
-        if let Some(moved) = drag.moved {
+        // Um clique (sem arrasto) NÃO reescreve o `at`/`path`: o `moved` já
+        // tem o ponto sob o cursor do frame do press, e gravar isso puxava o
+        // lago/estrada ~GRAB_PX do sítio e criava um passo de undo falso.
+        if drag.travel_px > CLICK_PX
+            && let Some(moved) = drag.moved
+        {
             commit(world, drag.index, moved, &drag.start);
         }
         drag.moved = None;

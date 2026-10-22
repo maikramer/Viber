@@ -52,10 +52,10 @@ struct ScreenshotRequest {
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
-    let world = match cli.world.clone().or_else(default_world) {
+    let world = match discover_world(cli.world.clone()) {
         Some(path) => path,
         None => anyhow::bail!(
-            "passa o world.xml (ex.: ../Vael/world.xml) — não há checkout Vael ao lado"
+            "passa o world.xml, ou corre o editor na pasta do projeto (onde está o config.yaml)"
         ),
     };
     anyhow::ensure!(
@@ -72,6 +72,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     let startup_tab = cli.tab.clone();
     let startup_mode = cli.mode.clone();
     let startup_views = cli.views.clone();
+    let prefs = crate::prefs::load();
     let lang = match cli.lang.as_deref().map(Lang::parse) {
         Some(parsed) => parsed.unwrap_or_else(|| {
             eprintln!(
@@ -80,7 +81,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             );
             Lang::default()
         }),
-        None => Lang::default(),
+        None => prefs.lang(),
     };
 
     // Persiste o último mundo aberto (o `viber editor` sem caminho reabre este).
@@ -160,13 +161,34 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     bevy::asset::embedded_asset!(app, "assets/icons/logo.png");
     bevy::asset::embedded_asset!(app, "assets/icons/pick.png");
     bevy::asset::embedded_asset!(app, "assets/icons/world.png");
+    // Prefs first, CLI overrides later: `--views`/`--tab`/`--mode`/`--lang`
+    // keep winning, but a plain launch restores the last session.
+    let dock_sizes = prefs.dock_sizes();
+    let dock_visibility = prefs.dock_visibility();
+    let active_dock_tab = prefs.active_dock_tab();
+    let view_options = prefs.view_options();
+    let camera_view = prefs.camera_view();
+    let snap_settings = prefs.snap_settings();
     app.add_plugins((
         FeathersPlugins,
         ViewportPlugin,
         ScenePlugin,
         bridge::BridgePlugin,
         EditorUiPlugin,
+        crate::prefs::PrefsPlugin,
+        // Plugins do projeto (`<root>/editor/plugins/*.lua`): o editor não
+        // tem regras de jogo; os plugins é que sabem o que pré-visualizar.
+        crate::plugins::EditorPluginsPlugin {
+            root: config_dir.clone(),
+        },
     ))
+    .insert_resource(dock_sizes)
+    .insert_resource(dock_visibility)
+    .insert_resource(active_dock_tab)
+    .insert_resource(view_options)
+    .insert_resource(camera_view)
+    .insert_resource(snap_settings)
+    .insert_resource(prefs)
     .insert_resource(UiTheme(create_dark_theme()))
     .add_systems(PreStartup, install_default_font_system)
     .insert_resource(ViberBridge::new(port))
@@ -194,8 +216,24 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         })
         .add_systems(Update, screenshot_and_exit);
     }
+    app.add_systems(Last, save_on_close);
     app.run();
     Ok(())
+}
+
+/// Closing the window saves dirty files and the session preferences before the
+/// default `close_when_requested` lets the app exit.
+fn save_on_close(
+    mut requested: MessageReader<bevy::window::WindowCloseRequested>,
+    mut commands: Commands,
+) {
+    if requested.read().next().is_none() {
+        return;
+    }
+    commands.queue(|world: &mut World| {
+        crate::scene::save_world(world);
+        crate::prefs::save_now(world);
+    });
 }
 
 /// Ctrl+R — "reload saved scene": saves, then relaunches the editor with the same arguments
@@ -327,10 +365,25 @@ fn screenshot_and_exit(
     exit.write(AppExit::Success);
 }
 
-/// Mundo do jogo irmão, quando o checkout Vael está ao lado do Viber.
-fn default_world() -> Option<PathBuf> {
-    let path = launch::viber_checkout().join("../Vael/world.xml");
-    path.is_file().then_some(path)
+/// Sem caminho, procura `world.xml` na pasta atual ou a cena principal
+/// declarada no `config.yaml` do projeto. O editor não conhece nenhum jogo
+/// em particular: o projeto diz onde está o mundo.
+fn discover_world(cli: Option<PathBuf>) -> Option<PathBuf> {
+    if cli.is_some() {
+        return cli;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let direct = cwd.join("world.xml");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if cwd.join("config.yaml").is_file() {
+        let main = viber::project::Project::at(&cwd).main_scene_path();
+        if main.is_file() {
+            return Some(main);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -67,6 +67,17 @@ impl Selection {
 #[derive(Resource, Debug, Default, Clone)]
 pub struct TreeExpansion(pub HashSet<NodeRef>);
 
+impl TreeExpansion {
+    pub fn collapse_all(&mut self) {
+        self.0.clear();
+    }
+
+    /// Expands every branch that has children (includes expand into their file).
+    pub fn expand_all(&mut self, doc: &SceneDoc) {
+        self.0 = tree::all_expandable(doc).into_iter().collect();
+    }
+}
+
 /// Edits requested by the UI this frame, applied in order by [`apply_pending_edits`].
 #[derive(Resource, Debug, Default)]
 pub struct PendingEdits(pub Vec<Edit>);
@@ -209,6 +220,7 @@ impl Plugin for ScenePlugin {
                 ),
             )
             .init_resource::<tree_drag::TreeDrag>()
+            .init_resource::<tree_drag::TreeDropHint>()
             .init_resource::<tree::RenameState>()
             .init_resource::<tree::TreeView>()
             .init_resource::<inspector::InspectorView>()
@@ -219,6 +231,8 @@ impl Plugin for ScenePlugin {
                     apply_pending_edits,
                     validate_selection,
                     tree::apply_tree_search,
+                    tree::live_tree_filter,
+                    tree::tree_keys,
                     tree::prefill_rename,
                     tree::commit_rename,
                     tree::render_tree,
@@ -232,7 +246,7 @@ impl Plugin for ScenePlugin {
 }
 
 /// Copied node XMLs (Ctrl+C → Ctrl+V), one deep each.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Clone)]
 pub struct NodeClipboard(pub Vec<String>);
 
 fn paste_str(lang: crate::ui::strings::Lang) -> &'static str {
@@ -263,12 +277,69 @@ fn shortcuts(world: &mut World) {
     let copy = ctrl && pressed(KeyCode::KeyC);
     let paste = ctrl && pressed(KeyCode::KeyV);
     let rename = pressed(KeyCode::F2);
+    let toggle_left = ctrl && pressed(KeyCode::KeyB);
+    let toggle_right = ctrl && pressed(KeyCode::KeyI);
+    let toggle_bottom = ctrl && pressed(KeyCode::KeyJ);
+    let quit = ctrl && pressed(KeyCode::KeyQ);
+    let close_tab = ctrl && pressed(KeyCode::KeyW);
     // Ctrl+S grava mesmo com um campo focado — não é um atalho do texto.
     if save {
         save_world(world);
     }
     // Ctrl+Z num campo desfaz o texto, não a cena.
     if typing {
+        return;
+    }
+    if toggle_left {
+        world
+            .resource_mut::<crate::ui::layout::DockVisibility>()
+            .toggle(crate::ui::layout::DockSide::Left);
+    }
+    if toggle_right {
+        world
+            .resource_mut::<crate::ui::layout::DockVisibility>()
+            .toggle(crate::ui::layout::DockSide::Right);
+    }
+    if toggle_bottom {
+        world
+            .resource_mut::<crate::ui::layout::DockVisibility>()
+            .toggle(crate::ui::layout::DockSide::Bottom);
+    }
+    if quit {
+        // Do not leave on a failed save: the user would lose the edits.
+        if let Err(error) = try_save_world(world) {
+            let status = failed(*world.resource::<Lang>(), &error);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+            world.resource_mut::<EditStatus>().0 = status;
+            return;
+        }
+        crate::prefs::save_now(world);
+        world.write_message(AppExit::Success);
+        return;
+    }
+    if close_tab {
+        // Save first: closing loses the tab entry, so a failed save must not
+        // drop the only reference to the dirty scene.
+        if let Err(error) = try_save_world(world) {
+            let status = failed(*world.resource::<Lang>(), &error);
+            world.resource_mut::<EditStatus>().0 = status;
+            return;
+        }
+        let next = {
+            let mut tabs = world.resource_mut::<crate::ui::scene_tabs::SceneTabs>();
+            if tabs.tabs.len() <= 1 {
+                None
+            } else {
+                let active = tabs.active;
+                tabs.close(active)
+                    .then(|| tabs.tabs[tabs.active].path.clone())
+            }
+        };
+        if let Some(next) = next {
+            world
+                .resource_mut::<crate::ui::scene_tabs::OpenSceneRequest>()
+                .0 = Some(next);
+        }
         return;
     }
     if reload {
@@ -295,107 +366,155 @@ fn shortcuts(world: &mut World) {
         let result = live::redo(world).map(|tx| tx.map(|tx| redo_prefix(lang, &tx.label)));
         report(world, result, nothing_to_redo(lang));
     }
-    let selected = world.resource::<Selection>().0.clone();
-    if paste
-        && let Some(clipboard) = world.get_resource::<NodeClipboard>()
-        && !clipboard.0.is_empty()
-    {
-        let anchor = selected.first().cloned();
-        let ops = paste_ops(world.resource::<SceneDoc>(), anchor.as_ref(), &clipboard.0);
-        if !ops.is_empty() {
-            let label = anchor
-                .as_ref()
-                .map(|node| {
-                    format!(
-                        "{} {}",
-                        paste_str(lang),
-                        world.resource::<SceneDoc>().selector(node)
-                    )
-                })
-                .unwrap_or_else(|| paste_str(lang).to_owned());
-            world
-                .resource_mut::<PendingEdits>()
-                .push_selecting_inserted(label, ops);
-        }
+    if paste {
+        paste_clipboard(world);
     }
+    if duplicate {
+        duplicate_selection(world);
+    }
+    if rename {
+        begin_rename(world);
+    }
+    if copy {
+        copy_selection(world);
+    }
+    if delete {
+        delete_selection(world);
+    }
+}
+
+/// The selected roots in descending document order: removing/duplicating a
+/// previous sibling shifts the indices of the next ones.
+fn editable_selection(world: &World) -> Vec<NodeRef> {
+    let mut editable = selection_roots(&world.resource::<Selection>().0);
+    editable.sort();
+    editable.dedup();
+    editable.reverse();
+    editable
+}
+
+/// Ctrl+D / palette: duplicates every selected root in one transaction.
+pub fn duplicate_selection(world: &mut World) {
+    let lang = *world.resource::<Lang>();
+    let selected = world.resource::<Selection>().0.clone();
     let Some(primary) = selected.first().cloned() else {
         return;
     };
     let selector = world.resource::<SceneDoc>().selector(&primary);
-    // Lote em ordem DESCENDENTE (file, path): os ops usam seletores de caminho
-    // resolvidos no momento de cada op — remover/duplicar um irmão anterior
-    // desloca os índices dos seguintes (Delete [A,C] apagava A e D; Duplicate
-    // [A,C] duplicava A e B). Do fim para o princípio, nada se desloca —
-    // a mesma convenção do group_selection.
-    let mut editable = selection_roots(&selected);
-    editable.sort();
-    editable.dedup();
-    editable.reverse();
-    if !editable.is_empty() {
-        // OS TRÊS atalhos agem em LOTE: uma transação (um undo) com todos os nós.
-        if duplicate {
-            let ops: Vec<EditOp> = editable
-                .iter()
-                .map(|node| EditOp::Duplicate {
-                    node: world.resource::<SceneDoc>().selector(node),
-                })
-                .collect();
-            let focus = if editable.iter().any(|node| node == &primary) {
-                primary.clone()
-            } else {
-                editable
-                    .iter()
-                    .find(|node| node.file == primary.file && primary.path.starts_with(&node.path))
-                    .cloned()
-                    .unwrap_or_else(|| primary.clone())
-            };
-            let copy = focus.parent().map(|parent| {
-                let index = duplicate_copy_index(
-                    focus.path.last().copied().unwrap_or(0),
-                    earlier_sibling_copies(&editable, &focus),
-                );
-                parent.child(index)
-            });
-            world.resource_mut::<PendingEdits>().0.push(Edit {
-                label: duplicate_label(lang, &selector),
-                ops,
-                select_after: Some(copy),
-                select_inserted: false,
-                select_name: None,
-            });
-        }
-        if rename {
-            let mut rename = world.resource_mut::<tree::RenameState>();
-            rename.0 = Some(primary.clone());
-            rename.1 = false;
-        }
-        if copy {
-            // clipboard em ordem ASCENDENTE (a cola reproduz a ordem relativa)
-            let mut ascending = editable.clone();
-            ascending.reverse();
-            let xmls: Vec<String> = ascending
-                .iter()
-                .filter_map(|node| world.resource::<SceneDoc>().node(node))
-                .map(viber::xml::emit::emit_node)
-                .collect();
-            world.insert_resource(NodeClipboard(xmls));
-        }
-        if delete {
-            let ops: Vec<EditOp> = editable
-                .iter()
-                .map(|node| EditOp::Remove {
-                    node: world.resource::<SceneDoc>().selector(node),
-                })
-                .collect();
-            world.resource_mut::<PendingEdits>().0.push(Edit {
-                label: delete_label(lang, &selector),
-                ops,
-                select_after: Some(None),
-                select_inserted: false,
-                select_name: None,
-            });
-        }
+    let editable = editable_selection(world);
+    if editable.is_empty() {
+        return;
     }
+    let ops: Vec<EditOp> = editable
+        .iter()
+        .map(|node| EditOp::Duplicate {
+            node: world.resource::<SceneDoc>().selector(node),
+        })
+        .collect();
+    let focus = if editable.iter().any(|node| node == &primary) {
+        primary.clone()
+    } else {
+        editable
+            .iter()
+            .find(|node| node.file == primary.file && primary.path.starts_with(&node.path))
+            .cloned()
+            .unwrap_or_else(|| primary.clone())
+    };
+    let copy = focus.parent().map(|parent| {
+        let index = duplicate_copy_index(
+            focus.path.last().copied().unwrap_or(0),
+            earlier_sibling_copies(&editable, &focus),
+        );
+        parent.child(index)
+    });
+    world.resource_mut::<PendingEdits>().0.push(Edit {
+        label: duplicate_label(lang, &selector),
+        ops,
+        select_after: Some(copy),
+        select_inserted: false,
+        select_name: None,
+    });
+}
+
+/// Delete / palette: removes every selected root in one transaction.
+pub fn delete_selection(world: &mut World) {
+    let lang = *world.resource::<Lang>();
+    let selected = world.resource::<Selection>().0.clone();
+    let Some(primary) = selected.first().cloned() else {
+        return;
+    };
+    let selector = world.resource::<SceneDoc>().selector(&primary);
+    let editable = editable_selection(world);
+    if editable.is_empty() {
+        return;
+    }
+    let ops: Vec<EditOp> = editable
+        .iter()
+        .map(|node| EditOp::Remove {
+            node: world.resource::<SceneDoc>().selector(node),
+        })
+        .collect();
+    world.resource_mut::<PendingEdits>().0.push(Edit {
+        label: delete_label(lang, &selector),
+        ops,
+        select_after: Some(None),
+        select_inserted: false,
+        select_name: None,
+    });
+}
+
+/// Ctrl+C / palette: one deep XML per selected root, in ascending order.
+pub fn copy_selection(world: &mut World) {
+    let mut ascending = editable_selection(world);
+    ascending.reverse();
+    let xmls: Vec<String> = ascending
+        .iter()
+        .filter_map(|node| world.resource::<SceneDoc>().node(node))
+        .map(viber::xml::emit::emit_node)
+        .collect();
+    if !xmls.is_empty() {
+        world.insert_resource(NodeClipboard(xmls));
+    }
+}
+
+/// Ctrl+V / palette: pastes after the primary (or at the world root).
+pub fn paste_clipboard(world: &mut World) {
+    let lang = *world.resource::<Lang>();
+    let anchor = world.resource::<Selection>().primary().cloned();
+    let Some(clipboard) = world
+        .get_resource::<NodeClipboard>()
+        .filter(|clipboard| !clipboard.0.is_empty())
+        .cloned()
+    else {
+        return;
+    };
+    let ops = paste_ops(world.resource::<SceneDoc>(), anchor.as_ref(), &clipboard.0);
+    if ops.is_empty() {
+        return;
+    }
+    let label = anchor
+        .as_ref()
+        .map(|node| {
+            format!(
+                "{} {}",
+                paste_str(lang),
+                world.resource::<SceneDoc>().selector(node)
+            )
+        })
+        .unwrap_or_else(|| paste_str(lang).to_owned());
+    world
+        .resource_mut::<PendingEdits>()
+        .push_selecting_inserted(label, ops);
+}
+
+/// F2 / palette: starts the inline rename of the primary.
+pub fn begin_rename(world: &mut World) {
+    let Some(primary) = world.resource::<Selection>().primary().cloned() else {
+        return;
+    };
+    let mut rename = world.resource_mut::<tree::RenameState>();
+    rename.0 = Some(primary);
+    rename.1 = false;
 }
 
 /// Autosave (Fase A5): every 2 minutes with dirty files, saves silently.
@@ -419,23 +538,58 @@ pub fn autosave(world: &mut World) {
 #[derive(Resource, Debug, Default)]
 pub struct AutosaveTimer(pub f32);
 
+/// Writes every edited file and marks the history's save point.
+pub fn try_save_world(world: &mut World) -> anyhow::Result<Vec<String>> {
+    let files = live::save(world)?;
+    if let Some(mut history) = world.get_resource_mut::<viber::scene::ops::History>() {
+        history.mark_saved();
+    }
+    Ok(files)
+}
+
 /// Writes every edited file (Ctrl+S, the Save button, and before ▶ Play).
 pub fn save_world(world: &mut World) {
     let lang = *world.resource::<Lang>();
-    let status = match live::save(world) {
+    let status = match try_save_world(world) {
         Ok(files) if files.is_empty() => save_nothing(lang).to_owned(),
-        Ok(files) => saved(lang, &files),
-        Err(error) => save_failed(lang, &error),
+        Ok(files) => {
+            let status = saved(lang, &files);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Success, status.clone());
+            status
+        }
+        Err(error) => {
+            let status = save_failed(lang, &error);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+            status
+        }
     };
     info!("{status}");
     world.resource_mut::<EditStatus>().0 = status;
+}
+
+/// Undo through the toolbar/palette (same status text as Ctrl+Z).
+pub fn undo_last(world: &mut World) {
+    let lang = *world.resource::<Lang>();
+    let result = live::undo(world).map(|tx| tx.map(|tx| undo_prefix(lang, &tx.label)));
+    report(world, result, nothing_to_undo(lang));
+}
+
+/// Redo through the toolbar/palette (same status text as Ctrl+Shift+Z).
+pub fn redo_last(world: &mut World) {
+    let lang = *world.resource::<Lang>();
+    let result = live::redo(world).map(|tx| tx.map(|tx| redo_prefix(lang, &tx.label)));
+    report(world, result, nothing_to_redo(lang));
 }
 
 fn report(world: &mut World, result: anyhow::Result<Option<String>>, empty: &str) {
     let status = match result {
         Ok(Some(label)) => label,
         Ok(None) => empty.to_owned(),
-        Err(error) => failed(*world.resource::<Lang>(), &error),
+        Err(error) => {
+            let status = failed(*world.resource::<Lang>(), &error);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+            status
+        }
     };
     world.resource_mut::<EditStatus>().0 = status;
 }

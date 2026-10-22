@@ -44,10 +44,14 @@ fn rubber_interaction(world: &mut World) {
     let mode = world.resource::<GizmoTool>().mode;
     let cursor = *world.resource::<ViewportCursor>();
     let buttons = world.resource::<ButtonInput<MouseButton>>().clone();
+    let alt = world
+        .resource::<ButtonInput<KeyCode>>()
+        .any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     let hover = world.resource::<ViewportHover>().0;
     let mut band = *world.resource::<RubberBand>();
 
     if mode != Mode::Select
+        || alt
         || world
             .get_resource::<super::feature_handles::FeatureGrab>()
             .is_some()

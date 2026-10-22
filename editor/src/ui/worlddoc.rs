@@ -694,7 +694,6 @@ pub fn default_bake_dir(world: &Path) -> Option<std::path::PathBuf> {
 
 /// Settles a finished bake/verify: status line and bake reload
 /// of the fresh document.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,7 +707,7 @@ mod tests {
             dir.join("bake.json"),
             serde_json::to_string(&json!({
                 "schema": 1,
-                "source": { "world": "Vael/world.xml", "viber_version": "0.1.0" },
+                "source": { "world": "world.xml", "viber_version": "0.1.0" },
                 "terrain": {
                     "world_size": 4000.0, "max_height": 200.0,
                     "heightmap": if with_heightmap { json!("terrain.baked.ahgt") } else { Value::Null },
@@ -763,7 +762,7 @@ mod tests {
         let text: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
 
         assert!(text.contains(&"Terreno"));
-        assert!(text.iter().any(|t| t.starts_with("origem: Vael")));
+        assert!(text.iter().any(|t| t.starts_with("origem: world.xml")));
         assert!(
             text.iter()
                 .any(|t| t.contains("mundo 4000") && t.contains("camadas grass"))

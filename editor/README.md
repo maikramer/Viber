@@ -18,7 +18,7 @@ camera replaces the game camera. **Play (F5)** saves and runs the world as a sep
 ## Layout
 
 ```
-┌ Toolbar: ▣ world.xml • · Save ──── [ Play · Play here · ⏸ · ⏹ ] ──── View · PT ─┐
+┌ Toolbar: ▣ world.xml • · Save · ↶ ↷ ──── [ Play · Play here · ⏸ · ⏹ ] ──── View · ? · PT ┐
 ├ Objects(+)┊ Viewport (editor camera) ────────────────┊ Inspector ────┤
 │ 🔍 search ┊ ▤ tool strip (3D mode: Q/W/E/R/B · T · F) ┊ identity card │
 │ world     ┊ 3D | UI | Script selector (top-center)    ┊ actions       │
@@ -45,8 +45,12 @@ document.
   a humanized name without the extension ("village.xml" → "Village" — the file icon already
   says it's a file); an include with a `translation`/`euler`/`scale` can be selected and
   dragged like a group, moving everything the file declares. The header has a **search
-  box** (Enter filters by name/tag, Esc clears). Each file is kept as its own
-  document so saving writes back only the files that changed (`src/scene/doc.rs`).
+  box** that filters **as you type** by name/tag (Enter applies, Esc clears), plus
+  **expand-all/collapse-all** buttons. With the pointer over the dock, ↑/↓ move the
+  selection (Shift extends), ← collapses or selects the parent, → expands or descends to
+  the first child, Home/End jump to the ends. Drag-and-drop shows a before/into/after
+  indicator. Each file is kept as its own document so saving writes back only the files
+  that changed (`src/scene/doc.rs`); the Files dock marks dirty files with an amber dot.
 - **Viewport** — Viber's editor camera renders into an image shown by a `ViewportNode`.
   Middle drag orbits, Shift + middle drag pans, wheel zooms; right drag looks around and WASD/QE
   fly while it is held (wheel changes fly speed, Shift boosts).
@@ -88,13 +92,29 @@ document.
   XML key in small gray: Enter commits (an empty value removes the attribute); the last
   row takes `key=value` to add one. Every typed field carries a hover tooltip with its unit.
 - **Selection & gizmo** — click in the viewport picks the most specific declared node under
-  the cursor and reveals it in the Objects dock (yellow bounds). Q select · W move · E rotate ·
-  R scale · T local/global · Ctrl snaps (1 m / 15° / 0.1) · Esc cancels a drag · F frames.
-  Releasing a drag commits one canonical pose edit (`translation`/`euler`/`scale`).
-- **History** — Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) undo/redo, Ctrl+D duplicate, Delete remove,
-  Ctrl+S save. Edits sync to the live scene immediately; kinds that can't spawn incrementally
-  (terrain features, sky, UI, spawners) are flagged in the toolbar as needing a reload —
-  **Ctrl+R** saves and relaunches the editor on the same world, keeping the selection.
+  the cursor and reveals it in the Objects dock (yellow bounds). **Ctrl+click toggles**,
+  **Shift+click adds**, a plain click on empty space clears the selection; every selected
+  root gets its own bounds outline. Q select · W move · E rotate · R scale · T local/global ·
+  **F frames the selection by its bounds**, **Shift+F frames everything** · Ctrl snaps by the
+  steps in **View → Snap** (defaults 1 m / 15° / 0.1) · Esc cancels a drag. Releasing a drag
+  commits one canonical pose edit (`translation`/`euler`/`scale`).
+- **History** — Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) undo/redo, **also on the toolbar arrows**
+  (dimmed when the stack is empty); Ctrl+D duplicate, Delete remove, Ctrl+S save. The History
+  dock marks the last saved state with a green “guardado” divider. Edits sync to the live
+  scene immediately; kinds that can't spawn incrementally (terrain features, sky, UI,
+  spawners) are flagged in the toolbar as needing a reload — **Ctrl+R** saves and relaunches
+  the editor on the same world, keeping the selection.
+- **Session** — preferences persist in `$XDG_CONFIG_HOME/viber/editor.json` (fallback
+  `~/.config/viber/editor.json`): dock sizes/visibility, active bottom tab, language, view
+  options, snap steps, window geometry, open scene tabs and their camera poses. CLI flags
+  (`--lang`, `--tab`, `--views`, `--mode`) still win. The editor autosaves dirty files every
+  2 minutes, **saves on window close and on Ctrl+Q**, and **Ctrl+W closes the active tab**
+  (after a successful save). Panels toggle with **Ctrl+B** (Objects), **Ctrl+I** (Inspector)
+  and **Ctrl+J** (bottom dock).
+- **Discovery & feedback** — **F1** opens the shortcut cheat sheet, **Ctrl+K** the command
+  palette (fuzzy PT/EN search over file, transform, view, play, panel and scene-tab actions).
+  Saves and errors appear as toasts above the status bar; the status bar also shows the active
+  tool, the snap steps while Ctrl is held and the fly speed.
 - **Console / Logs** — the Luau REPL and log ring buffer of the running game (Play). The Logs
   header has the **remote tree** button: dumps the running game's entity tree (`viber.tree`)
   into the panel — the lean Debugger.
@@ -150,18 +170,28 @@ document.
 - **Status dot** — the dot next to the status line is colored by game state: gray stopped,
   amber starting, green running, red failed.
 
+## Project plugins
+
+Game-specific authoring (quests, dialogues, items, shops, landmarks, progression, previews)
+lives in `<project>/editor/plugins/*.lua`, **not** in the editor. The editor only exposes
+generic capabilities: scene edits, selection, project-jailed files, prefs, declarative panels,
+palette commands, node templates and lint providers. Open the **Plugins** bottom tab to use
+them, or Ctrl+K for their commands. The full API is in [PLUGINS.md](PLUGINS.md).
+
 ## Usage
 
 ```bash
 # a partir da raiz do checkout Viber
-cargo run --manifest-path editor/Cargo.toml -- ../Vael/world.xml
 cargo run --manifest-path editor/Cargo.toml -- path/to/world.xml
 cargo run -- --screenshot out.png --frames 500   # capture the editor window and exit (QA)
-cargo run -- --select name=chapel --screenshot out.png   # select + frame a node first
-cargo run -- --tab files --screenshot out.png          # open a bottom-dock tab at startup
+cargo run -- --select name=well --screenshot out.png   # select + frame a node first
+cargo run -- --tab plugins --screenshot out.png        # open a bottom-dock tab at startup
 cargo run -- --mode ui --select id=vitals --screenshot out.png   # UI canvas + handles on a HUD node
 cargo run -- --mode script --screenshot out.png        # 3d | ui | script at startup
 ```
+
+Without a path, the editor looks for `world.xml` in the current directory, then for the
+`project.main-scene` declared in `config.yaml`. It does not know any particular game.
 
 Options: `--port <PORT>` for the Play bridge, `--viber-bin <PATH>` for the engine used by Play
 (default: `viber` on `PATH`, else `Viber/target/{release,debug}/viber`), `--lang pt|en` for the
@@ -213,8 +243,8 @@ Done (Fases 2–5 + polish):
 12. ✅ UI mode renders the game's UI into the viewport image (letterboxed 16:9) — the
     canvas handles land on the real rects.
 
-Next: live re-spawn of `<Vegetation>` after Regenerate (today Ctrl+R), Lua syntax colors
-in the script editor.
+Next: per-token Lua syntax colors in the script editor (the feathers `TextInput` renders a
+single span).
 
 13. ✅ **Regenerate re-spawns `<Vegetation>` live** (2026-10-15): the same transaction
     carries a canonical `set instances=<same value>` op, so the sync plans a respawn of
@@ -256,3 +286,11 @@ in the script editor.
     tags; Enter on an unchanged field no longer creates a ghost undo step; multi-file
     drops land side by side as ONE undo; every `StrKey` is bilingual and covered by the
     ALL test; `--screenshot --frames` clamps like the startup-error screen.
+
+19. ✅ **Usability pass** (2026-10-21): viewport Ctrl/Shift multi-select and outlines for
+    every selected root; F frames bounds, Shift+F frames all; configurable snap + View UI;
+    hierarchy live filter, expand/collapse all, arrow-key navigation and drop indicator;
+    persistent session prefs (docks, language, views, snap, window, tabs, camera); save on
+    close/Ctrl+Q and save-failure guards on tab switches; per-file dirty markers; panel
+    toggles; F1 cheat sheet; Ctrl+K command palette; toasts; toolbar undo/redo and a saved
+    marker in History.

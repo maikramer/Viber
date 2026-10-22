@@ -199,7 +199,9 @@ fn apply_search_input(world: &mut World) {
 /// Case-insensitive full-text scan of the world folder.
 fn scan(root: &std::path::Path, needle: &str) -> Vec<SearchHit> {
     let mut hits = Vec::new();
-    let needle = needle.to_ascii_lowercase();
+    // `to_ascii_lowercase` só dobra A-Z: «PÁTIO» não casava com «pátio» nem
+    // «coração» com «CORAÇÃO» (os nomes/quests do mundo são em português).
+    let needle = needle.to_lowercase();
     let skip_dir = |name: &str| {
         name.starts_with('.')
             || name == "target"
@@ -207,7 +209,14 @@ fn scan(root: &std::path::Path, needle: &str) -> Vec<SearchHit> {
             || name.ends_with(".data")
     };
     let mut stack = vec![root.to_path_buf()];
+    let mut visited = std::collections::HashSet::new();
     while let Some(dir) = stack.pop() {
+        // `is_dir()` segue symlinks: `loop -> .` fazia o scan entrar em
+        // ciclo e empurrar caminhos cada vez mais longos até OOM.
+        let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited.insert(canon) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -242,7 +251,7 @@ fn scan(root: &std::path::Path, needle: &str) -> Vec<SearchHit> {
                 .display()
                 .to_string();
             for (index, line) in content.lines().enumerate() {
-                if line.to_ascii_lowercase().contains(&needle) {
+                if line.to_lowercase().contains(&needle) {
                     hits.push(SearchHit {
                         path: rel.clone(),
                         line: index + 1,
@@ -385,14 +394,29 @@ fn hit_clicked(
 
 /// O valor de `key="value"` numa linha XML (aspas duplas ou simples).
 fn attr_value(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let rest = &line[start..];
-    let end = rest.find('"')?;
-    if end == 0 {
-        return None;
+    let bytes = line.as_bytes();
+    for quote in ['"', '\''] {
+        let needle = format!("{key}={quote}");
+        let mut from = 0;
+        while let Some(offset) = line[from..].find(&needle) {
+            let start = from + offset;
+            // Um nome de atributo começa depois de '<' ou de espaço: sem esta
+            // fronteira `surname="x"` casava como o atributo `name` e o clique
+            // saltava para o nó errado.
+            let boundary =
+                start == 0 || matches!(bytes[start - 1], b' ' | b'\t' | b'\r' | b'\n' | b'<');
+            if boundary {
+                let rest = &line[start + needle.len()..];
+                let end = rest.find(quote)?;
+                if end == 0 {
+                    return None;
+                }
+                return Some(rest[..end].to_owned());
+            }
+            from = start + key.len().max(1);
+        }
     }
-    Some(rest[..end].to_owned())
+    None
 }
 
 #[cfg(test)]
@@ -402,11 +426,21 @@ mod tests {
     #[test]
     fn attr_value_reads_quoted_values() {
         assert_eq!(
-            attr_value("<Entity name=\"chapel\" pos=\"0 0 0\">", "name"),
-            Some("chapel".to_owned())
+            attr_value("<Entity name=\"room\" pos=\"0 0 0\">", "name"),
+            Some("room".to_owned())
         );
-        assert_eq!(attr_value("<Entity name='x'>", "name"), None);
+        // O doc promete aspas simples: `<Entity name='x'>`.
+        assert_eq!(
+            attr_value("<Entity name='x'>", "name"),
+            Some("x".to_owned())
+        );
         assert_eq!(attr_value("<Entity>", "name"), None);
+        // `surname=` não é o atributo `name` (nem o primeiro valor ganha).
+        assert_eq!(
+            attr_value("<Entity surname=\"x\" name=\"y\">", "name"),
+            Some("y".to_owned())
+        );
+        assert_eq!(attr_value("<Entity surname=\"x\">", "name"), None);
     }
 
     #[test]

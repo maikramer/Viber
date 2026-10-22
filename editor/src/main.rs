@@ -4,6 +4,8 @@ use std::path::PathBuf;
 mod app;
 mod bridge;
 mod doc;
+mod plugins;
+mod prefs;
 mod scene;
 mod startup_error;
 mod ui;
@@ -18,7 +20,8 @@ mod viewport;
 pub struct Cli {
     /// World XML file to edit.
     ///
-    /// Sem caminho, abre `../Vael/world.xml` se o checkout do jogo estiver ao lado.
+    /// Sem caminho, procura `world.xml` na pasta atual ou a cena principal do
+    /// `config.yaml` do projeto.
     world: Option<PathBuf>,
 
     /// Bridge port for the game started by ▶ Play (default: first free port from 15702).
@@ -57,7 +60,7 @@ pub struct Cli {
     #[arg(long)]
     bridge: Option<u16>,
 
-    /// Select this node at startup and frame it (`name=well`, `world/village.xml#3`) — the
+    /// Select this node at startup and frame it (`name=well`, `world/town.xml#3`) — the
     /// same selectors as `viber scene`
     #[arg(long)]
     select: Option<String>,

@@ -687,6 +687,10 @@ pub fn covered_keys(tag: &str) -> Vec<&'static str> {
     if has_physics {
         keys.push("collider");
         keys.push("rigidbody");
+        // `body` é o alias de `rigidbody`: a secção Física já o edita (campo
+        // "Corpo · tipo"), por isso o fallback não pode mostrar uma segunda
+        // linha crua para o mesmo atributo.
+        keys.push("body");
     }
     for (_section, fields) in sections_for(tag) {
         for field in fields {
@@ -768,12 +772,17 @@ pub fn component_set(value: &str, key: &str, new: &str) -> String {
         };
         if k.trim().eq_ignore_ascii_case(key) {
             replaced = true;
+            // Campo limpo = REMOVE a chave: escrever `size: ` fazia o parser
+            // do collider falhar e apagar o collider inteiro.
+            if new.trim().is_empty() {
+                continue;
+            }
             out.push(format!("{key}: {new}"));
         } else {
             out.push(format!("{}: {}", k.trim(), v.trim()));
         }
     }
-    if !replaced {
+    if !replaced && !new.trim().is_empty() {
         out.push(format!("{key}: {new}"));
     }
     out.join("; ")
@@ -791,11 +800,22 @@ impl SectionOpen {
     }
 }
 
+/// State of the dynamic groups inside the Script section (`--@group`).
+#[derive(Resource, Debug, Default)]
+pub struct ScriptGroupOpen(pub HashSet<String>);
+
+/// Key of a collapsible section: a fixed inspector section or a script group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SectionTag {
+    Id(SectionId),
+    ScriptGroup(String),
+}
+
 /// A section header owns its body's visibility (the disclosure toggles it).
 #[derive(Component, Debug)]
 pub struct SectionBody {
     pub body: Entity,
-    pub section: SectionId,
+    pub section: SectionTag,
 }
 
 /// The buffered widget events (observers write; the exclusive system drains).
@@ -848,6 +868,7 @@ impl Plugin for PropertyPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PropertyEvents::default())
             .insert_resource(SectionOpen::with_defaults())
+            .insert_resource(ScriptGroupOpen::default())
             .add_observer(
                 |event: On<ValueChange<f32>>, mut events: ResMut<PropertyEvents>| {
                     events.0.push(PropertyEvent::Number {
@@ -895,6 +916,7 @@ impl Plugin for PropertyPlugin {
 /// reconstruir o painel; todos os outros toggles (disclosure das secções, checkboxes da
 /// Vista…) mudam aqui. Uma secção abre/fecha JÁ neste observer: retirar o `Checked` não
 /// é um `Changed`, e o [`sync_section_toggles`] nunca via o fecho.
+#[allow(clippy::too_many_arguments)]
 fn self_update_toggle(
     event: On<ValueChange<bool>>,
     fields: Query<(), With<FieldControl>>,
@@ -902,6 +924,7 @@ fn self_update_toggle(
     sections: Query<&SectionBody>,
     mut nodes: Query<&mut Node>,
     mut open: ResMut<SectionOpen>,
+    mut groups: ResMut<ScriptGroupOpen>,
     mut commands: Commands,
 ) {
     if fields.contains(event.source) {
@@ -928,10 +951,21 @@ fn self_update_toggle(
             Display::None
         };
     }
-    if event.value {
-        open.0.insert(info.section);
-    } else {
-        open.0.remove(&info.section);
+    match &info.section {
+        SectionTag::Id(section) => {
+            if event.value {
+                open.0.insert(*section);
+            } else {
+                open.0.remove(section);
+            }
+        }
+        SectionTag::ScriptGroup(group) => {
+            if event.value {
+                groups.0.insert(group.clone());
+            } else {
+                groups.0.remove(group);
+            }
+        }
     }
 }
 
@@ -942,6 +976,7 @@ pub fn render_sections(
     doc: &SceneDoc,
     node: &NodeRef,
     open: &SectionOpen,
+    groups: &ScriptGroupOpen,
     lang: Lang,
 ) {
     let Some(xml) = doc.node(node).cloned() else {
@@ -967,7 +1002,7 @@ pub fn render_sections(
     }
     // Script primeiro (como as "Script Variables" do Godot): é o que dá identidade à
     // instância — falas, loot, velocidades.
-    super::script_props::render(commands, parent, doc, node, &xml, open, lang);
+    super::script_props::render(commands, parent, doc, node, &xml, open, groups, lang);
     for (section, fields) in sections_for(&xml.tag) {
         let body = spawn_section(
             commands,
@@ -994,62 +1029,89 @@ pub fn spawn_section(
     open: &SectionOpen,
     title: String,
 ) -> Entity {
-    {
-        let expanded = open.0.contains(&section);
-        // HEADER primeiro, corpo depois (a ordem de spawn é a ordem visual).
-        let header = commands
-            .spawn((
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: px(6),
-                    margin: UiRect::top(px(6)),
-                    padding: UiRect::axes(px(6), px(4)),
-                    border_radius: BorderRadius::all(px(4)),
-                    ..default()
+    let expanded = open.0.contains(&section);
+    spawn_disclosure(commands, parent, SectionTag::Id(section), expanded, title)
+}
+
+/// A collapsible group inside the Script section (`--@group`). `open` keeps
+/// the expansion across inspector rebuilds; groups start closed.
+pub fn spawn_script_group(
+    commands: &mut Commands,
+    parent: Entity,
+    group: &str,
+    open: &ScriptGroupOpen,
+) -> Entity {
+    let expanded = open.0.contains(group);
+    spawn_disclosure(
+        commands,
+        parent,
+        SectionTag::ScriptGroup(group.to_owned()),
+        expanded,
+        group.to_owned(),
+    )
+}
+
+/// Header + body of a disclosure section; the caller fills the body.
+fn spawn_disclosure(
+    commands: &mut Commands,
+    parent: Entity,
+    section: SectionTag,
+    expanded: bool,
+    title: String,
+) -> Entity {
+    // HEADER primeiro, corpo depois (a ordem de spawn é a ordem visual).
+    let header = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                margin: UiRect::top(px(6)),
+                padding: UiRect::axes(px(6), px(4)),
+                border_radius: BorderRadius::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(crate::ui::theme::BG_HEADER),
+            ChildOf(parent),
+        ))
+        .id();
+    let body = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+                display: if expanded {
+                    Display::Flex
+                } else {
+                    Display::None
                 },
-                BackgroundColor(crate::ui::theme::BG_HEADER),
-                ChildOf(parent),
-            ))
-            .id();
-        let body = commands
-            .spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
-                    display: if expanded {
-                        Display::Flex
-                    } else {
-                        Display::None
-                    },
-                    padding: UiRect::new(px(8), px(2), px(4), px(2)),
-                    ..default()
-                },
-                ChildOf(parent),
-            ))
-            .id();
-        // Disclosure (chevron) — o estado inicial segue `SectionOpen`.
-        let mut toggle = commands.spawn_scene(bsn! {
-            @bevy::feathers::controls::FeathersDisclosureToggle
-        });
-        toggle.insert(ChildOf(header));
-        if expanded {
-            toggle.insert(bevy::ui::Checked);
-        }
-        commands
-            .spawn_scene(bsn! {
-                @caption(title)
-            })
-            .insert((
-                TextColor(crate::ui::theme::TEXT),
-                Pickable::IGNORE,
-                ChildOf(header),
-            ));
-        commands
-            .entity(header)
-            .insert(SectionBody { body, section });
-        body
+                padding: UiRect::new(px(8), px(2), px(4), px(2)),
+                ..default()
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    // Disclosure (chevron) — o estado inicial segue `SectionOpen`/`ScriptGroupOpen`.
+    let mut toggle = commands.spawn_scene(bsn! {
+        @bevy::feathers::controls::FeathersDisclosureToggle
+    });
+    toggle.insert(ChildOf(header));
+    if expanded {
+        toggle.insert(bevy::ui::Checked);
     }
+    commands
+        .spawn_scene(bsn! {
+            @caption(title)
+        })
+        .insert((
+            TextColor(crate::ui::theme::TEXT),
+            Pickable::IGNORE,
+            ChildOf(header),
+        ));
+    commands
+        .entity(header)
+        .insert(SectionBody { body, section });
+    body
 }
 
 /// Spawns one field row with the right control for its kind; returns the row (callers
@@ -1276,12 +1338,24 @@ fn field_label(lang: Lang, target: &FieldTarget) -> String {
 
 // ── Reading current values ──────────────────────────────────────────────────
 
+/// Valor-fonte de um componente: o attr pedido ou, para `rigidbody`, o alias
+/// `body` que a engine também aceita.
+fn component_value<'a>(xml: &'a XmlNode, attr: &'a str) -> Option<(&'a str, &'a str)> {
+    if let Some(value) = xml.attr(attr) {
+        return Some((attr, value));
+    }
+    if attr == "rigidbody" {
+        return xml.attr("body").map(|value| ("body", value));
+    }
+    None
+}
+
 fn attr_value(xml: &XmlNode, target: &FieldTarget) -> Option<String> {
     match target {
         FieldTarget::Attr { key } => xml.attr(key).map(str::to_owned),
         FieldTarget::Name => xml.attr("name").map(str::to_owned),
         FieldTarget::Component { attr, key } => {
-            xml.attr(attr).and_then(|value| component_get(value, key))
+            component_value(xml, attr).and_then(|(_, value)| component_get(value, key))
         }
         FieldTarget::NodeText => Some(xml.text.clone()),
         FieldTarget::TerrainBiomesCore | FieldTarget::TerrainBiomesBlend => None,
@@ -1421,6 +1495,9 @@ fn enum_options_of(target: &FieldTarget) -> Option<&'static [&'static str]> {
             attr: "rigidbody",
             key: "type",
         } => Some(BODY_KINDS),
+        // O dropdown de modelo do céu era desenhado mas a escolha caía em
+        // `None` e era descartada.
+        FieldTarget::Attr { key: "model" } => Some(SKY_MODELS),
         _ => None,
     }
 }
@@ -1463,7 +1540,11 @@ fn apply_number(world: &mut World, target: &FieldTarget, value: f32, is_final: b
             if *int {
                 value = value.round();
             }
-            if let Some((min, max)) = range {
+            if let Some((min, max)) = range
+                && min.is_finite()
+                && max.is_finite()
+                && min <= max
+            {
                 value = value.clamp(*min, *max);
             }
             value
@@ -1576,8 +1657,20 @@ fn apply_value(world: &mut World, target: &FieldTarget, value: &str) {
             (!value.is_empty()).then(|| value.to_owned()),
         ),
         FieldTarget::Component { attr, key } => {
-            let merged = component_set(xml.attr(attr).unwrap_or(""), key, value);
-            ((*attr).to_owned(), Some(merged))
+            // `body="fixed"` é o alias aceito pela engine para `rigidbody`:
+            // sem o ler/escrever aqui, o painel mostrava vazio e gravar um
+            // campo criava `rigidbody="gravity-scale: N"` (sem `type`), que
+            // o parser interpretava como corpo NONE e apagava o fixed.
+            let (actual, base): (String, String) = match xml.attr(attr) {
+                Some(value) => ((*attr).to_owned(), value.to_owned()),
+                None if *attr == "rigidbody" => match xml.attr("body") {
+                    Some(value) => ("body".to_owned(), value.to_owned()),
+                    None => ((*attr).to_owned(), String::new()),
+                },
+                None => ((*attr).to_owned(), String::new()),
+            };
+            let merged = component_set(&base, key, value);
+            (actual, (!merged.trim().is_empty()).then_some(merged))
         }
         FieldTarget::Prop { name, .. } => (
             viber::luau::exports::prop_attr(name),
@@ -1711,12 +1804,12 @@ fn field_applies(xml: &XmlNode, target: &FieldTarget) -> bool {
             tag.as_str(),
             "cuboid" | "box" | "sphere" | "cylinder" | "plane" | "capsule"
         ) {
-            return match (tag.as_str(), *key) {
-                ("cuboid" | "box" | "plane", "half-size") => true,
-                ("sphere", "radius") => true,
-                ("cylinder" | "capsule", "radius" | "half-height") => true,
-                _ => false,
-            };
+            return matches!(
+                (tag.as_str(), *key),
+                ("cuboid" | "box" | "plane", "half-size")
+                    | ("sphere", "radius")
+                    | ("cylinder" | "capsule", "radius" | "half-height")
+            );
         }
     }
     let shape = xml
@@ -1773,7 +1866,7 @@ pub fn sync_section_toggles(world: &mut World) {
         }
         let (body, section) = {
             let info = world.get::<SectionBody>(header).unwrap();
-            (info.body, info.section)
+            (info.body, info.section.clone())
         };
         let open = world.get::<bevy::ui::Checked>(checkbox).is_some();
         if let Some(mut node) = world.get_mut::<Node>(body)
@@ -1781,11 +1874,23 @@ pub fn sync_section_toggles(world: &mut World) {
         {
             node.display = if open { Display::Flex } else { Display::None };
         }
-        let mut state = world.resource_mut::<SectionOpen>();
-        if open {
-            state.0.insert(section);
-        } else {
-            state.0.remove(&section);
+        match section {
+            SectionTag::Id(section) => {
+                let mut state = world.resource_mut::<SectionOpen>();
+                if open {
+                    state.0.insert(section);
+                } else {
+                    state.0.remove(&section);
+                }
+            }
+            SectionTag::ScriptGroup(group) => {
+                let mut state = world.resource_mut::<ScriptGroupOpen>();
+                if open {
+                    state.0.insert(group);
+                } else {
+                    state.0.remove(&group);
+                }
+            }
         }
     }
 }
@@ -1827,6 +1932,13 @@ mod tests {
             component_set("dynamic", "type", "kinematic"),
             "type: kinematic"
         );
+        // Campo limpo = REMOVE a chave (escrever `size: ` apagava o collider
+        // inteiro no parser da engine).
+        assert_eq!(
+            component_set("shape: box; size: 2 1 2", "size", ""),
+            "shape: box"
+        );
+        assert_eq!(component_set("size: 2 1 2", "size", ""), "");
     }
 
     #[test]
@@ -1902,6 +2014,7 @@ mod tests {
             "scale",
             "collider",
             "rigidbody",
+            "body",
         ] {
             assert!(keys.contains(&alias), "{alias} devia estar coberto");
         }

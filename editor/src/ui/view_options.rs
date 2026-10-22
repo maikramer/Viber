@@ -17,9 +17,12 @@ use bevy::ui::Checked;
 use bevy::ui_widgets::Activate;
 use viber::editor_camera::{EditorCamState, EditorCamera};
 
-use super::strings::{Lang, StrKey, t};
+use super::strings::{Lang, LangTooltip, StrKey, t};
 use super::theme;
+use super::tooltip::Tooltip;
 use crate::bridge::{EngineStatus, ViberBridge, methods};
+use crate::viewport::gizmo::{MOVE_STEPS, ROTATE_STEPS, SCALE_STEPS, SnapSettings};
+use crate::viewport::gizmo_math::cycle_step;
 
 /// The view toggles.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +42,58 @@ pub enum CameraView {
     Right,
 }
 
+impl CameraView {
+    /// Stable key for the preferences file.
+    pub fn key(self) -> &'static str {
+        match self {
+            CameraView::Perspective => "perspective",
+            CameraView::Front => "front",
+            CameraView::Top => "top",
+            CameraView::Right => "right",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "perspective" => CameraView::Perspective,
+            "front" => CameraView::Front,
+            "top" => CameraView::Top,
+            "right" => CameraView::Right,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct GridToggle;
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct CollidersToggle;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SnapToggle;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SnapMoveButton;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SnapRotateButton;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SnapScaleButton;
+
+/// Which step a snap button shows.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapLabelKind {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+}
+
+/// Marks the caption text of a snap button (the value is rebuilt from state).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SnapLabel(pub SnapLabelKind);
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct PerspButton;
@@ -74,11 +124,13 @@ impl Plugin for ViewOptionsPlugin {
             .init_resource::<viber::physics::ColliderDebugToggle>()
             .add_observer(on_view_toggle)
             .add_observer(on_view_button)
+            .add_observer(on_snap_cycle)
             .add_systems(
                 Update,
                 (
                     (apply_startup_views, sync_edit_collider_debug).chain(),
                     render_view_panel,
+                    render_snap_settings,
                     close_view_panel_outside,
                     apply_projection,
                     apply_grid,
@@ -141,6 +193,34 @@ pub fn view_panel() -> impl Scene {
             --
             Node {
                 flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+            }
+            Tooltip(t(Lang::default(), StrKey::TipSnap))
+            LangTooltip(StrKey::TipSnap)
+            Children [
+                @FeathersCheckbox
+                SnapToggle
+                --
+                @caption(t(Lang::default(), StrKey::ViewSnap)) LangLabel(StrKey::ViewSnap)
+                Node { min_width: px(0), flex_grow: 1.0 }
+                Pickable::IGNORE
+            ]
+            --
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+            }
+            Children [
+                @snap_move_button()
+                --
+                @snap_rotate_button()
+                --
+                @snap_scale_button()
+            ]
+            --
+            Node {
+                flex_direction: FlexDirection::Row,
                 column_gap: px(4),
             }
             Children [
@@ -175,6 +255,39 @@ view_button_fn!(persp_button, PerspButton, ViewPersp);
 view_button_fn!(front_button, FrontButton, ViewFront);
 view_button_fn!(top_button, TopButton, ViewTop);
 view_button_fn!(right_button, RightButton, ViewRight);
+
+fn snap_move_button() -> impl Scene {
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn! { @caption("Mover") SnapLabel(SnapLabelKind::Move) },
+        }
+        Node { flex_shrink: 0.0 }
+        SnapMoveButton
+    }
+}
+
+fn snap_rotate_button() -> impl Scene {
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn! { @caption("Rodar") SnapLabel(SnapLabelKind::Rotate) },
+        }
+        Node { flex_shrink: 0.0 }
+        SnapRotateButton
+    }
+}
+
+fn snap_scale_button() -> impl Scene {
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn! { @caption("Escala") SnapLabel(SnapLabelKind::Scale) },
+        }
+        Node { flex_shrink: 0.0 }
+        SnapScaleButton
+    }
+}
 
 /// O observador que o botão da toolbar usa (o painel vive no editor root).
 pub fn view_options_clicked(
@@ -228,6 +341,8 @@ fn render_view_panel(
     panels: Query<Entity, With<ViewPanel>>,
     grid: Query<(Entity, Has<Checked>), With<GridToggle>>,
     colliders: Query<(Entity, Has<Checked>), With<CollidersToggle>>,
+    snap: Query<(Entity, Has<Checked>), With<SnapToggle>>,
+    settings: Res<SnapSettings>,
 ) {
     let Ok(panel) = panels.single() else {
         return;
@@ -259,6 +374,56 @@ fn render_view_panel(
             }
         }
     }
+    for (entity, checked) in &snap {
+        let is_on = settings.enabled;
+        if checked != is_on {
+            if is_on {
+                commands.entity(entity).insert(Checked);
+            } else {
+                commands.entity(entity).remove::<Checked>();
+            }
+        }
+    }
+}
+
+/// Rebuilds the snap button captions from the current steps (and the language).
+fn render_snap_settings(
+    settings: Res<SnapSettings>,
+    lang: Res<Lang>,
+    mut labels: Query<(&SnapLabel, &mut Text)>,
+) {
+    if !settings.is_changed() && !lang.is_changed() {
+        return;
+    }
+    for (label, mut text) in &mut labels {
+        let wanted = match label.0 {
+            SnapLabelKind::Move => format!(
+                "{} {} m",
+                t(*lang, StrKey::SnapMove),
+                step_text(settings.move_m)
+            ),
+            SnapLabelKind::Rotate => format!(
+                "{} {}°",
+                t(*lang, StrKey::SnapRotate),
+                step_text(settings.rotate_deg)
+            ),
+            SnapLabelKind::Scale => format!(
+                "{} {}",
+                t(*lang, StrKey::SnapScale),
+                step_text(settings.scale)
+            ),
+        };
+        if text.0 != wanted {
+            text.0 = wanted;
+        }
+    }
+}
+
+/// `1.0` → `1`, `0.25` → `0.25`, `0.10` → `0.1`.
+pub(crate) fn step_text(value: f32) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    let text = format!("{rounded:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// O toggle Vista → Colliders também acende o wireframe no mundo in-process
@@ -277,8 +442,10 @@ fn on_view_toggle(
     event: On<bevy::ui_widgets::ValueChange<bool>>,
     grid: Query<(), With<GridToggle>>,
     colliders: Query<(), With<CollidersToggle>>,
+    snap: Query<(), With<SnapToggle>>,
     bridge: Res<ViberBridge>,
     mut options: ResMut<ViewOptions>,
+    mut settings: ResMut<SnapSettings>,
 ) {
     // a checkbox emite ValueChange (o `Checked` é escrito pelo self-update do
     // PropertyPlugin); o valor novo vem no evento
@@ -291,6 +458,26 @@ fn on_view_toggle(
         if matches!(bridge.status, EngineStatus::Connected { .. }) {
             methods::colliders_toggle(&bridge.client, is_on).detach();
         }
+    } else if snap.contains(target) {
+        settings.enabled = is_on;
+    }
+}
+
+/// Cycles one snap step per click.
+fn on_snap_cycle(
+    event: On<Activate>,
+    move_buttons: Query<(), With<SnapMoveButton>>,
+    rotate_buttons: Query<(), With<SnapRotateButton>>,
+    scale_buttons: Query<(), With<SnapScaleButton>>,
+    mut settings: ResMut<SnapSettings>,
+) {
+    let target = event.event_target();
+    if move_buttons.contains(target) {
+        settings.move_m = cycle_step(settings.move_m, &MOVE_STEPS);
+    } else if rotate_buttons.contains(target) {
+        settings.rotate_deg = cycle_step(settings.rotate_deg, &ROTATE_STEPS);
+    } else if scale_buttons.contains(target) {
+        settings.scale = cycle_step(settings.scale, &SCALE_STEPS);
     }
 }
 
@@ -316,7 +503,12 @@ fn on_view_button(
     } else {
         return;
     };
-    match *view {
+    set_camera_view(*view, &mut cam);
+}
+
+/// Applies a named view to the orbit camera (also used by the palette).
+pub fn set_camera_view(view: CameraView, cam: &mut EditorCamState) {
+    match view {
         CameraView::Perspective => cam.pitch_deg = cam.pitch_deg.clamp(15.0, 85.0),
         CameraView::Front => {
             cam.yaw_deg = 0.0;
@@ -484,4 +676,19 @@ fn apply_grid(options: Res<ViewOptions>, cam: Res<EditorCamState>, mut gizmos: G
         Vec3::new(step, 0.0, step),
         Color::srgba(0.5, 0.6, 0.75, 0.22),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_step_text_is_compact() {
+        assert_eq!(step_text(1.0), "1");
+        assert_eq!(step_text(2.0), "2");
+        assert_eq!(step_text(0.1), "0.1");
+        assert_eq!(step_text(0.25), "0.25");
+        assert_eq!(step_text(15.0), "15");
+        assert_eq!(step_text(0.05), "0.05");
+    }
 }

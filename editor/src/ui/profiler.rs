@@ -44,7 +44,7 @@ impl Plugin for ProfilerPlugin {
 
 /// Polls `viber.debug.prof()` while the game runs; formats the snapshot.
 fn poll_profiler(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     lang: Res<Lang>,
     bridge: Res<ViberBridge>,
     mut state: ResMut<ProfilerState>,

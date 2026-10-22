@@ -47,7 +47,7 @@ impl Default for BridgeLogs {
 }
 
 /// Polls `viber.logs` while the engine bridge is connected.
-pub fn poll_logs(time: Res<Time>, bridge: Res<ViberBridge>, mut logs: ResMut<BridgeLogs>) {
+pub fn poll_logs(time: Res<Time<Real>>, bridge: Res<ViberBridge>, mut logs: ResMut<BridgeLogs>) {
     if !matches!(bridge.status, EngineStatus::Connected { .. }) {
         return;
     }
@@ -84,7 +84,10 @@ pub fn poll_logs(time: Res<Time>, bridge: Res<ViberBridge>, mut logs: ResMut<Bri
         match result {
             Ok(value) => {
                 let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                let start = text.len().saturating_sub(6000);
+                let mut start = text.len().saturating_sub(6000);
+                while !text.is_char_boundary(start) {
+                    start -= 1;
+                }
                 logs.tree_lines = text[start..]
                     .lines()
                     .map(|line| methods::LogEntry {

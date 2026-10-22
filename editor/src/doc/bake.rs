@@ -314,36 +314,6 @@ impl BakeDir {
 }
 
 #[cfg(test)]
-mod debug_real_bake {
-    use super::*;
-
-    /// Regressão do contrato real: o bake.json do simple-rpg (quando o
-    /// checkout o tem) tem de fazer parse — apanha drifts de schema entre o
-    /// emissor do motor e este reader (ex.: seed u64 vs u32).
-    #[test]
-    fn debug_parse_real_simple_rpg_bake() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../Vael/world.data/bake.json"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            eprintln!("bake real ausente ({path}) — skip");
-            return;
-        };
-        match serde_json::from_slice::<BakeDoc>(&bytes) {
-            Ok(doc) => {
-                println!(
-                    "OK: {} groups, schema {}",
-                    doc.spawn_groups.len(),
-                    doc.schema
-                )
-            }
-            Err(e) => panic!("ERRO SERDE: {e}"),
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -352,7 +322,7 @@ mod tests {
     fn fixture() -> serde_json::Value {
         json!({
             "schema": 1,
-            "source": { "world": "Vael/world.xml", "viber_version": "0.1.0" },
+            "source": { "world": "world.xml", "viber_version": "0.1.0" },
             "terrain": {
                 "world_size": 4000.0, "max_height": 200.0,
                 "heightmap": "terrain.baked.ahgt",
@@ -366,7 +336,7 @@ mod tests {
             "features": {
                 "pads": [ { "id": "pad-0", "at": [0.0, 0.0], "size": [120.0, 120.0],
                             "falloff": 20.0, "corner_radius": 18.0, "resolved_height": 46.3,
-                            "explicit_height": false, "source": "world/cities/discordia.xml" } ],
+                            "explicit_height": false, "source": "world/cities/town.xml" } ],
                 "lakes": [ { "id": "lake-0", "at": [-80.0, 104.0], "radius": 16.0, "depth": 5.0,
                              "water_level": 43.2, "outline": [[0.0, 0.0], [16.0, 0.0]],
                              "source": "world/water.xml" } ],
@@ -408,7 +378,7 @@ mod tests {
     fn parses_the_full_contract() {
         let doc: BakeDoc = serde_json::from_value(fixture()).unwrap();
         assert!(doc.schema_known());
-        assert_eq!(doc.source.world.as_deref(), Some("Vael/world.xml"));
+        assert_eq!(doc.source.world.as_deref(), Some("world.xml"));
         assert_eq!(doc.terrain.world_size, Some(4000.0));
         assert_eq!(doc.terrain.heightmap.as_deref(), Some("terrain.baked.ahgt"));
         assert_eq!(doc.terrain.layers, vec!["grass"]);

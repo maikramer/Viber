@@ -59,7 +59,14 @@ impl Plugin for StampToolPlugin {
 fn leave_stamp(world: &mut World) {
     world.resource_mut::<GizmoTool>().mode = Mode::Select;
     world.resource_mut::<ActiveStamp>().0 = None;
-    *world.resource_mut::<StampStroke>() = StampStroke::default();
+    // O contador de chaves NÃO recomeça em 0: a chave de coalescing só funde
+    // com a ÚLTIMA transação do undo, e reutilizar a 1.ª depois de um Esc
+    // fundia o traço novo no traço antigo (dois carimbos, um undo).
+    let next_key = world.resource::<StampStroke>().next_key;
+    *world.resource_mut::<StampStroke>() = StampStroke {
+        next_key,
+        ..Default::default()
+    };
 }
 
 /// Places stamps: press starts a stroke; dabs (time + spacing gated) insert
@@ -74,6 +81,15 @@ fn stamp_place(world: &mut World) {
             .open
     {
         world.resource_mut::<StampStroke>().key = None;
+        return;
+    }
+    // Alt+left é órbita da câmara, não um carimbo.
+    if world
+        .resource::<ButtonInput<KeyCode>>()
+        .any_pressed([KeyCode::AltLeft, KeyCode::AltRight])
+    {
+        world.resource_mut::<StampStroke>().key = None;
+        world.resource_mut::<StampStroke>().last = None;
         return;
     }
     let Some(asset) = world.resource::<ActiveStamp>().0.clone() else {

@@ -21,7 +21,7 @@ use viber::scene::ops::EditOp;
 use viber::xml::XmlNode;
 
 use super::doc::{NodeRef, SceneDoc};
-use super::property::{FieldDef, FieldKind, FieldTarget, SectionId, SectionOpen};
+use super::property::{FieldDef, FieldKind, FieldTarget, ScriptGroupOpen, SectionId, SectionOpen};
 use super::{PendingEdits, Selection};
 use crate::ui::icons::{self, fa, icon_caption};
 use crate::ui::strings::{Bi, Lang, StrKey, pick, t};
@@ -38,7 +38,7 @@ pub struct OpenScriptButton(pub String);
 /// The script of a node, resolved and parsed (None when the node has no `script=`).
 pub struct NodeScript {
     pub script: String,
-    /// Path relative to the world folder (what the Script mode lists).
+    /// Path relative to the project root (the form the Script mode lists).
     pub world_rel: String,
     pub exports: viber::luau::exports::ScriptExports,
     /// Read error (missing file) — the section still shows, with the error.
@@ -49,13 +49,12 @@ pub fn node_script(doc: &SceneDoc, xml: &XmlNode) -> Option<NodeScript> {
     let script = xml.attr("script")?.trim().to_owned();
     let scripts_dir = viber::scene::scripts_dir(doc);
     let path = viber::lint::resolve_script(&scripts_dir, &script);
-    let world_dir = doc
-        .world_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
+    // O Script mode (FilesState, search, problems) guarda caminhos relativos à
+    // RAIZ do projeto; `world_path().parent()` apontava para `scenes/` e o
+    // "Abrir script" de uma cena interior recebia um caminho ABSOLUTO (nenhuma
+    // linha da lista casava e o reload ia com esse caminho para o jogo).
     let world_rel = path
-        .strip_prefix(&world_dir)
+        .strip_prefix(&doc.root_dir)
         .unwrap_or(&path)
         .display()
         .to_string();
@@ -125,6 +124,7 @@ pub fn field_for(def: &ExportDef, lang: Lang) -> FieldDef {
 }
 
 /// Renders the Script section (nothing when the node has no script).
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     commands: &mut Commands,
     parent: Entity,
@@ -132,6 +132,7 @@ pub fn render(
     node: &NodeRef,
     xml: &XmlNode,
     open: &SectionOpen,
+    groups: &ScriptGroupOpen,
     lang: Lang,
 ) {
     let Some(script) = node_script(doc, xml) else {
@@ -170,18 +171,25 @@ pub fn render(
             ChildOf(line),
         ));
     }
+    // Campos sem grupo primeiro; depois as subsecções colapsáveis (`--@group`).
+    // O grupo é só apresentação — o XML e o `viber.prop` não mudam.
+    let mut grouped: Vec<(&str, Vec<&ExportDef>)> = Vec::new();
     for def in &script.exports.defs {
-        let field = field_for(def, lang);
-        let field_row = super::property::spawn_field(commands, body, doc, node, xml, &field, lang);
-        if xml.attr(&prop_attr(&def.name)).is_some() {
-            reset_button(
-                commands,
-                field_row,
-                &prop_attr(&def.name),
-                fa::ROTATE_LEFT,
-                StrKey::PropReset,
-                lang,
-            );
+        match def.group.as_deref() {
+            None => render_export(commands, body, doc, node, xml, def, lang),
+            Some(group) => {
+                if let Some((_, fields)) = grouped.iter_mut().find(|(name, _)| *name == group) {
+                    fields.push(def);
+                } else {
+                    grouped.push((group, vec![def]));
+                }
+            }
+        }
+    }
+    for (group, fields) in grouped {
+        let group_body = super::property::spawn_script_group(commands, body, group, groups);
+        for def in fields {
+            render_export(commands, group_body, doc, node, xml, def, lang);
         }
     }
     // `prop-*` the script does not export (typos, leftovers of a renamed export).
@@ -270,6 +278,31 @@ pub fn render(
         ),
     };
     super::property::spawn_field(commands, body, doc, node, xml, &groups, lang);
+}
+
+/// One exported prop: the typed field plus the revert button when the
+/// instance overrides the script default.
+fn render_export(
+    commands: &mut Commands,
+    parent: Entity,
+    doc: &SceneDoc,
+    node: &NodeRef,
+    xml: &XmlNode,
+    def: &ExportDef,
+    lang: Lang,
+) {
+    let field = field_for(def, lang);
+    let field_row = super::property::spawn_field(commands, parent, doc, node, xml, &field, lang);
+    if xml.attr(&prop_attr(&def.name)).is_some() {
+        reset_button(
+            commands,
+            field_row,
+            &prop_attr(&def.name),
+            fa::ROTATE_LEFT,
+            StrKey::PropReset,
+            lang,
+        );
+    }
 }
 
 /// The text field of one declared signal: its `connect-<signal>` attribute.

@@ -2,7 +2,9 @@
 //! Three drop zones per row (top = before, middle = into, bottom = after),
 //! one atomic `move` op with guards (never into the dragged subtree).
 
-use bevy::picking::events::{PointerDragDrop, PointerDragEnd, PointerDragStart};
+use bevy::picking::events::{
+    PointerDragDrop, PointerDragEnd, PointerDragLeave, PointerDragOver, PointerDragStart,
+};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
@@ -20,8 +22,40 @@ pub struct DragRow(pub NodeRef);
 #[derive(Resource, Debug, Default, Clone)]
 pub struct TreeDrag(pub Option<NodeRef>);
 
+/// Where a drop would land in a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DropZone {
+    #[default]
+    None,
+    Before,
+    Into,
+    After,
+}
+
+/// The row/zone highlighted while a row is dragged over another.
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub struct TreeDropHint {
+    pub node: Option<NodeRef>,
+    pub zone: DropZone,
+}
+
+impl TreeDropHint {
+    fn set(&mut self, node: Option<NodeRef>, zone: DropZone) {
+        if self.node != node || self.zone != zone {
+            self.node = node;
+            self.zone = zone;
+        }
+    }
+}
+
 /// Drag starts: record the node (left button only).
-pub fn drag_start(drag: On<PointerDragStart>, rows: Query<&DragRow>, mut state: ResMut<TreeDrag>) {
+pub fn drag_start(
+    drag: On<PointerDragStart>,
+    rows: Query<&DragRow>,
+    mut state: ResMut<TreeDrag>,
+    mut hint: ResMut<TreeDropHint>,
+) {
+    hint.set(None, DropZone::None);
     if drag.button != PointerButton::Primary {
         return;
     }
@@ -31,11 +65,60 @@ pub fn drag_start(drag: On<PointerDragStart>, rows: Query<&DragRow>, mut state: 
 }
 
 /// Drag ends without a valid drop: clears.
-pub fn drag_end(_drag: On<PointerDragEnd>, mut state: ResMut<TreeDrag>) {
+pub fn drag_end(
+    _drag: On<PointerDragEnd>,
+    mut state: ResMut<TreeDrag>,
+    mut hint: ResMut<TreeDropHint>,
+) {
     state.0 = None;
+    hint.set(None, DropZone::None);
+}
+
+/// Shows the before/into/after zone under the dragged row.
+pub fn drag_over(
+    over: On<PointerDragOver>,
+    rows: Query<&DragRow>,
+    nodes: Query<(&ComputedNode, &UiGlobalTransform)>,
+    mut hint: ResMut<TreeDropHint>,
+) {
+    let Ok(row) = rows.get(over.event_target()) else {
+        return;
+    };
+    let Ok((node, transform)) = nodes.get(over.event_target()) else {
+        return;
+    };
+    let zone = drop_zone(over.pointer.position, node, transform);
+    hint.set(Some(row.0.clone()), zone);
+}
+
+/// Leaving a row clears its hint (another `drag_over` sets the next one).
+pub fn drag_leave(_leave: On<PointerDragLeave>, mut hint: ResMut<TreeDropHint>) {
+    hint.set(None, DropZone::None);
+}
+
+/// The zone for a pointer position inside a row (logical pixels).
+pub fn drop_zone(pointer: Vec2, node: &ComputedNode, transform: &UiGlobalTransform) -> DropZone {
+    // `pointer.position` é lógico (winit); `ComputedNode`/`UiGlobalTransform`
+    // são FÍSICOS — sem o scale factor a zona antes/dentro/depois errava no HiDPI
+    let pointer = pointer / node.inverse_scale_factor();
+    let size = node.size();
+    let top_left = transform.translation - size * 0.5;
+    zone_for(pointer.y - top_left.y, size.y)
+}
+
+/// Pure zone split: top third before, middle into, bottom third after.
+pub fn zone_for(local_y: f32, height: f32) -> DropZone {
+    if local_y < height / 3.0 {
+        DropZone::Before
+    } else if local_y > height * 2.0 / 3.0 {
+        DropZone::After
+    } else {
+        DropZone::Into
+    }
 }
 
 /// Drop on a row: top/middle/bottom zones → one `move` op (guarded).
+#[allow(clippy::too_many_arguments)] // Bevy observer: one parameter per resource/query.
 pub fn drag_drop(
     drop: On<PointerDragDrop>,
     rows: Query<&DragRow>,
@@ -44,10 +127,12 @@ pub fn drag_drop(
     lang: Res<Lang>,
     mut state: ResMut<TreeDrag>,
     mut pending: ResMut<PendingEdits>,
+    mut hint: ResMut<TreeDropHint>,
 ) {
     let Some(dragged) = state.0.take() else {
         return;
     };
+    hint.set(None, DropZone::None);
     let Ok(row) = rows.get(drop.event_target()) else {
         return;
     };
@@ -58,27 +143,35 @@ pub fn drag_drop(
     let Ok((node, transform)) = nodes.get(drop.event_target()) else {
         return;
     };
-    // `pointer.position` é lógico (winit); `ComputedNode`/`UiGlobalTransform`
-    // são FÍSICOS — sem o scale factor a zona antes/dentro/depois errava no HiDPI
-    let pointer = drop.pointer.position / node.inverse_scale_factor();
-    let size = node.size();
-    let top_left = transform.translation - size * 0.5;
-    let local_y = pointer.y - top_left.y;
-    let (parent, index) = if local_y < size.y / 3.0 {
-        let Some(parent) = target.parent() else {
-            return;
-        };
-        (parent, target.path.last().copied().unwrap_or(0))
-    } else if local_y > size.y * 2.0 / 3.0 {
-        let Some(parent) = target.parent() else {
-            return;
-        };
-        (parent, target.path.last().copied().unwrap_or(0) + 1)
-    } else {
-        (
-            target.clone(),
-            doc.children(target).map_or(0, |kids| kids.len()),
-        )
+    let (parent, index) = match drop_zone(drop.pointer.position, node, transform) {
+        DropZone::Before => {
+            let Some(parent) = target.parent() else {
+                return;
+            };
+            (parent, target.path.last().copied().unwrap_or(0))
+        }
+        DropZone::After => {
+            let Some(parent) = target.parent() else {
+                return;
+            };
+            (parent, target.path.last().copied().unwrap_or(0) + 1)
+        }
+        DropZone::Into | DropZone::None => {
+            // Largar DENTRO de um `<Include>` escrevia o nó como filho do
+            // elemento no ficheiro pai — e a árvore mostra os filhos do
+            // FICHEIRO incluído, não esses: o nó desaparecia da árvore (e o
+            // loader ignora-os). Largar antes/depois continua válido.
+            if doc
+                .node(target)
+                .is_some_and(|xml| xml.tag.eq_ignore_ascii_case("include"))
+            {
+                return;
+            }
+            (
+                target.clone(),
+                doc.children(target).map_or(0, |kids| kids.len()),
+            )
+        }
     };
     // O motor remove o nó ANTES de inserir. No mesmo pai, um índice à frente
     // do sítio atual já desceu 1 — passar o índice cru caía uma posição à frente.
@@ -154,6 +247,18 @@ fn file_reaches(
         .any(|(_, child)| file_reaches(doc, *child, goal, depth + 1))
 }
 
+/// Attaches all three observers to a row entity (called from render_tree).
+pub fn attach(commands: &mut Commands, entity: Entity, node: &NodeRef) {
+    commands
+        .entity(entity)
+        .insert(DragRow(node.clone()))
+        .observe(drag_start)
+        .observe(drag_over)
+        .observe(drag_leave)
+        .observe(drag_end)
+        .observe(drag_drop);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +279,15 @@ mod tests {
         )
         .unwrap();
         SceneDoc::load(&dir.join("world.xml")).unwrap()
+    }
+
+    #[test]
+    fn drop_zone_splits_the_row_in_thirds() {
+        assert_eq!(zone_for(0.0, 30.0), DropZone::Before);
+        assert_eq!(zone_for(9.0, 30.0), DropZone::Before);
+        assert_eq!(zone_for(15.0, 30.0), DropZone::Into);
+        assert_eq!(zone_for(21.0, 30.0), DropZone::After);
+        assert_eq!(zone_for(29.0, 30.0), DropZone::After);
     }
 
     #[test]
@@ -220,14 +334,4 @@ mod tests {
         assert!(!drop_would_cycle(&doc, &crate_node, &barrel));
         assert!(!drop_would_cycle(&doc, &include, &crate_node));
     }
-}
-
-/// Attaches all three observers to a row entity (called from render_tree).
-pub fn attach(commands: &mut Commands, entity: Entity, node: &NodeRef) {
-    commands
-        .entity(entity)
-        .insert(DragRow(node.clone()))
-        .observe(drag_start)
-        .observe(drag_end)
-        .observe(drag_drop);
 }

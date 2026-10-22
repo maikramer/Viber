@@ -41,7 +41,7 @@ pub struct TabCamera {
 }
 
 /// The open scenes and the active one (the scene in the viewport).
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Clone)]
 pub struct SceneTabs {
     pub tabs: Vec<SceneTab>,
     pub active: usize,
@@ -172,6 +172,8 @@ pub fn scene_tab_bar() -> impl Scene {
 fn seed_first_tab(
     doc: Option<Res<SceneDoc>>,
     current: Option<Res<CurrentScene>>,
+    prefs: Option<Res<crate::prefs::EditorPrefs>>,
+    mut camera: Option<ResMut<viber::editor_camera::EditorCamState>>,
     mut tabs: ResMut<SceneTabs>,
 ) {
     if !tabs.tabs.is_empty() {
@@ -180,11 +182,43 @@ fn seed_first_tab(
     let Some(doc) = doc else {
         return;
     };
+    // Restore the tabs of the last session (the scene files must still exist);
+    // the world being opened becomes the active tab.
+    if let Some(prefs) = prefs.as_deref() {
+        for saved in &prefs.tabs {
+            let path = PathBuf::from(&saved.path);
+            if !path.is_file() {
+                continue;
+            }
+            let path = canonical(&path);
+            if tabs.tabs.iter().any(|tab| tab.path == path) {
+                continue;
+            }
+            tabs.tabs.push(SceneTab {
+                path: path.clone(),
+                title: scene_title(&path),
+                camera: saved.camera.map(Into::into),
+            });
+        }
+    }
     let path = doc.world_path().to_path_buf();
     let title = current
         .and_then(|c| c.title.clone())
         .unwrap_or_else(|| scene_title(&path));
     tabs.open(&path, title);
+    // The first scene never goes through `on_scene_loaded`'s "leaving" branch,
+    // so restore its camera here.
+    let active_path = tabs.tabs[tabs.active].path.clone();
+    if let Some(camera) = camera.as_deref_mut()
+        && let Some(pose) = prefs
+            .as_deref()
+            .and_then(|prefs| prefs.camera_for(&active_path))
+    {
+        camera.target = pose.target;
+        camera.yaw_deg = pose.yaw_deg;
+        camera.pitch_deg = pose.pitch_deg;
+        camera.distance = pose.distance;
+    }
 }
 
 /// A scene finished loading (tab switch, `viber.scene.change` from an agent, Ctrl+R):
@@ -199,6 +233,7 @@ fn on_scene_loaded(
     camera: Option<ResMut<viber::editor_camera::EditorCamState>>,
     terrain: Option<Res<viber::terrain::runtime::TerrainRuntime>>,
     lang: Res<Lang>,
+    mut prefs: Option<ResMut<crate::prefs::EditorPrefs>>,
 ) {
     let Some(event) = loaded.read().last().cloned() else {
         return;
@@ -221,6 +256,13 @@ fn on_scene_loaded(
             distance: cam.distance,
         });
     }
+    if !same_scene
+        && let Some(prefs) = prefs.as_mut()
+        && let Some(tab) = tabs.tabs.get(leaving)
+        && let Some(pose) = tab.camera
+    {
+        prefs.remember_camera(&tab.path, pose);
+    }
     let title = scene_title(&event.path);
     let index = tabs.open(&event.path, title.clone());
     // Reload da cena actual (Ctrl+R): a câmara ainda é esta. A aba só guarda a pose
@@ -235,12 +277,22 @@ fn on_scene_loaded(
                 camera.distance = pose.distance;
             }
             None => {
-                let ground = terrain
+                if let Some(pose) = prefs
                     .as_deref()
-                    .map(|t| t.sample(0.0, 0.0))
-                    .unwrap_or(0.0);
-                camera.target = Vec3::new(0.0, ground, 0.0);
-                camera.distance = 32.0;
+                    .and_then(|prefs| prefs.camera_for(&event.path))
+                {
+                    camera.target = pose.target;
+                    camera.yaw_deg = pose.yaw_deg;
+                    camera.pitch_deg = pose.pitch_deg;
+                    camera.distance = pose.distance;
+                } else {
+                    let ground = terrain
+                        .as_deref()
+                        .map(|t| t.sample(0.0, 0.0))
+                        .unwrap_or(0.0);
+                    camera.target = Vec3::new(0.0, ground, 0.0);
+                    camera.distance = 32.0;
+                }
             }
         }
     }
@@ -257,10 +309,25 @@ fn on_scene_loaded(
     commands.insert_resource(crate::scene::inspector::InspectorView::default());
     commands.insert_resource(crate::scene::add_node::AddNodeOpen::default());
     commands.insert_resource(crate::viewport::gizmo::SelectedEntity::default());
+    // Drags/menus/tasks do mundo antigo não podem sobreviver ao swap: os
+    // ids das entidades são reciclados e o commit escrevia no nó errado.
+    commands.insert_resource(crate::viewport::gizmo::GizmoInput::default());
+    commands.insert_resource(crate::viewport::rubber::RubberBand::default());
+    // Os marcadores de "arrasto em curso" têm de SAIR (existem só durante um
+    // drag). `insert_resource` deixava-os presentes e o gizmo/rubber ficavam
+    // desligados: o primeiro clique no viewport era engolido e, com uma
+    // feature selecionada em modo Select, o pick morria de vez.
+    commands.remove_resource::<crate::viewport::rubber::RubberGrab>();
+    commands.remove_resource::<crate::viewport::feature_handles::FeatureGrab>();
+    commands.insert_resource(crate::ui::context_menu::ContextMenu::default());
+    commands.insert_resource(super::problems::ProblemsTask::default());
     commands.insert_resource(crate::viewport::feature_handles::FeaturePoints::default());
     commands.insert_resource(crate::viewport::feature_handles::FeatureDrag::default());
     commands.insert_resource(crate::viewport::terrain_tool::Stroke::default());
     commands.insert_resource(crate::viewport::stamp_tool::StampStroke::default());
+    // O alvo do pincel é um SELECTOR de um <Scatter> da cena antiga: no mundo
+    // novo apontaria para outro nó (ou para nenhum) e cada dab falhava.
+    commands.insert_resource(crate::viewport::brush_panel::BrushTarget::default());
     commands.insert_resource(super::problems::ProblemsState::default());
     commands.insert_resource(super::history::HistoryState::default());
     commands.insert_resource(super::biomes::BiomesState::default());
@@ -464,7 +531,12 @@ fn process_open_requests(world: &mut World) {
         };
         return;
     };
-    crate::scene::save_world(world);
+    if let Err(error) = crate::scene::try_save_world(world) {
+        let status = format!("{}: {error:#}", t(lang, StrKey::SceneOpenFailed));
+        crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+        world.resource_mut::<EditStatus>().0 = status;
+        return;
+    }
     let request = ChangeScene::new(id, Arrival::Keep);
     if let Err(error) = viber::scene_loader::request_change(world, request) {
         world.resource_mut::<EditStatus>().0 =

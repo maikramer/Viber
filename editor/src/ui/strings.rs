@@ -73,6 +73,13 @@ pub enum StrKey {
     #[default]
     DockScene,
     DockInspector,
+    TreeExpandAll,
+    TreeCollapseAll,
+    CheatSheetTitle,
+    TipCheatSheet,
+    TipUndo,
+    TipRedo,
+    HistorySaved,
     TabConsole,
     TabLogs,
     TabWorldDoc,
@@ -127,6 +134,9 @@ pub enum StrKey {
     FilesInstance,
     FilesInstanceTip,
     TabGame,
+    TabPlugins,
+    PluginsEmpty,
+    PluginsBroken,
     GameClock,
     GameWeather,
     GameRain,
@@ -154,6 +164,11 @@ pub enum StrKey {
     ViewTitle,
     ViewGrid,
     ViewColliders,
+    ViewSnap,
+    SnapMove,
+    SnapRotate,
+    SnapScale,
+    TipSnap,
     ViewPersp,
     ViewFront,
     ViewTop,
@@ -257,6 +272,13 @@ impl StrKey {
         StrKey::FilesInstanceTip,
         StrKey::DockScene,
         StrKey::DockInspector,
+        StrKey::TreeExpandAll,
+        StrKey::TreeCollapseAll,
+        StrKey::CheatSheetTitle,
+        StrKey::TipCheatSheet,
+        StrKey::TipUndo,
+        StrKey::TipRedo,
+        StrKey::HistorySaved,
         StrKey::TabConsole,
         StrKey::TabLogs,
         StrKey::TabWorldDoc,
@@ -346,6 +368,9 @@ impl StrKey {
         StrKey::SecDayCycle,
         StrKey::SecBiomes,
         StrKey::TabGame,
+        StrKey::TabPlugins,
+        StrKey::PluginsEmpty,
+        StrKey::PluginsBroken,
         StrKey::GameClock,
         StrKey::GameWeather,
         StrKey::GameRain,
@@ -373,6 +398,11 @@ impl StrKey {
         StrKey::ViewTitle,
         StrKey::ViewGrid,
         StrKey::ViewColliders,
+        StrKey::ViewSnap,
+        StrKey::SnapMove,
+        StrKey::SnapRotate,
+        StrKey::SnapScale,
+        StrKey::TipSnap,
         StrKey::ViewPersp,
         StrKey::ViewFront,
         StrKey::ViewTop,
@@ -412,6 +442,55 @@ pub fn t(lang: Lang, key: StrKey) -> &'static str {
                 "Inspector"
             } else {
                 "Inspetor"
+            }
+        }
+        StrKey::TreeExpandAll => {
+            if en {
+                "Expand all"
+            } else {
+                "Expandir tudo"
+            }
+        }
+        StrKey::TreeCollapseAll => {
+            if en {
+                "Collapse all"
+            } else {
+                "Colapsar tudo"
+            }
+        }
+        StrKey::CheatSheetTitle => {
+            if en {
+                "Shortcuts"
+            } else {
+                "Atalhos"
+            }
+        }
+        StrKey::TipCheatSheet => {
+            if en {
+                "Shortcuts (F1)"
+            } else {
+                "Atalhos (F1)"
+            }
+        }
+        StrKey::TipUndo => {
+            if en {
+                "Undo (Ctrl+Z)"
+            } else {
+                "Desfazer (Ctrl+Z)"
+            }
+        }
+        StrKey::TipRedo => {
+            if en {
+                "Redo (Ctrl+Shift+Z)"
+            } else {
+                "Refazer (Ctrl+Shift+Z)"
+            }
+        }
+        StrKey::HistorySaved => {
+            if en {
+                "saved"
+            } else {
+                "guardado"
             }
         }
         StrKey::TabConsole => {
@@ -922,6 +1001,35 @@ pub fn t(lang: Lang, key: StrKey) -> &'static str {
                 "Colliders (jogo a correr)"
             }
         }
+        StrKey::ViewSnap => "Snap",
+        StrKey::SnapMove => {
+            if en {
+                "Move"
+            } else {
+                "Mover"
+            }
+        }
+        StrKey::SnapRotate => {
+            if en {
+                "Rotate"
+            } else {
+                "Rodar"
+            }
+        }
+        StrKey::SnapScale => {
+            if en {
+                "Scale"
+            } else {
+                "Escala"
+            }
+        }
+        StrKey::TipSnap => {
+            if en {
+                "Ctrl snaps by these steps"
+            } else {
+                "O Ctrl ajusta por estes passos"
+            }
+        }
         StrKey::ViewPersp => "Persp",
         StrKey::ViewFront => {
             if en {
@@ -1063,6 +1171,21 @@ pub fn t(lang: Lang, key: StrKey) -> &'static str {
                 "luz"
             }
         }
+        StrKey::TabPlugins => "Plugins",
+        StrKey::PluginsEmpty => {
+            if en {
+                "No plugin panels. Add Lua files to editor/plugins/."
+            } else {
+                "Sem painéis de plugins. Adiciona ficheiros Lua a editor/plugins/."
+            }
+        }
+        StrKey::PluginsBroken => {
+            if en {
+                "Broken plugin (the editor keeps the previous working version)"
+            } else {
+                "Plugin quebrado (o editor mantém a última versão boa)"
+            }
+        }
         StrKey::TabProblems => {
             if en {
                 "Problems"
@@ -1086,9 +1209,9 @@ pub fn t(lang: Lang, key: StrKey) -> &'static str {
         }
         StrKey::ProblemsRevalidateTip => {
             if en {
-                "Save and re-run the world lint (scripts, props, quests…)"
+                "Save and re-run the world lint (scripts, props, signals…)"
             } else {
-                "Grava e re-corre o lint do mundo (scripts, props, quests…)"
+                "Grava e re-corre o lint do mundo (scripts, props, signals…)"
             }
         }
         StrKey::BtnSave => {

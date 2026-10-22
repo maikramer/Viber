@@ -105,7 +105,7 @@ mod tests {
             "pong": true,
             "version": "0.1.0",
             "pid": 4242,
-            "world": "/home/x/Vael/world.xml"
+            "world": "/home/x/game/world.xml"
         });
         let ping: PingResponse = serde_json::from_value(value).unwrap();
         assert_eq!(
@@ -114,7 +114,7 @@ mod tests {
                 pong: true,
                 version: "0.1.0".into(),
                 pid: 4242,
-                world: Some("/home/x/Vael/world.xml".into()),
+                world: Some("/home/x/game/world.xml".into()),
             }
         );
     }

@@ -41,6 +41,19 @@ pub struct StatusDot;
 pub struct SaveButton;
 
 #[derive(Component, Debug, Clone, Copy, Default)]
+pub struct UndoButton;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RedoButton;
+
+/// The glyph inside the Undo/Redo buttons (dimmed when the stack is empty).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct UndoIcon;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RedoIcon;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub struct PlayButton;
 
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -106,6 +119,10 @@ pub fn toolbar() -> impl Scene {
             Tooltip(t(lang, StrKey::TipSave))
             LangTooltip(StrKey::TipSave)
             on(save_clicked)
+            --
+            @undo_button()
+            --
+            @redo_button()
             --
             @flex_spacer()
             --
@@ -186,6 +203,16 @@ pub fn toolbar() -> impl Scene {
             LangTooltip(StrKey::ViewTitle)
             on(super::view_options::view_options_clicked)
             --
+            // F1: the shortcut cheat sheet.
+            @FeathersToolButton {
+                @variant: ButtonVariant::Plain,
+                @caption: bsn! { @icon(fa::CIRCLE_QUESTION, 12.0, icons::ICON) },
+            }
+            super::cheatsheet::CheatSheetToggle
+            Tooltip(t(lang, StrKey::TipCheatSheet))
+            LangTooltip(StrKey::TipCheatSheet)
+            on(super::cheatsheet::cheat_sheet_clicked)
+            --
             // The language toggle: caption shows the active code (PT/EN), flipped by the
             // observer; `sync_lang_labels` rewrites it alongside every other label.
             @FeathersToolButton {
@@ -210,6 +237,32 @@ pub fn toolbar() -> impl Scene {
 /// The world name on the toolbar.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct WorldTitle;
+
+fn undo_button() -> impl Scene {
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn! { @icon(fa::ROTATE_LEFT, 12.0, icons::ICON_DIM) UndoIcon },
+        }
+        UndoButton
+        Tooltip(t(Lang::default(), StrKey::TipUndo))
+        LangTooltip(StrKey::TipUndo)
+        on(undo_clicked)
+    }
+}
+
+fn redo_button() -> impl Scene {
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn! { @icon(fa::ROTATE_RIGHT, 12.0, icons::ICON_DIM) RedoIcon },
+        }
+        RedoButton
+        Tooltip(t(Lang::default(), StrKey::TipRedo))
+        LangTooltip(StrKey::TipRedo)
+        on(redo_clicked)
+    }
+}
 
 /// A thin vertical hairline between toolbar groups.
 fn toolbar_separator() -> impl Scene {
@@ -368,6 +421,7 @@ pub fn update_status(
 }
 
 /// F5 plays, F6 pauses, F8 stops.
+#[allow(clippy::too_many_arguments)] // Bevy system: one parameter per resource/query.
 pub fn play_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
@@ -412,6 +466,54 @@ fn save_clicked(
 ) {
     if buttons.contains(activate.event_target()) {
         commands.queue(crate::scene::save_world);
+    }
+}
+
+fn undo_clicked(
+    activate: On<Activate>,
+    buttons: Query<(), With<UndoButton>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(activate.event_target()) {
+        commands.queue(crate::scene::undo_last);
+    }
+}
+
+fn redo_clicked(
+    activate: On<Activate>,
+    buttons: Query<(), With<RedoButton>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(activate.event_target()) {
+        commands.queue(crate::scene::redo_last);
+    }
+}
+
+/// Dims the arrows and names the next transaction in the tooltips.
+pub fn update_history_buttons(
+    history: Option<Res<viber::scene::ops::History>>,
+    mut icons: Query<(&mut TextColor, Option<&UndoIcon>, Option<&RedoIcon>)>,
+) {
+    let Some(history) = history else {
+        return;
+    };
+    if !history.is_changed() {
+        return;
+    }
+    let enabled = icons::ICON;
+    let disabled = Color::srgb(0.4, 0.42, 0.46);
+    for (mut color, undo, redo) in &mut icons {
+        let can = if undo.is_some() {
+            history.can_undo()
+        } else if redo.is_some() {
+            history.can_redo()
+        } else {
+            false
+        };
+        let wanted = if can { enabled } else { disabled };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
     }
 }
 
@@ -464,7 +566,7 @@ fn play_here_clicked(
 }
 
 /// O `play` do "from here": grava a pose-alvo da câmara de editor ANTES de lançar.
-fn play_from_here(world: &mut World) {
+pub(crate) fn play_from_here(world: &mut World) {
     let target = world
         .get_resource::<viber::editor_camera::EditorCamState>()
         .map(|camera| [camera.target.x, camera.target.z]);
@@ -499,6 +601,32 @@ pub fn poll_play_from_here(
 }
 
 /// Queues the freeze/resume call and flips the tracked state.
+pub(crate) fn toggle_pause(world: &mut World) {
+    if !matches!(
+        world.resource::<ViberBridge>().status,
+        EngineStatus::Connected { .. }
+    ) {
+        return;
+    }
+    let (wanted, task) = {
+        let bridge = world.resource::<ViberBridge>();
+        let wanted = !world.resource::<GamePause>().paused;
+        let task = if wanted {
+            methods::pause_game(&bridge.client)
+        } else {
+            methods::resume_game(&bridge.client)
+        };
+        (wanted, task)
+    };
+    let mut pause = world.resource_mut::<GamePause>();
+    pause.task = Some(task);
+    pause.paused = wanted;
+}
+
+pub(crate) fn stop(world: &mut World) {
+    world.resource_mut::<ViberBridge>().stop();
+}
+
 fn set_paused(pause: &mut GamePause, bridge: &ViberBridge, wanted: bool) {
     let task = if wanted {
         methods::pause_game(&bridge.client)
@@ -552,14 +680,14 @@ fn play_scene_clicked(_activate: On<Activate>, mut commands: Commands) {
 }
 
 /// "Jogar cena": como o Play, mas arranca na cena da aba ativa.
-fn play_scene(world: &mut World) {
+pub(crate) fn play_scene(world: &mut World) {
     let path = world.resource::<SceneDoc>().world_path().to_path_buf();
     play_path(world, path);
 }
 
 /// Saves (through the engine's editing API), then runs the GAME as a separate process —
 /// from the project's main scene (projects with scenes), whatever tab is open.
-fn play(world: &mut World) {
+pub(crate) fn play(world: &mut World) {
     let path = world.resource::<SceneDoc>().world_path().to_path_buf();
     let project = viber::project::Project::discover(&path);
     let path = if project.declared {

@@ -55,7 +55,14 @@ fn handle_drop(mut events: MessageReader<FileDragAndDrop>, mut commands: Command
                 .map(|runtime| runtime.sample(shifted.x, shifted.z))
                 .unwrap_or(shifted.y);
             let at = Vec3::new(shifted.x, y, shifted.z);
-            match viber::scene::catalog::glb_drop(&doc, &parent, path, [at.x, at.y, at.z]) {
+            // Um drop do SO traz caminho absoluto; a URL do asset tem de ser
+            // relativa à raiz do projeto (`/assets/...`).
+            let relative = std::path::Path::new(path)
+                .strip_prefix(&doc.root_dir)
+                .ok()
+                .map(|p| format!("/{}", p.to_string_lossy().replace('\\', "/")));
+            let url = relative.as_deref().unwrap_or(path.as_str());
+            match viber::scene::catalog::glb_drop(&doc, &parent, url, [at.x, at.y, at.z]) {
                 Ok(op) => {
                     names.push(
                         std::path::Path::new(path)

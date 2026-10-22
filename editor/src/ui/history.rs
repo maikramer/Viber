@@ -28,6 +28,8 @@ pub struct RedoEntry(pub usize);
 pub struct HistoryState {
     undo: Vec<String>,
     redo: Vec<String>,
+    /// Undos until the last saved state (`None` = none or unreachable).
+    saved: Option<usize>,
     dirty: bool,
     refresh: f32,
 }
@@ -43,7 +45,7 @@ impl Plugin for HistoryPlugin {
 
 /// Polls the engine's History (2 Hz — labels só mudam em transações).
 fn poll_history(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     history: Option<Res<History>>,
     doc: Res<viber::scene::doc::SceneDoc>,
     mut state: ResMut<HistoryState>,
@@ -62,11 +64,14 @@ fn poll_history(
     };
     let undo = history.undo_labels();
     let redo = history.redo_labels();
+    let saved = history.saved_position();
     if undo != state.undo.iter().map(String::as_str).collect::<Vec<_>>()
         || redo != state.redo.iter().map(String::as_str).collect::<Vec<_>>()
+        || saved != state.saved
     {
         state.undo = undo.iter().map(|s| s.to_string()).collect();
         state.redo = redo.iter().map(|s| s.to_string()).collect();
+        state.saved = saved;
         state.dirty = true;
     }
 }
@@ -98,7 +103,12 @@ fn render_history(
         ));
         return;
     }
-    // undo: a mais recente no fim — clicar na entrada i = undo (len-1-i)×
+    // undo: a mais recente no fim — clicar na entrada i = undo (len-1-i)×.
+    // `len-index` fazia a entrada MAIS RECENTE (o estado atual) desfazer uma
+    // edição e a mais antiga desfazer uma a mais.
+    if state.saved == Some(0) {
+        spawn_saved_marker(&mut commands, body, *lang);
+    }
     for (index, label) in state.undo.iter().enumerate() {
         let undos = state.undo.len() - 1 - index;
         commands
@@ -112,6 +122,9 @@ fn render_history(
             })
             .insert((UndoEntry(undos), ChildOf(body)))
             .observe(undo_clicked);
+        if state.saved == Some(index + 1) {
+            spawn_saved_marker(&mut commands, body, *lang);
+        }
     }
     // separador + redo (a próxima primeiro)
     if !state.redo.is_empty() {
@@ -141,6 +154,22 @@ fn render_history(
     }
     // observers for undo rows (spawn_scene above needs them attached after)
     // — see the observe calls below; spawn_scene with .observe needs the entity
+}
+
+/// A divider between the transactions and the last saved state.
+fn spawn_saved_marker(commands: &mut Commands, body: Entity, lang: Lang) {
+    let label = format!("— {} —", t(lang, StrKey::HistorySaved));
+    commands.spawn_scene(bsn! { @caption(label) }).insert((
+        TextColor(Color::srgb(0.5, 0.82, 0.58)),
+        TextFont::from_font_size(10.0),
+        Node {
+            margin: UiRect::vertical(px(3)),
+            padding: UiRect::horizontal(px(6)),
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(body),
+    ));
 }
 
 fn undo_clicked(activate: On<Activate>, entries: Query<&UndoEntry>, mut commands: Commands) {

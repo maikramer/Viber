@@ -21,7 +21,7 @@ use viber::scene::pose::{Pose, PoseParts, pose_op};
 
 use super::gizmo_math::{
     angle_delta, angle_on_plane, closest_on_axis, distance_to_polyline, distance_to_segment,
-    plane_basis, rotate_with_parents, snap, translate_with_parents,
+    framing_distance, plane_basis, rotate_with_parents, snap, translate_with_parents, union_bounds,
 };
 use super::{EditorViewport, ViewportHover};
 use crate::scene::doc::{NodeRef, SceneDoc};
@@ -39,10 +39,17 @@ const SNAP_MOVE: f32 = 1.0;
 const SNAP_ROTATE_DEG: f32 = 15.0;
 const SNAP_SCALE: f32 = 0.1;
 
-/// Passos de snap configuráveis (dialog Vista → Snap). Defaults = o que as
+/// Presets cycled by the Vista → Snap buttons.
+pub const MOVE_STEPS: [f32; 5] = [0.1, 0.25, 0.5, 1.0, 2.0];
+pub const ROTATE_STEPS: [f32; 5] = [5.0, 15.0, 30.0, 45.0, 90.0];
+pub const SCALE_STEPS: [f32; 4] = [0.05, 0.1, 0.25, 0.5];
+
+/// Passos de snap configuráveis (Vista → Snap). Defaults = o que as
 /// constantes eram.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct SnapSettings {
+    /// Ctrl snaps only while this is on.
+    pub enabled: bool,
     pub move_m: f32,
     pub rotate_deg: f32,
     pub scale: f32,
@@ -51,6 +58,7 @@ pub struct SnapSettings {
 impl Default for SnapSettings {
     fn default() -> Self {
         Self {
+            enabled: true,
             move_m: SNAP_MOVE,
             rotate_deg: SNAP_ROTATE_DEG,
             scale: SNAP_SCALE,
@@ -143,6 +151,7 @@ impl Plugin for GizmoPlugin {
                     track_cursor,
                     resolve_selected_entity,
                     tool_keys,
+                    frame_keys,
                     gizmo_interaction,
                     draw_selection,
                 )
@@ -217,9 +226,6 @@ fn tool_keys(
     hover: Res<ViewportHover>,
     mode: Res<crate::ui::mode_strip::EditorModeState>,
     mut tool: ResMut<GizmoTool>,
-    selected: Res<SelectedEntity>,
-    globals: Query<&GlobalTransform>,
-    mut camera: Option<ResMut<EditorCamState>>,
     add: Res<crate::scene::add_node::AddNodeOpen>,
     menu: Res<crate::ui::context_menu::ContextMenu>,
 ) {
@@ -231,7 +237,8 @@ fn tool_keys(
         .and_then(|f| f.get())
         .is_some_and(|entity| editable.contains(entity));
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    if typing || ctrl || buttons.pressed(MouseButton::Right) || !hover.0 {
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    if typing || ctrl || alt || buttons.pressed(MouseButton::Right) || !hover.0 {
         return;
     }
     // Fora do modo 3D, Q/W/E/R/T/F não armam (mesmo motivo do brush_keys).
@@ -251,13 +258,102 @@ fn tool_keys(
     if keys.just_pressed(KeyCode::KeyT) {
         tool.local = !tool.local;
     }
-    if keys.just_pressed(KeyCode::KeyF)
-        && let (Some(entity), Some(camera)) = (selected.0, camera.as_deref_mut())
-        && let Ok(global) = globals.get(entity)
+}
+
+/// F frames the selection by its bounds; Shift+F frames every scene node.
+fn frame_keys(world: &mut World) {
+    if world.resource::<crate::scene::add_node::AddNodeOpen>().0
+        || world
+            .resource::<crate::ui::context_menu::ContextMenu>()
+            .open
     {
-        let _ = viber::editor_camera::look_at(camera, global.translation());
-        camera.distance = camera.distance.min(60.0);
+        return;
     }
+    let keys = world.resource::<ButtonInput<KeyCode>>().clone();
+    if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+    let typing = world
+        .get_resource::<InputFocus>()
+        .and_then(InputFocus::get)
+        .is_some_and(|entity| world.get::<bevy::text::EditableText>(entity).is_some());
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let right = world
+        .resource::<ButtonInput<MouseButton>>()
+        .pressed(MouseButton::Right);
+    if typing
+        || ctrl
+        || alt
+        || right
+        || !world.resource::<ViewportHover>().0
+        || world.resource::<crate::ui::mode_strip::EditorModeState>().0
+            != crate::ui::mode_strip::EditorMode::ThreeD
+    {
+        return;
+    }
+    if shift {
+        frame_all(world);
+    } else {
+        let nodes = crate::scene::selection_roots(&world.resource::<Selection>().0);
+        frame_nodes(world, &nodes);
+    }
+}
+
+/// Points the orbit camera at the union of `bounds` (the orbit pose is kept).
+fn frame_bounds(world: &mut World, bounds: Vec<bevy::shape::Aabb3d>) -> bool {
+    let Some((center, radius)) = union_bounds(bounds) else {
+        return false;
+    };
+    let Some(mut camera) = world.get_resource_mut::<EditorCamState>() else {
+        return false;
+    };
+    let _ = viber::editor_camera::look_at(&mut camera, center);
+    camera.distance = framing_distance(radius);
+    true
+}
+
+/// Frames the given nodes; a selection without geometry falls back to the
+/// primary entity's translation (e.g. `<Sky>`-like nodes).
+pub(crate) fn frame_nodes(world: &mut World, nodes: &[NodeRef]) -> bool {
+    let entities: Vec<Entity> = nodes
+        .iter()
+        .filter_map(|node| entity_for_node(world, node))
+        .collect();
+    let bounds: Vec<bevy::shape::Aabb3d> = entities
+        .iter()
+        .filter_map(|entity| viber::bridge::selection::world_aabb_of(*entity, world))
+        .collect();
+    if frame_bounds(world, bounds) {
+        return true;
+    }
+    let Some(entity) = entities.first() else {
+        return false;
+    };
+    let Some(global) = world.get::<GlobalTransform>(*entity) else {
+        return false;
+    };
+    let target = global.translation();
+    let Some(mut camera) = world.get_resource_mut::<EditorCamState>() else {
+        return false;
+    };
+    let _ = viber::editor_camera::look_at(&mut camera, target);
+    camera.distance = 25.0;
+    true
+}
+
+/// Shift+F: the bounds of every spawned scene node.
+pub(crate) fn frame_all(world: &mut World) -> bool {
+    let entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<SceneSource>>();
+        query.iter(world).collect()
+    };
+    let bounds: Vec<bevy::shape::Aabb3d> = entities
+        .into_iter()
+        .filter_map(|entity| viber::bridge::selection::world_aabb_of(entity, world))
+        .collect();
+    frame_bounds(world, bounds)
 }
 
 /// Escala escreve `Transform.scale` nos eixos LOCAIS do nó. No modo global o
@@ -353,7 +449,10 @@ fn gizmo_interaction(world: &mut World) {
     let selected = world.resource::<SelectedEntity>().0;
     let buttons = world.resource::<ButtonInput<MouseButton>>().clone();
     let keys = world.resource::<ButtonInput<KeyCode>>().clone();
-    let snapping = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let snapping = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        && world.resource::<SnapSettings>().enabled;
+    // Alt+left é órbita da câmara; não é um clique no gizmo.
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     let eye = world
         .get_resource::<EditorCamState>()
         .map(EditorCamState::eye)
@@ -430,7 +529,7 @@ fn gizmo_interaction(world: &mut World) {
     if world.get_resource::<super::rubber::RubberGrab>().is_some() {
         return;
     }
-    if buttons.just_pressed(MouseButton::Left) && world.resource::<ViewportHover>().0 {
+    if buttons.just_pressed(MouseButton::Left) && !alt && world.resource::<ViewportHover>().0 {
         let Some(screen) = cursor.screen else {
             return;
         };
@@ -512,7 +611,8 @@ fn start_drag(
     let doc = world.resource::<SceneDoc>().clone();
     let mut sources = world.query::<(Entity, &SceneSource)>();
     let mut group = Vec::new();
-    for other in &world.resource::<Selection>().0 {
+    let selected_roots = crate::scene::selection_roots(&world.resource::<Selection>().0);
+    for other in &selected_roots {
         if *other == node || other.is_root() {
             continue;
         }
@@ -734,41 +834,87 @@ fn commit_drag(world: &mut World, mode: Mode, drag: Drag) {
         .push(format!("{verb} {selector}"), ops);
 }
 
-fn pick_at(world: &mut World, ray: Ray3d) {
-    let picked = viber::scene::pick::pick(world, ray.origin, *ray.direction, 4000.0);
-    if let Some(node) = picked.map(|picked| picked.node) {
-        let doc = world.resource::<SceneDoc>().clone();
-        reveal(&doc, &node, &mut world.resource_mut::<TreeExpansion>());
-        world.resource_mut::<Selection>().set_one(node);
+/// Applies a viewport click to the selection: Ctrl toggles, Shift adds, a plain
+/// click replaces, and a plain click on empty space clears (Godot-style).
+fn apply_pick(selection: &mut Selection, node: Option<NodeRef>, ctrl: bool, shift: bool) {
+    match (node, ctrl, shift) {
+        (Some(node), true, _) => selection.toggle(&node),
+        (Some(node), false, true) => selection.extend(&node),
+        (Some(node), false, false) => selection.set_one(node),
+        (None, true, _) | (None, false, true) => {}
+        (None, false, false) => selection.0.clear(),
     }
 }
 
-/// The selection's bounds and the gizmo handles.
+fn pick_at(world: &mut World, ray: Ray3d) {
+    let keys = world.resource::<ButtonInput<KeyCode>>().clone();
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let picked = viber::scene::pick::pick(world, ray.origin, *ray.direction, 4000.0)
+        .map(|picked| picked.node);
+    if let Some(node) = &picked {
+        let doc = world.resource::<SceneDoc>().clone();
+        reveal(&doc, node, &mut world.resource_mut::<TreeExpansion>());
+    }
+    let mut selection = world.resource_mut::<Selection>();
+    apply_pick(&mut selection, picked, ctrl, shift);
+}
+
+/// The live entity of a node when it maps to exactly one entity (the same
+/// rule as [`resolve_selected_entity`], for every selected node).
+fn entity_for_node(world: &World, node: &NodeRef) -> Option<Entity> {
+    if node.is_root() {
+        return None;
+    }
+    let doc = world.resource::<SceneDoc>();
+    let origin = doc.origin_of(node);
+    let mut sources = world.try_query::<(Entity, &SceneSource)>()?;
+    let mut matches = sources
+        .iter(world)
+        .filter(|(_, source)| source.0.as_ref() == &origin)
+        .map(|(entity, _)| entity);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// The selection's bounds (every selected root) and the gizmo handles.
 fn draw_selection(world: &mut World) {
-    let Some(entity) = world.resource::<SelectedEntity>().0 else {
-        return;
-    };
+    let selection = world.resource::<Selection>().clone();
+    let selected = world.resource::<SelectedEntity>().0;
     let tool = *world.resource::<GizmoTool>();
     let hover = world.resource::<GizmoInput>().hover;
     let eye = world
         .get_resource::<EditorCamState>()
         .map(EditorCamState::eye)
         .unwrap_or(Vec3::ZERO);
-    let bounds = viber::bridge::selection::world_aabb_of(entity, world);
-    let frame = gizmo_frame(world, entity, gizmo_local(tool), eye);
+    // Multi-select: every root gets an outline; the primary stays the bright one.
+    let mut bounds: Vec<(bevy::shape::Aabb3d, bool)> = Vec::new();
+    for node in crate::scene::selection_roots(&selection.0) {
+        if let Some(entity) = entity_for_node(world, &node)
+            && let Some(aabb) = viber::bridge::selection::world_aabb_of(entity, world)
+        {
+            bounds.push((aabb, selected == Some(entity)));
+        }
+    }
+    let frame = selected.and_then(|entity| gizmo_frame(world, entity, gizmo_local(tool), eye));
     let _ = world.run_system_cached_with(draw_handles, (bounds, frame, tool.mode, hover));
 }
 
 type DrawInput = (
-    Option<bevy::shape::Aabb3d>,
+    Vec<(bevy::shape::Aabb3d, bool)>,
     Option<(Vec3, f32, [Vec3; 3])>,
     Mode,
     Option<usize>,
 );
 
 fn draw_handles(In((bounds, frame, mode, hover)): In<DrawInput>, mut gizmos: Gizmos) {
-    if let Some(bounds) = bounds {
-        gizmos.aabb_3d(bounds, Transform::IDENTITY, Srgba::rgb(1.0, 0.85, 0.2));
+    for (bounds, primary) in bounds {
+        let color = if primary {
+            Srgba::rgb(1.0, 0.85, 0.2)
+        } else {
+            Srgba::rgb(0.72, 0.62, 0.18)
+        };
+        gizmos.aabb_3d(bounds, Transform::IDENTITY, color);
     }
     let Some((origin, size, axes)) = frame else {
         return;
@@ -799,5 +945,40 @@ fn draw_handles(In((bounds, frame, mode, hover)): In<DrawInput>, mut gizmos: Giz
                     .resolution(RING_SEGMENTS as u32);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(index: usize) -> NodeRef {
+        NodeRef {
+            file: 0,
+            path: vec![index],
+        }
+    }
+
+    #[test]
+    fn viewport_pick_honours_modifiers() {
+        let mut selection = Selection(vec![node(0), node(1)]);
+        // Shift adds without dropping the existing selection.
+        apply_pick(&mut selection, Some(node(2)), false, true);
+        assert_eq!(selection.0, [node(0), node(1), node(2)]);
+        // Ctrl toggles membership (both ways).
+        apply_pick(&mut selection, Some(node(1)), true, false);
+        assert_eq!(selection.0, [node(0), node(2)]);
+        apply_pick(&mut selection, Some(node(1)), true, false);
+        assert_eq!(selection.0, [node(0), node(2), node(1)]);
+        // A plain click replaces.
+        apply_pick(&mut selection, Some(node(3)), false, false);
+        assert_eq!(selection.0, [node(3)]);
+        // A plain click on empty space clears; modified empty clicks keep it.
+        apply_pick(&mut selection, None, false, true);
+        assert_eq!(selection.0, [node(3)]);
+        apply_pick(&mut selection, None, true, false);
+        assert_eq!(selection.0, [node(3)]);
+        apply_pick(&mut selection, None, false, false);
+        assert!(selection.0.is_empty());
     }
 }

@@ -65,6 +65,9 @@ impl Ahgt {
         }
         let width = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let depth = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        if width == 0 || depth == 0 {
+            bail!("AHGT: zero-sized grid ({width}x{depth})");
+        }
         let meta_len = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
         if HEADER_LEN + meta_len > bytes.len() {
             bail!("AHGT: truncated metadata block");
@@ -93,7 +96,7 @@ impl Ahgt {
             use std::io::Read;
             let mut zlib_failed = false;
             if zlib_wrapped {
-                let mut decoder = flate2::read::ZlibDecoder::new(payload);
+                let mut decoder = flate2::read::ZlibDecoder::new(payload).take(expected as u64 + 1);
                 if decoder.read_to_end(&mut raw).is_err() {
                     zlib_failed = true;
                     raw.clear();
@@ -101,7 +104,8 @@ impl Ahgt {
             }
             if !zlib_wrapped || zlib_failed {
                 raw.clear();
-                let mut decoder = flate2::read::DeflateDecoder::new(payload);
+                let mut decoder =
+                    flate2::read::DeflateDecoder::new(payload).take(expected as u64 + 1);
                 decoder
                     .read_to_end(&mut raw)
                     .context("AHGT: deflate decompress failed")?;
@@ -141,15 +145,18 @@ fn parse_meta(bytes: &[u8]) -> anyhow::Result<AhgtMeta> {
     }
     let meta: serde_json::Value =
         serde_json::from_slice(bytes).context("AHGT: invalid metadata JSON")?;
-    let pick = |name: &str| {
+    let pick = |name: &str, limit: f32| {
         meta[name].as_f64().and_then(|value| {
             let value = value as f32;
-            (value.is_finite() && value > 0.0 && value <= MAX_WORLD_SIZE).then_some(value)
+            (value.is_finite() && value > 0.0 && value <= limit).then_some(value)
         })
     };
     Ok(AhgtMeta {
-        world_size: pick("worldSize"),
-        max_height: pick("maxHeight"),
+        // A engine limita `worldSize` a 65536, mas `maxHeight` a 100 000
+        // (`src/terrain/heightmap.rs`): usar o limite do mundo aqui rejeitava
+        // heightmaps que o runtime aceita.
+        world_size: pick("worldSize", MAX_WORLD_SIZE),
+        max_height: pick("maxHeight", 100_000.0),
     })
 }
 

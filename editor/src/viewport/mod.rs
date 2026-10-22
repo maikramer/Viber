@@ -170,6 +170,8 @@ fn viewport_hovered_or_dragging(
 ) -> bool {
     hover.0
         || fly.dragging
+        || fly.orbit_drag
+        || buttons.just_released(MouseButton::Left)
         || buttons.just_released(MouseButton::Middle)
         || buttons.just_released(MouseButton::Right)
 }

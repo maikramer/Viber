@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, poll_once};
 use bevy::ui_widgets::Activate;
 use viber::lint::{LintReport, Severity};
+use viber::scene::doc::SceneDoc;
 
 use super::icons::{self, fa, icon_text};
 use super::strings::{Lang, StrKey, t};
@@ -29,6 +30,8 @@ pub struct ProblemsRevalidate;
 #[derive(Resource, Debug, Default)]
 pub struct ProblemsState {
     report: Option<LintReport>,
+    /// Findings dos plugins (`lint(ctx)`); vivem ao lado do lint da engine.
+    plugin_findings: Vec<crate::plugins::PluginFinding>,
     dirty: bool,
     was_dirty: bool,
     initial_done: bool,
@@ -39,16 +42,33 @@ pub struct ProblemsState {
 
 impl ProblemsState {
     fn counts(&self) -> (usize, usize) {
-        let Some(report) = &self.report else {
-            return (0, 0);
-        };
-        let errors = report
-            .findings
+        let engine_errors = self
+            .report
+            .as_ref()
+            .map(|report| {
+                report
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == Severity::Error)
+                    .count()
+            })
+            .unwrap_or(0);
+        let engine_warnings = self
+            .report
+            .as_ref()
+            .map(|report| report.findings.len())
+            .unwrap_or(0)
+            - engine_errors;
+        let plugin_errors = self
+            .plugin_findings
             .iter()
-            .filter(|f| f.severity == Severity::Error)
+            .filter(|finding| finding.severity == Severity::Error)
             .count();
-        let warnings = report.findings.len() - errors;
-        (errors, warnings)
+        let plugin_warnings = self.plugin_findings.len() - plugin_errors;
+        (
+            engine_errors + plugin_errors,
+            engine_warnings + plugin_warnings,
+        )
     }
 }
 
@@ -130,6 +150,7 @@ fn poll_problems(world: &mut World) {
 /// Lança o lint (sobre o ESTADO DO DISCO) em background task —
 /// compila todos os Luau, custa ~1 s.
 fn run_lint(world: &mut World) {
+    run_plugin_lint(world);
     if world.resource::<ProblemsTask>().0.is_some() {
         return; // já há um lint em voo
     }
@@ -143,6 +164,21 @@ fn run_lint(world: &mut World) {
     let task = bevy::tasks::AsyncComputeTaskPool::get()
         .spawn(async move { viber::lint::lint_world(&path).map_err(|error| format!("{error:#}")) });
     world.resource_mut::<ProblemsTask>().0 = Some(task);
+}
+
+/// Roda os `lint(ctx)` dos plugins. É síncrono: os JSON de conteúdo são
+/// pequenos e o resultado entra no painel antes do lint da engine terminar.
+fn run_plugin_lint(world: &mut World) {
+    let findings = {
+        let doc = world.resource::<SceneDoc>();
+        world
+            .get_resource::<crate::plugins::PluginHost>()
+            .map(|host| host.lint(doc))
+            .unwrap_or_default()
+    };
+    let mut state = world.resource_mut::<ProblemsState>();
+    state.plugin_findings = findings;
+    state.dirty = true;
 }
 
 /// The Problems tab badge: errors (red) or, without errors, warnings (amber).
@@ -228,10 +264,12 @@ fn render_problems(
             ));
     }
     commands.entity(body).despawn_related::<Children>();
-    let Some(report) = &state.report else {
-        return;
-    };
-    if report.findings.is_empty() {
+    let engine_findings: &[viber::lint::Finding] = state
+        .report
+        .as_ref()
+        .map(|report| report.findings.as_slice())
+        .unwrap_or(&[]);
+    if engine_findings.is_empty() && state.plugin_findings.is_empty() {
         commands.spawn((
             Text::new(t(*lang, StrKey::ProblemsClean).to_owned()),
             TextFont::from_font_size(12.0),
@@ -241,7 +279,7 @@ fn render_problems(
         ));
         return;
     }
-    for finding in &report.findings {
+    for finding in engine_findings {
         let (color, glyph) = match finding.severity {
             Severity::Error => (Color::srgb(0.95, 0.5, 0.42), fa::CIRCLE_XMARK),
             Severity::Warning => (Color::srgb(0.95, 0.78, 0.42), fa::TRIANGLE_EXCLAMATION),
@@ -300,6 +338,49 @@ fn render_problems(
             ));
         });
     }
+    for finding in &state.plugin_findings {
+        let (color, glyph) = match finding.severity {
+            Severity::Error => (Color::srgb(0.95, 0.5, 0.42), fa::CIRCLE_XMARK),
+            Severity::Warning => (Color::srgb(0.95, 0.78, 0.42), fa::TRIANGLE_EXCLAMATION),
+        };
+        commands
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: px(6),
+                    padding: UiRect::vertical(px(1)),
+                    ..default()
+                },
+                ChildOf(body),
+            ))
+            .with_children(|row| {
+                row.spawn((
+                    icon_text(glyph, 11.0, color),
+                    Node {
+                        width: px(14),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ));
+                row.spawn((
+                    Text::new(format!("{}:{}", finding.plugin, finding.kind)),
+                    TextFont::from_font_size(10.0),
+                    TextColor(icons::ICON_DIM),
+                    Node {
+                        width: px(120),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ));
+                row.spawn((
+                    Text::new(finding.message.clone()),
+                    TextFont::from_font_size(11.0),
+                    TextColor(Color::srgb(0.82, 0.86, 0.9)),
+                    Pickable::IGNORE,
+                ));
+            });
+    }
 }
 
 /// Uma linha de achado (kind + mensagem) — as de script abrem o `.lua`.
@@ -309,7 +390,7 @@ pub struct FindingRow {
     message: String,
 }
 
-/// Extrai o primeiro caminho `.lua` da mensagem (ex. `scripts/quests.lua:12`).
+/// Extrai o primeiro caminho `.lua` da mensagem (ex. `scripts/npc.lua:12`).
 fn extract_script_path(message: &str) -> Option<String> {
     let start = message.split_whitespace().find_map(|token| {
         let candidate = token.split(':').next()?;
@@ -329,6 +410,7 @@ fn finding_clicked(
     rows: Query<&FindingRow>,
     mut mode: ResMut<crate::ui::mode_strip::EditorModeState>,
     mut scripts: ResMut<crate::ui::mode_strip::ScriptState>,
+    doc: Res<SceneDoc>,
 ) {
     let Ok(row) = rows.get(click.event_target()) else {
         return;
@@ -339,7 +421,14 @@ fn finding_clicked(
     let Some(path) = extract_script_path(&row.message) else {
         return;
     };
-    scripts.selected = Some(path);
+    // O lint emite caminhos relativos ao scripts_dir; o editor guarda
+    // caminhos relativos à RAIZ do projeto.
+    let abs = viber::scene::scripts_dir(&doc).join(&path);
+    let rel = abs
+        .strip_prefix(&doc.root_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(path);
+    scripts.selected = Some(rel);
     mode.0 = crate::ui::mode_strip::EditorMode::Script;
 }
 
@@ -407,20 +496,20 @@ mod tests {
     #[test]
     fn extracts_script_paths_from_messages() {
         assert_eq!(
-            extract_script_path("script-syntax: scripts/quests.lua:12: unexpected 'end'"),
-            Some("scripts/quests.lua".to_owned())
+            extract_script_path("script-syntax: scripts/npc.lua:12: unexpected 'end'"),
+            Some("scripts/npc.lua".to_owned())
         );
         assert_eq!(
-            extract_script_path("script-ref: npc 'vael' refers to missing ./enemy.lua"),
+            extract_script_path("script-ref: npc 'wanderer' refers to missing ./enemy.lua"),
             Some("enemy.lua".to_owned())
         );
         assert_eq!(
-            extract_script_path("duplicate-name: two nodes 'chapel'"),
+            extract_script_path("duplicate-name: two nodes 'room'"),
             None
         );
         assert_eq!(
-            extract_script_path("script-syntax: 'scripts/merchant.lua': parse error"),
-            Some("scripts/merchant.lua".to_owned())
+            extract_script_path("script-syntax: 'scripts/npc.lua': parse error"),
+            Some("scripts/npc.lua".to_owned())
         );
     }
 }

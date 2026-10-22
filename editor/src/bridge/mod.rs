@@ -132,7 +132,7 @@ impl Plugin for BridgePlugin {
 }
 
 /// Waits for the game's bridge to answer `viber.ping`, and notices when the process exits.
-fn poll_engine(mut bridge: ResMut<ViberBridge>, time: Res<Time>) {
+fn poll_engine(mut bridge: ResMut<ViberBridge>, time: Res<Time<Real>>) {
     if let Some(mut child) = bridge.child.take() {
         match child.try_wait() {
             Ok(None) => bridge.child = Some(child),
@@ -148,6 +148,10 @@ fn poll_engine(mut bridge: ResMut<ViberBridge>, time: Res<Time>) {
                 return;
             }
             Err(error) => {
+                // O `child` saiu do resource no `take()`: sem kill/wait
+                // ficava órfão (zombie no Unix) e o `stop` já não o via.
+                let _ = child.kill();
+                let _ = child.wait();
                 bridge.status = EngineStatus::Failed(format!("game process check: {error}"));
                 return;
             }

@@ -26,10 +26,10 @@ pub struct AddNodeBody;
 
 /// A template row. O snippet é o do catálogo (duas linhas podem partilhar a
 /// tag `entity` — o contentor vazio e o volume físico).
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct TemplateButton {
-    pub tag: &'static str,
-    pub snippet: &'static str,
+    pub tag: String,
+    pub snippet: String,
 }
 
 /// The Scene dock's `+` button.
@@ -56,24 +56,30 @@ impl Plugin for AddNodeDialogPlugin {
     }
 }
 
-/// Esc closes the dialog.
+/// Esc closes the dialog (unless a text field owns the keyboard — o foco
+/// inicial é a JANELA, não `None`, por isso `focus.get().is_none()` nunca
+/// fechava o diálogo; o critério certo é "há um `EditableText` focado").
 fn toggle_add_node(
     keys: Res<ButtonInput<KeyCode>>,
     focus: Res<bevy::input_focus::InputFocus>,
+    editable: Query<(), With<bevy::text::EditableText>>,
     mut open: ResMut<AddNodeOpen>,
 ) {
-    if open.0 && keys.just_pressed(KeyCode::Escape) && focus.get().is_none() {
+    let typing = focus.get().is_some_and(|entity| editable.contains(entity));
+    if open.0 && keys.just_pressed(KeyCode::Escape) && !typing {
         open.0 = false;
     }
 }
 
 /// Shows/hides the panel and rebuilds its rows while open.
+#[allow(clippy::too_many_arguments)]
 fn render_add_node(
     mut commands: Commands,
     open: Res<AddNodeOpen>,
     doc: Res<SceneDoc>,
     selection: Res<Selection>,
     lang: Res<Lang>,
+    host: Option<Res<crate::plugins::PluginHost>>,
     mut panels: Query<&mut Node, With<AddNodePanel>>,
     bodies: Query<Entity, With<AddNodeBody>>,
 ) {
@@ -98,8 +104,16 @@ fn render_add_node(
     };
     let _ = doc;
     commands.entity(body).despawn_related::<Children>();
+    let plugin_templates = host.map(|host| host.node_templates()).unwrap_or_default();
+    let plugin_tags: std::collections::HashSet<&str> = plugin_templates
+        .iter()
+        .map(|info| info.spec.tag.as_str())
+        .collect();
     let mut last_group: Option<TemplateGroup> = None;
     for template in catalog::templates() {
+        if plugin_tags.contains(template.tag) {
+            continue;
+        }
         if last_group != Some(template.group) {
             last_group = Some(template.group);
             commands
@@ -132,12 +146,51 @@ fn render_add_node(
             })
             .insert((
                 TemplateButton {
-                    tag: template.tag,
-                    snippet: template.snippet,
+                    tag: template.tag.to_owned(),
+                    snippet: template.snippet.to_owned(),
                 },
                 ChildOf(body),
             ))
             .observe(insert_template);
+    }
+    if !plugin_templates.is_empty() {
+        commands.spawn((
+            Text::new(crate::ui::strings::pick(*lang, "Plugins", "Plugins")),
+            TextFont::from_font_size(11.0),
+            TextColor(icons::ICON_DIM),
+            Node {
+                margin: UiRect::new(px(4), px(0), px(8), px(2)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Pickable::IGNORE,
+            ChildOf(body),
+        ));
+        for info in plugin_templates {
+            let spec = info.spec;
+            commands
+                .spawn_scene(bsn! {
+                    @FeathersToolButton {
+                        @variant: ButtonVariant::Plain,
+                        @caption: bsn! {
+                            @icon_caption(
+                                icons::tag_icon(&spec.tag),
+                                spec.label.clone(),
+                                icons::tag_color(&spec.tag)
+                            )
+                        },
+                    }
+                    Node { justify_content: JustifyContent::FlexStart, flex_shrink: 0.0 }
+                })
+                .insert((
+                    TemplateButton {
+                        tag: spec.tag,
+                        snippet: spec.snippet,
+                    },
+                    ChildOf(body),
+                ))
+                .observe(insert_template);
+        }
     }
 }
 
@@ -153,8 +206,8 @@ fn insert_template(
     let Ok(button) = buttons.get(activate.event_target()) else {
         return;
     };
-    let tag = button.tag;
-    let snippet = button.snippet;
+    let tag = button.tag.clone();
+    let snippet = button.snippet.clone();
     let parent = match selection.primary().cloned() {
         // inserir DENTRO da seleção (um contentor) ou no raiz do mundo
         Some(node) => doc.selector(&node),
@@ -163,9 +216,9 @@ fn insert_template(
     let op = viber::scene::ops::EditOp::Insert {
         parent,
         index: None,
-        xml: snippet.to_string(),
+        xml: snippet,
     };
-    let label = format!("+ {}", crate::ui::strings::tag_display(*lang, tag));
+    let label = format!("+ {}", crate::ui::strings::tag_display(*lang, &tag));
     open.0 = false;
     commands.queue(move |world: &mut World| {
         world

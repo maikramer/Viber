@@ -236,6 +236,14 @@ fn paint(world: &mut World) {
     let buttons = world.resource::<ButtonInput<MouseButton>>().clone();
     let delta = world.resource::<Time<Real>>().delta();
     let brush = *world.resource::<TerrainBrush>();
+    // Alt+left é órbita: não pinta (e corta um traço a meio).
+    if world
+        .resource::<ButtonInput<KeyCode>>()
+        .any_pressed([KeyCode::AltLeft, KeyCode::AltRight])
+    {
+        world.resource_mut::<Stroke>().key = None;
+        return;
+    }
 
     if !buttons.pressed(MouseButton::Left) {
         world.resource_mut::<Stroke>().key = None;

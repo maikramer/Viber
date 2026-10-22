@@ -472,15 +472,27 @@ fn poll_game(world: &mut World) {
     if let Some(current) = info.as_mut() {
         match block_on(poll_once(current)) {
             Some(Ok(value)) => {
-                if let Some(result) = lua_result(&value, "game panel") {
-                    let lang = *world.resource::<Lang>();
-                    world.resource_mut::<GameState>().runtime = runtime_lines(result, lang);
-                    world.resource_mut::<GameState>().dirty = true;
+                // Falha do Luau (entidade fora do snapshot do jogo, nome
+                // ambíguo…) também LIMPA: deixar as linhas da entidade
+                // anterior era mostrar dados errados sob a nova seleção.
+                let lang = *world.resource::<Lang>();
+                let runtime = lua_result(&value, "game panel")
+                    .map(|result| runtime_lines(result, lang))
+                    .unwrap_or_default();
+                let mut state = world.resource_mut::<GameState>();
+                if state.runtime != runtime {
+                    state.runtime = runtime;
+                    state.dirty = true;
                 }
                 info = None;
             }
             Some(Err(error)) => {
                 warn!("game panel: info: {error}");
+                let mut state = world.resource_mut::<GameState>();
+                if !state.runtime.is_empty() {
+                    state.runtime.clear();
+                    state.dirty = true;
+                }
                 info = None;
             }
             None => {}
@@ -490,7 +502,7 @@ fn poll_game(world: &mut World) {
         world.resource_mut::<GameState>().info_task = Some(current);
     }
     // 3. a cada POLL: relê clock/weather e pede o info da seleção
-    let delta = world.resource::<Time>().delta_secs();
+    let delta = world.resource::<Time<Real>>().delta_secs();
     world.resource_mut::<GameState>().timer -= delta;
     if world.resource::<GameState>().timer > 0.0 {
         return;
@@ -513,18 +525,39 @@ fn poll_game(world: &mut World) {
                 .filter(|name| !name.is_empty())
         })
     };
-    if let Some(name) = name
-        && world.resource::<GameState>().info_task.is_none()
-    {
-        world.resource_mut::<GameState>().info_task =
-            Some(methods::lua_eval(&bridge, &info_call(&name)));
+    match name {
+        Some(name) if world.resource::<GameState>().info_task.is_none() => {
+            world.resource_mut::<GameState>().info_task =
+                Some(methods::lua_eval(&bridge, &info_call(&name)));
+        }
+        // Sem nome não há como perguntar ao jogo (os ids de entidade não são os
+        // do editor): limpa as linhas da entidade ANTERIOR em vez de as deixar
+        // a fingir que pertencem à nova seleção. A task em voo é descartada —
+        // se completasse, voltava a escrever as linhas antigas.
+        None => {
+            let mut state = world.resource_mut::<GameState>();
+            state.info_task = None;
+            if !state.runtime.is_empty() {
+                state.runtime.clear();
+                state.dirty = true;
+            }
+        }
+        _ => {}
     }
 }
 
 /// `viber.debug.info` no processo do JOGO. Os bits de entidade do editor não
 /// existem lá (a UI e os gizmos deslocam os índices) — o nome resolve.
 pub fn info_call(name: &str) -> String {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    // Escapa os controlos: um nome com `&#10;` (o próprio emit escreve
+    // newlines assim) produzia um literal Luau com quebra de linha e o
+    // painel de runtime falhava em ciclo.
+    let escaped = name
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\0', "\\0");
     format!("return viber.debug.info(\"{escaped}\")")
 }
 
@@ -598,7 +631,7 @@ mod tests {
 
     #[test]
     fn info_call_uses_the_node_name_and_escapes_quotes() {
-        assert_eq!(info_call("chapel"), "return viber.debug.info(\"chapel\")");
+        assert_eq!(info_call("room"), "return viber.debug.info(\"room\")");
         assert_eq!(info_call("a\"b"), "return viber.debug.info(\"a\\\"b\")");
     }
 }

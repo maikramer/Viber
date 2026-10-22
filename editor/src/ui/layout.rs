@@ -26,7 +26,7 @@ use bevy::feathers::display::caption;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontWeight};
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, ScrollArea};
 
 use super::canvas::canvas_overlay_scene;
 use super::console::{ConsoleBody, ConsoleHistory, ConsoleInput};
@@ -87,6 +87,42 @@ impl Default for DockSizes {
             left: SIDE_DOCK_PX,
             right: SIDE_DOCK_PX + 20.0,
             bottom: BOTTOM_DOCK_PX,
+        }
+    }
+}
+
+/// Which docks are visible (`Ctrl+B` / `Ctrl+I` / `Ctrl+J`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DockVisibility {
+    pub left: bool,
+    pub right: bool,
+    pub bottom: bool,
+}
+
+impl Default for DockVisibility {
+    fn default() -> Self {
+        Self {
+            left: true,
+            right: true,
+            bottom: true,
+        }
+    }
+}
+
+impl DockVisibility {
+    pub fn toggle(&mut self, side: DockSide) {
+        match side {
+            DockSide::Left => self.left = !self.left,
+            DockSide::Right => self.right = !self.right,
+            DockSide::Bottom => self.bottom = !self.bottom,
+        }
+    }
+
+    pub fn is_visible(self, side: DockSide) -> bool {
+        match side {
+            DockSide::Left => self.left,
+            DockSide::Right => self.right,
+            DockSide::Bottom => self.bottom,
         }
     }
 }
@@ -181,8 +217,43 @@ pub enum TabKind {
     Files,
     History,
     Game,
+    Plugins,
     Problems,
     Search,
+}
+
+impl TabKind {
+    /// Stable key for the preferences file.
+    pub fn key(self) -> &'static str {
+        match self {
+            TabKind::Console => "console",
+            TabKind::Logs => "logs",
+            TabKind::Profiler => "profiler",
+            TabKind::WorldDoc => "world",
+            TabKind::Files => "files",
+            TabKind::History => "history",
+            TabKind::Game => "game",
+            TabKind::Plugins => "plugins",
+            TabKind::Problems => "problems",
+            TabKind::Search => "search",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "console" => TabKind::Console,
+            "logs" => TabKind::Logs,
+            "profiler" => TabKind::Profiler,
+            "world" => TabKind::WorldDoc,
+            "files" => TabKind::Files,
+            "history" => TabKind::History,
+            "game" => TabKind::Game,
+            "plugins" | "plugin" => TabKind::Plugins,
+            "problems" => TabKind::Problems,
+            "search" => TabKind::Search,
+            _ => return None,
+        })
+    }
 }
 
 pub(crate) fn camera() -> impl Scene {
@@ -263,6 +334,15 @@ pub(crate) fn editor_root() -> impl Scene {
             --
             // Above the docks, under the tooltip: the Add node dialog (modal).
             @add_node_panel()
+            --
+            // Ctrl+K: the command palette.
+            @super::palette::palette_panel()
+            --
+            // F1: the shortcut cheat sheet (its own modal).
+            @super::cheatsheet::cheat_sheet_panel()
+            --
+            // Transient notifications above the status bar.
+            @super::toast::toast_root()
             --
             // Last child: the hover tooltip floats above every panel.
             @tooltip_root()
@@ -375,6 +455,32 @@ pub fn apply_dock_sizes(sizes: Res<DockSizes>, mut nodes: Query<(&DockSized, &mu
     }
 }
 
+/// Hides/shows each dock and its splitter.
+pub fn apply_dock_visibility(
+    visibility: Res<DockVisibility>,
+    mut nodes: Query<(&mut Node, Option<&DockSized>, Option<&Splitter>)>,
+) {
+    if !visibility.is_changed() {
+        return;
+    }
+    for (mut node, docked, splitter) in &mut nodes {
+        let Some(side) = docked
+            .map(|docked| docked.0)
+            .or_else(|| splitter.map(|splitter| splitter.0))
+        else {
+            continue;
+        };
+        let display = if visibility.is_visible(side) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
 /// The Add node dialog: a centered modal card over a full-window catcher.
 fn add_node_panel() -> impl Scene {
     bsn! {
@@ -448,6 +554,7 @@ fn scene_dock() -> impl Scene {
         @dock_frame()
         Node { width: px(SIDE_DOCK_PX), flex_shrink: 0.0 }
         DockSized(DockSide::Left)
+        crate::scene::tree::ObjectsDock
         Children [
             @dock_header()
             Children [
@@ -456,6 +563,24 @@ fn scene_dock() -> impl Scene {
                 @caption(t(Lang::default(), StrKey::DockScene)) LangLabel(StrKey::DockScene)
                 --
                 @flex_spacer()
+                --
+                @FeathersToolButton {
+                    @variant: ButtonVariant::Plain,
+                    @caption: bsn! { @icon(fa::CHEVRON_DOWN, 11.0, icons::ICON_DIM) },
+                }
+                crate::scene::tree::ExpandAllButton
+                Tooltip(t(Lang::default(), StrKey::TreeExpandAll))
+                LangTooltip(StrKey::TreeExpandAll)
+                on(crate::scene::tree::expand_all_clicked)
+                --
+                @FeathersToolButton {
+                    @variant: ButtonVariant::Plain,
+                    @caption: bsn! { @icon(fa::CHEVRON_RIGHT, 11.0, icons::ICON_DIM) },
+                }
+                crate::scene::tree::CollapseAllButton
+                Tooltip(t(Lang::default(), StrKey::TreeCollapseAll))
+                LangTooltip(StrKey::TreeCollapseAll)
+                on(crate::scene::tree::collapse_all_clicked)
                 --
                 @FeathersToolButton {
                     @variant: ButtonVariant::Plain,
@@ -581,6 +706,8 @@ fn inspector_dock() -> impl Scene {
                 padding: px(6),
             }
             InspectorBody
+            // Roda do rato / dois dedos sobre o painel movem o `ScrollPosition`.
+            ScrollArea
             Children []
         ]
     }
@@ -615,6 +742,8 @@ fn dock_tabs() -> impl Scene {
                 --
                 @editor_tab(TabKind::Game, fa::GEARS, StrKey::TabGame)
                 --
+                @editor_tab(TabKind::Plugins, fa::CIRCLE_NODES, StrKey::TabPlugins)
+                --
                 @editor_tab(TabKind::Profiler, fa::GAUGE_HIGH, StrKey::TabProfiler)
                 --
                 @editor_tab(TabKind::Search, fa::MAGNIFYING_GLASS, StrKey::TabSearch)
@@ -644,6 +773,9 @@ fn dock_tabs() -> impl Scene {
             --
             @tab_body(TabKind::Game)
             Children [ @game_body() ]
+            --
+            @tab_body(TabKind::Plugins)
+            Children [ @super::plugin_panel::plugin_panel_body() ]
             --
             @tab_body(TabKind::Problems)
             Children [ @problems_body() ]
@@ -741,6 +873,12 @@ fn status_bar() -> impl Scene {
             @status_cell(fa::OBJECT_GROUP)
             Children [ @caption("—") StatusBarSelection Pickable::IGNORE ]
             --
+            @status_cell(fa::ARROWS_UP_DOWN_LEFT_RIGHT)
+            Children [ @caption("—") StatusBarTool Pickable::IGNORE ]
+            --
+            @status_cell(fa::COMPASS)
+            Children [ @caption("—") StatusBarSnap Pickable::IGNORE ]
+            --
             @status_cell(fa::GAUGE_HIGH)
             Children [ @caption("—") StatusBarDirty Pickable::IGNORE ]
         ]
@@ -767,6 +905,10 @@ pub struct StatusBarCursor;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StatusBarSelection;
 #[derive(Component, Debug, Clone, Copy, Default)]
+pub struct StatusBarTool;
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct StatusBarSnap;
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StatusBarDirty;
 
 /// Refreshes the status bar from the live state.
@@ -778,15 +920,38 @@ pub fn update_status_bar(
     runtime: Option<Res<viber::terrain::runtime::TerrainRuntime>>,
     selection: Res<crate::scene::Selection>,
     doc: Res<viber::scene::doc::SceneDoc>,
-    time: Res<Time>,
+    tool: Res<crate::viewport::gizmo::GizmoTool>,
+    snap: Res<crate::viewport::gizmo::SnapSettings>,
+    fly: Res<crate::viewport::nav::FlyState>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
     mut cursor_label: Query<&mut Text, With<StatusBarCursor>>,
     mut selection_label: Query<&mut Text, (With<StatusBarSelection>, Without<StatusBarCursor>)>,
+    mut tool_label: Query<
+        &mut Text,
+        (
+            With<StatusBarTool>,
+            Without<StatusBarCursor>,
+            Without<StatusBarSelection>,
+        ),
+    >,
+    mut snap_label: Query<
+        &mut Text,
+        (
+            With<StatusBarSnap>,
+            Without<StatusBarCursor>,
+            Without<StatusBarSelection>,
+            Without<StatusBarTool>,
+        ),
+    >,
     mut dirty_label: Query<
         &mut Text,
         (
             With<StatusBarDirty>,
             Without<StatusBarCursor>,
             Without<StatusBarSelection>,
+            Without<StatusBarTool>,
+            Without<StatusBarSnap>,
         ),
     >,
     mut last_at: Local<Option<Vec3>>,
@@ -822,6 +987,39 @@ pub fn update_status_bar(
         && text.0 != selection_text
     {
         text.0 = selection_text;
+    }
+    let tool_text = match tool.mode {
+        crate::viewport::gizmo::Mode::Select => pick(*lang, "Selecionar", "Select"),
+        crate::viewport::gizmo::Mode::Translate => pick(*lang, "Mover", "Move"),
+        crate::viewport::gizmo::Mode::Rotate => pick(*lang, "Rodar", "Rotate"),
+        crate::viewport::gizmo::Mode::Scale => pick(*lang, "Escala", "Scale"),
+        crate::viewport::gizmo::Mode::Terrain => pick(*lang, "Terreno", "Terrain"),
+        crate::viewport::gizmo::Mode::Stamp => pick(*lang, "Carimbo", "Stamp"),
+    };
+    if let Ok(mut text) = tool_label.single_mut()
+        && text.0 != tool_text
+    {
+        text.0 = tool_text.to_owned();
+    }
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let snap_text = if fly.dragging {
+        format!("{} {:.0} m/s", pick(*lang, "Voo", "Fly"), fly.speed)
+    } else if !snap.enabled {
+        pick(*lang, "Snap desligado", "Snap off").to_owned()
+    } else if ctrl {
+        format!(
+            "Snap {} m · {}° · {}",
+            super::view_options::step_text(snap.move_m),
+            super::view_options::step_text(snap.rotate_deg),
+            super::view_options::step_text(snap.scale)
+        )
+    } else {
+        pick(*lang, "Snap: Ctrl", "Snap: Ctrl").to_owned()
+    };
+    if let Ok(mut text) = snap_label.single_mut()
+        && text.0 != snap_text
+    {
+        text.0 = snap_text;
     }
     // `dirty_paths()` devolve um Vec<String> formatado — só o chama se há
     // realmente ficheiros sujos (o caso comum é o contador de fps)
@@ -1094,6 +1292,7 @@ pub fn apply_startup_tab(
         "profiler" | "prof" => TabKind::Profiler,
         "history" | "hist" => TabKind::History,
         "game" | "jogo" => TabKind::Game,
+        "plugins" | "plugin" => TabKind::Plugins,
         "problems" | "problemas" => TabKind::Problems,
         "search" | "busca" | "buscar" => TabKind::Search,
         _ => return,

@@ -2,6 +2,8 @@
 //! the angle around a ring, and snapping. No ECS — unit-tested on its own.
 
 use bevy::math::{Affine3A, Quat, Vec2, Vec3};
+use bevy::shape::Aabb3d;
+use viber::editor_camera::{MAX_DISTANCE, MIN_DISTANCE};
 
 /// Local translation of a grouped node after the primary moved by `delta_local`
 /// in its own parent space.
@@ -88,6 +90,15 @@ pub fn plane_basis(axis: Vec3) -> (Vec3, Vec3) {
     (u, v)
 }
 
+/// The step after `current` in `steps` (wraps to the first; an unknown value
+/// starts at the first step).
+pub fn cycle_step(current: f32, steps: &[f32]) -> f32 {
+    match steps.iter().position(|step| (*step - current).abs() < 1e-4) {
+        Some(index) => steps[(index + 1) % steps.len()],
+        None => steps.first().copied().unwrap_or(current),
+    }
+}
+
 /// `value` rounded to the nearest multiple of `step` (no-op for `step <= 0`).
 pub fn snap(value: f32, step: f32) -> f32 {
     if step <= 0.0 {
@@ -95,6 +106,26 @@ pub fn snap(value: f32, step: f32) -> f32 {
     } else {
         (value / step).round() * step
     }
+}
+
+/// Center and bounding radius of the union of `bounds` (`None` when empty).
+pub fn union_bounds(bounds: impl IntoIterator<Item = Aabb3d>) -> Option<(Vec3, f32)> {
+    let mut iter = bounds.into_iter();
+    let first = iter.next()?;
+    let (mut min, mut max) = (first.min, first.max);
+    for bounds in iter {
+        min = min.min(bounds.min);
+        max = max.max(bounds.max);
+    }
+    let union = Aabb3d::from_min_max(min, max);
+    let center = (union.min + union.max) * 0.5;
+    let radius = union.min.distance(union.max) / 2.0;
+    Some((center.into(), radius))
+}
+
+/// Camera distance that leaves a radius-`radius` sphere comfortably in view.
+pub fn framing_distance(radius: f32) -> f32 {
+    (radius * 2.5).clamp(MIN_DISTANCE, MAX_DISTANCE)
 }
 
 /// Shortest signed difference `to - from` of two angles, in (-π, π].
@@ -227,5 +258,28 @@ mod tests {
             (angle_delta(PI - 0.1, -PI + 0.1) - 0.2).abs() < 1e-5,
             "wraps through ±π"
         );
+    }
+
+    #[test]
+    fn preset_steps_cycle_and_wrap() {
+        let steps = [0.1, 0.25, 0.5, 1.0];
+        assert_eq!(cycle_step(0.1, &steps), 0.25);
+        assert_eq!(cycle_step(1.0, &steps), 0.1, "wraps");
+        assert_eq!(cycle_step(0.7, &steps), 0.1, "unknown starts at the first");
+        assert_eq!(cycle_step(1.0, &[]), 1.0, "empty keeps the value");
+    }
+
+    #[test]
+    fn framing_uses_the_union_of_the_bounds() {
+        let a = Aabb3d::from_min_max(Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.0, 1.0));
+        let b = Aabb3d::from_min_max(Vec3::new(3.0, 0.0, -1.0), Vec3::new(5.0, 2.0, 1.0));
+        let (center, radius) = union_bounds([a, b]).unwrap();
+        assert_eq!(center, Vec3::new(2.0, 1.0, 0.0));
+        assert!((radius - (44f32.sqrt() / 2.0)).abs() < 1e-5);
+        assert!(union_bounds([]).is_none());
+        // Small objects keep the minimum orbit distance; huge ones stay under the cap.
+        assert_eq!(framing_distance(0.1), MIN_DISTANCE);
+        assert_eq!(framing_distance(10_000.0), MAX_DISTANCE);
+        assert_eq!(framing_distance(10.0), 25.0);
     }
 }

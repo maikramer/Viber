@@ -4,6 +4,9 @@
 //! terrain under the cursor), scenes → open in a new editor window, any file →
 //! open externally.
 
+// Helpers (`row_color`, `is_dirty_path`) live after the tests for historical reasons.
+#![allow(clippy::items_after_test_module)]
+
 use bevy::feathers::controls::{ButtonVariant, FeathersToolButton};
 use bevy::feathers::display::caption;
 use bevy::feathers::theme::ThemeBackgroundColor;
@@ -14,7 +17,7 @@ use viber::scene::doc::SceneDoc;
 use viber::scene::files::{self, FileEntry, FileKind};
 
 use super::icons::{self, fa, icon_caption, icon_text};
-use super::strings::{Lang, StrKey, t};
+use super::strings::{Lang, StrKey, pick, t};
 use super::tooltip::Tooltip;
 use crate::scene::PendingEdits;
 
@@ -134,15 +137,17 @@ pub fn entry_tree_has(entries: &[FileEntry], prefix: &str, path: &str) -> bool {
 pub fn render_files(
     mut commands: Commands,
     state: Res<FilesState>,
+    doc: Res<SceneDoc>,
     lang: Res<Lang>,
     bodies: Query<Entity, With<FilesBody>>,
 ) {
     let Ok(body) = bodies.single() else {
         return;
     };
-    if !state.is_changed() && !lang.is_changed() {
+    if !state.is_changed() && !lang.is_changed() && !doc.is_changed() {
         return;
     }
+    let dirty = doc.dirty_paths();
     commands.entity(body).despawn_related::<Children>();
     let mut rows = Vec::new();
     flatten(&state.entries, state.filter, "", 0, &mut rows);
@@ -188,6 +193,14 @@ pub fn render_files(
                 TextColor(row_color(row.kind)),
                 Pickable::IGNORE,
             ));
+            if is_dirty_path(&dirty, &row.path) {
+                children.spawn((
+                    Text::new("•"),
+                    TextFont::from_font_size(12.0),
+                    TextColor(Color::srgb(0.95, 0.75, 0.3)),
+                    Pickable::IGNORE,
+                ));
+            }
         });
     }
 }
@@ -196,16 +209,35 @@ pub fn render_files(
 pub fn render_file_header(
     mut commands: Commands,
     state: Res<FilesState>,
+    doc: Res<SceneDoc>,
     lang: Res<Lang>,
     headers: Query<Entity, With<FilesHeader>>,
 ) {
     let Ok(header) = headers.single() else {
         return;
     };
-    if !state.is_changed() && !lang.is_changed() {
+    if !state.is_changed() && !lang.is_changed() && !doc.is_changed() {
         return;
     }
     commands.entity(header).despawn_related::<Children>();
+    let dirty = doc.dirty_paths();
+    if !dirty.is_empty() {
+        commands.spawn((
+            Text::new(format!(
+                "{} {}",
+                dirty.len(),
+                pick(*lang, "por gravar", "dirty")
+            )),
+            TextFont::from_font_size(11.0),
+            TextColor(Color::srgb(0.95, 0.75, 0.3)),
+            Node {
+                margin: UiRect::right(px(6)),
+                ..default()
+            },
+            Pickable::IGNORE,
+            ChildOf(header),
+        ));
+    }
     for filter in FilesFilter::ALL {
         let active = state.filter == filter;
         commands
@@ -535,18 +567,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dirty_marker_matches_root_relative_paths() {
+        let dirty = vec!["world/room.xml".to_owned(), "scripts/npc.lua".to_owned()];
+        assert!(is_dirty_path(&dirty, "world/room.xml"));
+        assert!(!is_dirty_path(&dirty, "room.xml"));
+        assert!(!is_dirty_path(&dirty, "world/house.xml"));
+    }
+
+    #[test]
     fn entry_tree_has_finds_nested_paths() {
         let tree = vec![FileEntry {
             name: "scripts".into(),
             kind: FileKind::Dir,
             children: vec![FileEntry {
-                name: "merchant.lua".into(),
+                name: "npc.lua".into(),
                 kind: FileKind::Script,
                 children: Vec::new(),
             }],
         }];
-        assert!(entry_tree_has(&tree, "", "scripts/merchant.lua"));
-        assert!(!entry_tree_has(&tree, "", "merchant.lua"));
+        assert!(entry_tree_has(&tree, "", "scripts/npc.lua"));
+        assert!(!entry_tree_has(&tree, "", "npc.lua"));
     }
 }
 
@@ -555,4 +595,9 @@ fn row_color(kind: FileKind) -> Color {
         FileKind::Dir => Color::srgb(0.7, 0.74, 0.8),
         _ => Color::srgb(0.88, 0.9, 0.94),
     }
+}
+
+/// The row's path appears in the document's dirty list (both are root-relative).
+pub fn is_dirty_path(dirty: &[String], path: &str) -> bool {
+    dirty.iter().any(|dirty| dirty == path)
 }

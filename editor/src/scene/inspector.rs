@@ -358,12 +358,14 @@ pub fn inspector_lines(doc: &SceneDoc, selection: &Selection, lang: Lang) -> Vec
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_inspector(
     mut commands: Commands,
     doc: Res<SceneDoc>,
     selection: Res<Selection>,
     lang: Res<Lang>,
     open: Res<super::property::SectionOpen>,
+    groups: Res<super::property::ScriptGroupOpen>,
     mut view: ResMut<InspectorView>,
     bodies: Query<Entity, With<InspectorBody>>,
 ) {
@@ -550,7 +552,7 @@ pub fn render_inspector(
     }
     // 3. As SECÇÕES TIPADAS (nome, Script, Transform, Física, Luz, …).
     if let Some(node) = selection.primary().cloned() {
-        super::property::render_sections(&mut commands, body, &doc, &node, &open, *lang);
+        super::property::render_sections(&mut commands, body, &doc, &node, &open, &groups, *lang);
     }
     // 4. No fim: os atributos que nenhuma secção cobre, e a linha para acrescentar um.
     if attrs.is_empty() {
