@@ -725,6 +725,11 @@ fn test_folded_cliff_walls_have_no_holes_and_bounded_flips() {
     };
 
     let mut total_flipped = 0usize;
+    // Denominador do orçamento: o bound absoluto (200) foi calibrado quando
+    // `side="left"` amostrava o topo do lado da queda e a parede saía quase
+    // degenerada. Com o lado certo a parede tem a altura toda e mais área
+    // meshada — o limite passa a ser uma fração, não um número fixo.
+    let mut total_wound = 0usize;
     let xs: Vec<f32> = (-6i32..7).map(|i| i as f32 * extent).collect();
     let zs: Vec<f32> = (-4i32..=6).map(|i| i as f32 * extent).collect();
     for z0 in zs {
@@ -783,6 +788,7 @@ fn test_folded_cliff_walls_have_no_holes_and_bounded_flips() {
                     if gn.length_squared() < 1e-12 {
                         continue;
                     }
+                    total_wound += 1;
                     let centroid = origin + (a + b + c) / 3.0;
                     let e = 0.5;
                     let g = Vec3::new(
@@ -800,10 +806,12 @@ fn test_folded_cliff_walls_have_no_holes_and_bounded_flips() {
             }
         }
     }
+    let budget = (total_wound / 200).max(200);
     assert!(
-        total_flipped <= 200,
-        "{total_flipped} backfacing triangles across the cliff walls — the \
-         thin-sheet speckling regressed past its documented bound"
+        total_flipped <= budget,
+        "{total_flipped}/{total_wound} backfacing triangles across the cliff \
+         walls (budget {budget}) — the thin-sheet speckling regressed past its \
+         documented bound"
     );
 }
 
@@ -901,19 +909,32 @@ fn test_the_stone_bridge_has_piers_between_its_arcades() {
 #[test]
 fn test_the_natural_bridge_spans_without_a_single_pier() {
     let (grid, field, _spec) = carve("qa-pontes.xml");
-    // The rock span crosses the same channel further north. Chaikin flattens
-    // the authored apex, so the deck rides close to the chord — sample that.
-    let walk = deck_spans(
+    // A ponte autoral é `-34 62  -4 68  28 62` (largura 9 m). Amostrar a
+    // CORDA z=62 em linha recta saía da faixa perto do vértice (a centerline
+    // chega a z≈68, 6 m ao norte) e o teste via só o leito — um falso
+    // negativo que já existia no HEAD. Segue-se a centerline autoral,
+    // afastada dos bancos (~12 m de cada lado).
+    let mut walk = deck_spans(
         &grid,
         &field,
-        bevy::math::Vec2::new(-22.0, 62.0),
-        bevy::math::Vec2::new(6.0, 62.0),
-        12,
+        bevy::math::Vec2::new(-22.0, 64.4),
+        bevy::math::Vec2::new(-4.0, 68.0),
+        6,
     );
+    walk.extend(deck_spans(
+        &grid,
+        &field,
+        bevy::math::Vec2::new(-4.0, 68.0),
+        bevy::math::Vec2::new(8.0, 65.75),
+        6,
+    ));
     assert!(
         walk.iter().all(|(_, s)| s.len() >= 2),
         "a span with no piers must leave rock-then-air-then-bed everywhere: {:?}",
-        walk.iter().map(|(t, s)| (*t, s.len())).collect::<Vec<_>>()
+        walk.iter()
+            .filter(|(_, s)| s.len() < 2)
+            .map(|(t, s)| (*t, s.clone()))
+            .collect::<Vec<_>>()
     );
     // No pier: the air under the span is continuous, so every sample keeps a
     // real gap between the arch band and the bed.

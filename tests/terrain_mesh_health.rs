@@ -435,7 +435,13 @@ fn test_the_crossings_world_meshes_as_cleanly_as_the_bare_terrain() {
         }
     }
     assert!(total > 0, "voxel triangles were scanned");
-    let budget = (total / 200).max(8);
+    // 1% e não 0.5%: com a prova de bedrock estrita a caixa cuja face de cima
+    // coincide com uma superfície plana (platôs a y múltiplo do `extent`) passa
+    // a ser meshada — antes era provada "bedrock" e o chão ficava invisível.
+    // A superfície exactamente na fronteira do lattice produz slivers de área
+    // nula, que o mesher mantém de propósito (removê-los abriria arestas e a
+    // malha deixaria de ser estanque); o `TriMesh` do collider apaga-os.
+    let budget = (total / 100).max(8);
     assert!(
         degenerate <= budget,
         "{degenerate}/{total} degenerate triangles with mods (budget {budget})"
