@@ -287,6 +287,10 @@ pub fn parse(node: &XmlNode) -> Result<CinematicSpec, String> {
         .map(|l| l.at + l.duration)
         .chain(spec.titles.iter().map(|t| t.at + t.duration))
         .chain(spec.fades.iter().map(|f| f.at + f.duration))
+        // `<Sound>` não tem duração: conta o instante do cue. Sem isto, um
+        // som autorado depois do último plano caía FORA de `duration` e a
+        // cena acabava antes de ele tocar (o `while` dos cues nunca o via).
+        .chain(spec.sounds.iter().map(|s| s.at))
         .fold(0.0f32, f32::max);
     spec.duration = clock.max(timed_end);
     spec.sounds.sort_by(|a, b| a.at.total_cmp(&b.at));
@@ -813,7 +817,11 @@ fn tick_cinematic(
     }
     // Janela pós-respawn: desce SEMPRE (mesmo sem cinemática nenhuma) e
     // funde no boost — o respawn não passa pela espera em negro.
-    let dt = real.delta_secs();
+    // Clamp: um hitch (pipelines a compilar, carregamento, janela suspensa)
+    // devolve um delta de segundos e o relógio saltava planos/legendas
+    // inteiros — e a espera em negro terminava antes do fade. Mesmo teto da
+    // simulação das partículas.
+    let dt = real.delta_secs().clamp(0.0, 0.1);
     let Some(active) = playback.active.as_mut() else {
         let boost = fx.merged(false, dt);
         fx.boost.set_if_neq(boost);
@@ -833,6 +841,10 @@ fn tick_cinematic(
         active.skipped = true;
         active.t = active.spec.duration;
         active.hold = None;
+        // Saltar não pode DESPEJAR todos os cues restantes de uma vez: com
+        // `t == duration` o `while` abaixo via todos os sons em falta e
+        // disparava-os em simultâneo (um coro de roars e stings no skip).
+        active.sounds_fired = active.spec.sounds.len();
     }
 
     // 1. Espera em negro (início, corte longo, saída).
@@ -1086,7 +1098,12 @@ fn drive_camera(
     }
     let anchor_pos = |anchor: &Anchor| match anchor {
         Anchor::World => Vec3::ZERO,
-        Anchor::Player => player,
+        // A âncora `player` é a posição capturada no INÍCIO (ver
+        // [`Active::player_at_start`]): fixar o plano à posição VIVA fazia a
+        // câmara tremer sempre que o herói era empurrado (knockback, água,
+        // física) durante a cena. `player` (vivo) continua a ser o alvo do
+        // fim de cena e o fallback das âncoras por entidade.
+        Anchor::Player => active.player_at_start,
         Anchor::SelfEntity => active
             .self_anchor
             .and_then(|e| anchors.get(e).ok())
@@ -1415,6 +1432,30 @@ mod tests {
         assert_eq!(card.sub, "Capítulo I");
         assert!(alpha > 0.99);
         assert_eq!(s.to_json()["shots"][1]["anchor"], "player");
+    }
+
+    /// `<Sound>` é um elemento temporizado sem duração: o instante do cue tem
+    /// de entrar em `duration` — senão um som autorado depois do último plano
+    /// nunca toca (a cena acaba antes).
+    #[test]
+    fn sound_cues_extend_the_duration() {
+        let s = spec(
+            r#"<Cinematic id="x">
+                <Shot duration="2" from="0 0 0" look="0 0 1" />
+                <Sound at="7" clip="roar" />
+            </Cinematic>"#,
+        )
+        .unwrap();
+        assert_eq!(s.duration, 7.0, "o cue além dos planos conta para o fim");
+        // Um cue dentro dos planos não muda nada.
+        let s = spec(
+            r#"<Cinematic id="y">
+                <Shot duration="5" from="0 0 0" look="0 0 1" />
+                <Sound at="2" clip="roar" />
+            </Cinematic>"#,
+        )
+        .unwrap();
+        assert_eq!(s.duration, 5.0);
     }
 
     #[test]

@@ -120,8 +120,8 @@ pub fn sense_step(
 
 fn los_hit(world: &World, origin: Vec3, target: Vec3) -> Option<f32> {
     use bevy_rapier3d::prelude::{
-        QueryFilter, RapierContextColliders, RapierContextSimulation, RapierQueryPipeline,
-        RapierRigidBodySet,
+        QueryFilter, QueryFilterFlags, RapierContextColliders, RapierContextSimulation,
+        RapierQueryPipeline, RapierRigidBodySet,
     };
     use bevy_rapier3d::rapier::parry::query::DefaultQueryDispatcher;
     let dir = target - origin;
@@ -136,11 +136,18 @@ fn los_hit(world: &World, origin: Vec3, target: Vec3) -> Option<f32> {
     let simulation = world.get::<RapierContextSimulation>(context)?;
     let colliders = world.get::<RapierContextColliders>(context)?;
     let bodies = world.get::<RapierRigidBodySet>(context)?;
+    // Sensores (volumes de loja/porta/água) não são geometria: um deles
+    // entre a criatura e o herói cegava-a por dentro de uma zona invisível.
+    // O character controller também os exclui.
+    let filter = QueryFilter {
+        flags: QueryFilterFlags::EXCLUDE_SENSORS,
+        ..QueryFilter::default()
+    };
     RapierQueryPipeline::new_scoped(
         &simulation.broad_phase,
         colliders,
         bodies,
-        &QueryFilter::default(),
+        &filter,
         &DefaultQueryDispatcher,
         |pipeline| pipeline.cast_ray(origin, dir / dist, dist, true),
     )
@@ -228,7 +235,10 @@ pub fn sense_ai(world: &mut World) {
             pending_memory.push(entity);
             continue;
         }
-        let Some(xf) = world.get::<GlobalTransform>(entity).map(|g| g.translation()) else {
+        let Some(xf) = world
+            .get::<GlobalTransform>(entity)
+            .map(|g| g.translation())
+        else {
             continue;
         };
         let rot = world
@@ -247,8 +257,7 @@ pub fn sense_ai(world: &mut World) {
                 let origin = xf + Vec3::Y * 1.4;
                 let aim = player + Vec3::Y * 1.0;
                 let dist = origin.distance(aim);
-                let blocked = los_hit(world, origin, aim)
-                    .is_some_and(|toi| toi + LOS_SLACK < dist);
+                let blocked = los_hit(world, origin, aim).is_some_and(|toi| toi + LOS_SLACK < dist);
                 saw = !blocked;
             }
         }
@@ -274,13 +283,22 @@ pub fn sense_ai(world: &mut World) {
                 dt,
             );
             let last = if saw {
-                player.map(|p| Vec2::new(p.x, p.z)).unwrap_or(memory.last_known)
+                player
+                    .map(|p| Vec2::new(p.x, p.z))
+                    .unwrap_or(memory.last_known)
             } else if let Some(p) = heard_pos {
                 p
             } else {
                 memory.last_known
             };
-            (state, alert_left, search_left, last, enemy.speed, enemy.home)
+            (
+                state,
+                alert_left,
+                search_left,
+                last,
+                enemy.speed,
+                enemy.home,
+            )
         };
 
         if let Some(mut enemy) = world.get_mut::<EnemyCreature>(entity) {

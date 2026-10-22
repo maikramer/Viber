@@ -149,13 +149,14 @@ impl Plugin for FeedbackPlugin {
             // O hit-flash clona StandardMaterials — apps mínimas precisam do
             // registo (bare `Assets`, sem AssetServer).
             .init_resource::<Assets<StandardMaterial>>()
-            .add_systems(
-                Startup,
-                (spawn_low_hp_vignette, spawn_damage_number_pool),
-            )
+            .add_systems(Startup, (spawn_low_hp_vignette, spawn_damage_number_pool))
             .add_systems(
                 Update,
-                (low_hp_vignette_system, damage_numbers_system, hit_flash_system),
+                (
+                    low_hp_vignette_system,
+                    damage_numbers_system,
+                    hit_flash_system,
+                ),
             );
     }
 }
@@ -266,8 +267,8 @@ fn low_hp_vignette_system(
         return;
     };
     let fraction = players
-        .single()
-        .ok()
+        .iter()
+        .next()
         .map(|hp| {
             if hp.max > 0.0 {
                 hp.current / hp.max
@@ -312,6 +313,9 @@ fn hit_flash_system(
 ) {
     let dt = time.delta_secs();
     for (entity, mut flash, mut owned) in &mut flashed {
+        // Intensidade ANTES de descontar o dt: o primeiro frame renderizado
+        // era `(1-dt/T)²` — 0.80 a 60 fps e 0.44 a 20 fps, nunca o pico 1.0.
+        let intensity = hit_flash_intensity(flash.timer);
         flash.timer -= dt;
         if flash.timer <= 0.0 {
             if let Some(owned) = owned.as_mut() {
@@ -333,7 +337,6 @@ fn hit_flash_system(
                 .remove::<(HitFlash, FlashMaterials)>();
             continue;
         }
-        let intensity = hit_flash_intensity(flash.timer);
         let emissive = LinearRgba::rgb(
             HIT_FLASH_EMISSIVE * intensity,
             HIT_FLASH_EMISSIVE * 0.88 * intensity,
@@ -404,15 +407,18 @@ fn damage_numbers_system(
             color.0 = event.color;
             font.font_size = font_size.into();
             *visibility = Visibility::Inherited;
-            info!(target: "viber::feedback", "número '{}' ativado em {:#?}", event.text, event.position);
+            // Diagnóstico, não notícia: a `info!` escrevia duas linhas por
+            // número (ativação + projeção) e um combate enchia o ring de
+            // 1000 entradas da bridge, escondendo os erros que o QA lê.
+            debug!(target: "viber::feedback", "número '{}' ativado em {:#?}", event.text, event.position);
             break;
         }
     }
-    let Ok((camera, camera_transform)) = camera.single() else {
-        return;
-    };
     let dt = time.delta_secs();
-    for (mut slot, mut node, _text, mut color, mut font, mut visibility) in &mut slots {
+    // Envelhece TODOS os slots antes de olhar para a câmara: com 0 ou ≥2
+    // `Camera3d` (modo edição, split-screen) o `single()` falhava e os slots
+    // ficavam `active` para sempre, esgotando os 14 disponíveis.
+    for (mut slot, _node, _text, mut color, _font, mut visibility) in &mut slots {
         if !slot.active {
             continue;
         }
@@ -421,6 +427,13 @@ fn damage_numbers_system(
             slot.active = false;
             *visibility = Visibility::Hidden;
             color.0.set_alpha(0.0);
+        }
+    }
+    let Some((camera, camera_transform)) = camera.iter().next() else {
+        return;
+    };
+    for (slot, mut node, _text, mut color, mut font, mut visibility) in &mut slots {
+        if !slot.active {
             continue;
         }
         let projected = camera.world_to_viewport(
@@ -434,7 +447,7 @@ fn damage_numbers_system(
             continue;
         };
         if slot.age - dt < 0.05 {
-            info!(target: "viber::feedback", "número projetado em {screen:?}");
+            debug!(target: "viber::feedback", "número projetado em {screen:?}");
         }
         // world_to_viewport devolve o canto superior-esquerdo em px lógicos;
         // o texto fica um pouco acima do ponto e centrado a olho.

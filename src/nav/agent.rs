@@ -128,6 +128,15 @@ pub fn attach_nav_agents(
     }
 }
 
+/// O herói é um obstáculo MÓVEL para o landmass; o `Velocity3d` dele nascia
+/// a zero e nunca era escrito, por isso os agentes o viam parado e cortavam
+/// à frente dele.
+pub fn sync_hero_velocity(mut hero: Query<(&crate::player::Player, &mut Velocity3d)>) {
+    for (player, mut velocity) in &mut hero {
+        velocity.velocity = Vec3::new(player.vel_x, 0.0, player.vel_z);
+    }
+}
+
 /// Turns this frame's locomotion ask into a landmass destination.
 ///
 /// Runs after the producers and before landmass itself.
@@ -170,8 +179,14 @@ pub fn push_nav_targets(
             // (correctly) reported `TargetNotOnNavMesh`, and the character
             // reverted to the beeline it was supposed to stop taking.
             Some(goal) => {
+                // FORA do heightfield (uma meta na orla, ou um interior) o
+                // sampler satura na borda e devolvia a cota da orla — o alvo
+                // ficava a centenas de metros e o landmass respondia
+                // `TargetNotOnNavMesh` (beeline). Mantém o Y do agente,
+                // como o ramo do look-ahead.
                 let y = terrain
                     .as_deref()
+                    .filter(|rt| rt.in_field(goal.x, goal.y))
                     .map(|rt| rt.sample_mesh_surface(goal.x, goal.y))
                     .unwrap_or(here.y);
                 Vec3::new(goal.x, y, goal.y)
@@ -179,7 +194,17 @@ pub fn push_nav_targets(
             None => {
                 let direction = desired / speed;
                 let reach = (speed * config.lookahead_secs).max(config.min_lookahead);
-                here + Vec3::new(direction.x, 0.0, direction.y) * reach
+                let x = here.x + direction.x * reach;
+                let z = here.z + direction.y * reach;
+                // Mesmo motivo do destino declarado: o ponto projetado tem de
+                // seguir o CHÃO, não o Y atual — numa encosta ficava fora do
+                // navmesh e o agente voltava à beeline.
+                let y = terrain
+                    .as_deref()
+                    .filter(|rt| rt.in_field(x, z))
+                    .map(|rt| rt.sample_mesh_surface(x, z))
+                    .unwrap_or(here.y);
+                Vec3::new(x, y, z)
             }
         };
         *target = AgentTarget3d::Point(goal);

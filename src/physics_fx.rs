@@ -81,8 +81,12 @@ pub fn fall_angle(t: f32, duration: f32) -> f32 {
 }
 
 /// Força radial com falloff linear (igual às bombas).
+///
+/// `radius <= 0` (ou `distance` não finito) não tem disco: devolve `None`.
+/// Sem o guarda a divisão dava `NaN` (ou um raio NEGATIVO espelhava a força
+/// para fora do centro) — e o `NaN` seguia para o knockback.
 pub fn radial_strength(distance: f32, radius: f32, strength: f32) -> Option<f32> {
-    if distance > radius {
+    if radius.is_nan() || radius <= 0.0 || !distance.is_finite() || distance > radius {
         return None;
     }
     Some(strength * (1.0 - 0.6 * (distance / radius)))
@@ -136,7 +140,7 @@ fn knockback_system(
         let in_interior = interior
             .as_deref()
             .is_some_and(|scene| scene.contains(transform.translation.x, transform.translation.z));
-        if let Some(limit) = limit.filter(|_| !in_interior) {
+        if let Some(limit) = limit.filter(|limit| !in_interior && *limit > 0.0) {
             let dist_sq = x * x + z * z;
             if dist_sq > limit * limit {
                 let scale = limit / dist_sq.sqrt();
@@ -240,6 +244,10 @@ mod tests {
         let edge = radial_strength(6.0, 6.0, 10.0).unwrap();
         assert!((edge - 4.0).abs() < 1e-4, "40% na borda");
         assert!(radial_strength(7.0, 6.0, 10.0).is_none());
+        // Raio degenerado não tem disco (0/0 = NaN).
+        assert!(radial_strength(0.0, 0.0, 10.0).is_none());
+        assert!(radial_strength(0.0, -3.0, 10.0).is_none());
+        assert!(radial_strength(f32::NAN, 4.0, 10.0).is_none());
     }
 
     /// App headless mínima com o plugin (relógio avançado à mão, como em
@@ -426,5 +434,37 @@ mod tests {
         app.update();
         let t = app.world().get::<Transform>(inner).unwrap().translation;
         assert!(t.x > 0.0, "sem clamp dentro do disco: {t:?}");
+    }
+
+    /// `radius <= margin` (o caso documentado `radius="0"`) não tem disco
+    /// interior: o `limit` NEGATIVO espelhava o empurrão para o lado oposto
+    /// do mundo (`scale` negativo). O `world_border_clamp` já tinha o guarda;
+    /// esta cópia não.
+    #[test]
+    fn test_knockback_never_mirrors_with_a_degenerate_border() {
+        let mut app = fx_app();
+        app.insert_resource(crate::worldsys::WorldBorderConfig {
+            radius: 10.0,
+            warn_seconds: 5.0,
+            margin: 30.0, // limit = -20
+        });
+        let id = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(30.0, 0.0, 0.0),
+                Knockback {
+                    velocity: Vec3::X * 2.0,
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(100));
+        app.update();
+        let t = app.world().get::<Transform>(id).unwrap().translation;
+        assert!(
+            t.x > 30.0,
+            "sem disco interior o empurrão não é clampado nem espelhado: {t:?}"
+        );
     }
 }

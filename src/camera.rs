@@ -65,7 +65,10 @@ pub const AUTO_SETTLE_MAX_RATE: f32 = 60.0;
 /// not the pivot. Pitch 0 keeps the ring horizontal; +90° is straight above.
 pub fn camera_offset(yaw_deg: f32, pitch_deg: f32, distance: f32, height: f32) -> Vec3 {
     let yaw = yaw_deg.to_radians();
-    let pitch = pitch_deg.to_radians();
+    // A ±90° o `look_at(…, Vec3::Y)` fica paralelo ao up (roll arbitrário) e
+    // além disso `cos` troca de sinal, pondo a câmara do lado oposto e de
+    // pernas para o ar. Um grau de folga mantém o rig estável.
+    let pitch = pitch_deg.clamp(-89.0, 89.0).to_radians();
     Vec3::new(
         yaw.sin() * pitch.cos() * distance,
         height + pitch.sin() * distance,
@@ -263,7 +266,9 @@ pub fn noise_pm1(t: f32, seed: u32) -> f32 {
     let f = x - i;
     let u = f * f * (3.0 - 2.0 * f);
     let (i, i1) = (i as i64 as u32, (i as i64 + 1) as u32);
-    hash01(i) * (1.0 - u) + hash01(i1) * u
+    // `hash01` é [0,1]; o blend convexo também. Sem o remapeamento a sway
+    // e o shake tinham um viés positivo constante (a doc promete [-1,1]).
+    2.0 * (hash01(i) * (1.0 - u) + hash01(i1) * u) - 1.0
 }
 
 // ── camera shake (modelo de trauma de `player-controller/fx.ts`) ─────────
@@ -382,8 +387,13 @@ pub fn fov_kick_system(
         let base_rad = match base {
             Some(b) => b.0,
             None => {
-                // Primeira vista: o FOV vivo menos o kick desta frame é a base.
-                let b = persp.fov - kick_rad;
+                // Primeira vista: a projeção viva é o FOV AUTORAL — este
+                // sistema é o único que lhe soma o kick, e uma câmara que
+                // nasce a meio de um kick ainda não o tem aplicado.
+                // Subtrair o kick aqui (o código antigo) encolhia a base
+                // para sempre: a câmara respawnada a seguir a um golpe
+                // ficava com o FOV 8° mais fechado.
+                let b = persp.fov;
                 commands.entity(entity).insert(BaseFov(b));
                 b
             }
@@ -445,19 +455,14 @@ pub fn third_person_camera(
     interior: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     a11y: Option<Res<crate::a11y::A11y>>,
 ) {
-    let Some((target, player)) = players.iter().next() else {
-        return;
-    };
-    let target_pos = target.translation();
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
     // Shake decora em tempo REAL (não-escalado): durante o hit-stop a câmara
-    // continua a tremer — é o slow-motion pushback da referência.
+    // continua a tremer — é o slow-motion pushback da referência. Decai
+    // ANTES do early-return: sem Player o trauma/mola congelavam e voltavam
+    // inteiros no respawn.
     shake.trauma = (shake.trauma - SHAKE_DECAY * real.delta_secs()).max(0.0);
-    let shake_mul = a11y
-        .as_deref()
-        .map(crate::a11y::shake_scale)
-        .unwrap_or(1.0);
+    let shake_mul = a11y.as_deref().map(crate::a11y::shake_scale).unwrap_or(1.0);
     let (mut shake_off, shake_roll) = shake_offset_roll(shake.trauma, real.elapsed_secs());
     shake_off *= shake_mul;
     // Solavanco direcional: mola subamortecida em dt virtual (no hit-stop
@@ -465,6 +470,10 @@ pub fn third_person_camera(
     let (kick_off, kick_vel) = kick_spring_step(kick.offset, kick.vel, dt);
     kick.offset = kick_off;
     kick.vel = kick_vel;
+    let Some((target, player)) = players.iter().next() else {
+        return;
+    };
+    let target_pos = target.translation();
     // Dentro de uma bolsa de interior a câmara muda de regime: JRPG de 16
     // bits — enquadra a SALA, não o herói. Ver [`interior_camera_pose`].
     let interior_room = interior
@@ -478,7 +487,17 @@ pub fn third_person_camera(
             let (eye, look_at) = interior_camera_pose(scene, target_pos);
             // Salto entre salas com um ease curto: o corte seco do SNES
             // pisca demasiado numa cena 3D com sombras e TAA.
-            let a = low_pass_factor(dt, INTERIOR_ROOM_LAG);
+            //
+            // PRIMEIRA vista (`initialized == false`, reposto pelo
+            // `scene_loader` em cada troca de cena): salta, não interpola.
+            // Sem isto a câmara varria o mapa inteiro desde a posição da
+            // cena anterior — o `set_camera_yaw`/teleporte do herói punha
+            // `initialized = false` exatamente para a câmara encaixar.
+            let a = if cam.initialized {
+                low_pass_factor(dt, INTERIOR_ROOM_LAG)
+            } else {
+                1.0
+            };
             let (pos, point) = (cam.current_pos, cam.follow_point);
             cam.current_pos = pos + (eye - pos) * a;
             cam.follow_point = point + (look_at - point) * a;
@@ -574,7 +593,17 @@ pub fn third_person_camera(
                     // O chão SOB a sonda, não o telhado da coluna. `sample`
                     // é o topo: debaixo de uma ponte o primeiro passo já
                     // contava como colisão e a câmara colava-se ao herói.
-                    |p| rt.surface_below(p.x, p.z, p.y).unwrap_or(f32::NEG_INFINITY),
+                    // Um ponto DENTRO de rocha não tem superfície abaixo
+                    // (a encosta sobe acima dele): conta como chão em `p.y`,
+                    // senão a marcha atravessava a falésia e a câmara
+                    // entrava pelo terreno.
+                    |p| {
+                        if rt.is_solid(p) {
+                            p.y
+                        } else {
+                            rt.surface_below(p.x, p.z, p.y).unwrap_or(f32::NEG_INFINITY)
+                        }
+                    },
                     eye,
                     dir,
                     full_dist,
@@ -640,6 +669,19 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn test_camera_offset_clamps_pitch_away_from_the_singularity() {
+        // A ±90° o look-at fica paralelo ao up (roll arbitrário) e além disso
+        // o rig troca de lado. O offset tem de parar a 89°.
+        let cos89 = 89.0_f32.to_radians().cos();
+        let up = camera_offset(0.0, 120.0, 10.0, 0.0);
+        assert!(approx(up.z, 10.0 * cos89));
+        assert!(up.y > 0.0);
+        let down = camera_offset(0.0, -120.0, 10.0, 0.0);
+        assert!(approx(down.z, 10.0 * cos89));
+        assert!(down.y < 0.0);
     }
 
     #[test]

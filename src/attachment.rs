@@ -59,7 +59,11 @@ pub fn apply_attachments(
 ) {
     let queued = std::mem::take(&mut requests.0);
     for request in queued {
-        let owner = request.owner.or_else(|| players.single().ok());
+        // `iter().next()` e não `single()`: com 2+ players (co-op) o
+        // `single()` falhava e TODOS os pedidos sem `id` caíam em silêncio
+        // — a espada/Tocha do herói nunca aparecia. O resto da engine já
+        // usa o primeiro player nessa situação (`interact`, nav tile).
+        let owner = request.owner.or_else(|| players.iter().next());
         let Some(owner) = owner else {
             continue;
         };
@@ -99,7 +103,9 @@ pub fn apply_attachments(
 
 /// Procura um osso por nome normalizado (exato ou substring), com os alias
 /// comuns de mão. Genérico: não assume `hand_r` nem rig humanoide.
-fn find_bone(
+/// Público para quem precisa de saber se o osso já existe antes de pedir um
+/// attach (o preview do editor espera a hierarquia do GLB carregar).
+pub fn find_bone(
     root: Entity,
     wanted: &str,
     children: &Query<&Children>,
@@ -125,7 +131,8 @@ fn find_bone(
         if let Ok(name) = names.get(entity) {
             let name = name.as_str().to_ascii_lowercase();
             // "hand_r" não pode casar com "hand_r_index"/"finger".
-            let is_finger = name.contains("finger") || name.contains("index") && name.contains("hand");
+            let is_finger =
+                name.contains("finger") || name.contains("index") && name.contains("hand");
             if !is_finger
                 && aliases
                     .iter()

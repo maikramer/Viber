@@ -350,11 +350,12 @@ fn bare_body_kind(value: &str) -> Option<BodyKind> {
 }
 
 fn parse_vec3(value: &str) -> Option<Vec3> {
-    let parts: Vec<f32> = value
-        .split([' ', ','])
-        .filter(|p| !p.trim().is_empty())
-        .filter_map(|p| p.trim().parse().ok())
-        .collect();
+    // Um token inválido era DESCARTADO: `size: 2 foo bar` virava [2] e era
+    // aceite como cubo uniforme 2×2×2. Qualquer token inválido rejeita.
+    let mut parts = Vec::new();
+    for token in value.split([' ', ',']).filter(|p| !p.trim().is_empty()) {
+        parts.push(token.trim().parse::<f32>().ok()?);
+    }
     match parts.len() {
         1 => Some(Vec3::splat(parts[0])),
         3 => Some(Vec3::new(parts[0], parts[1], parts[2])),
@@ -479,6 +480,19 @@ fn apply_collider_debug_toggle(
     if let (Some(toggle), Some(ctx)) = (toggle.as_ref(), ctx.as_mut()) {
         ctx.enabled = toggle.0;
     }
+}
+
+/// Massa autoral (`mass: N`) como propriedade ADICIONAL do corpo rígido.
+///
+/// O `parse_body` já lia `mass` para o `PhysicsSpec`, mas ninguém a aplicava:
+/// `<Entity rigidbody="type: dynamic; mass: 50">` usava a massa derivada da
+/// densidade do collider. `AdditionalMassProperties` soma ao corpo (e não ao
+/// collider, que pode ser composto por vários filhos).
+pub fn mass_properties(
+    mass: Option<f32>,
+) -> Option<bevy_rapier3d::prelude::AdditionalMassProperties> {
+    let mass = mass.filter(|value| value.is_finite() && *value > 0.0)?;
+    Some(bevy_rapier3d::prelude::AdditionalMassProperties::Mass(mass))
 }
 
 /// Inserts the Rapier body for a [`BodyKind`], if any.
@@ -662,8 +676,12 @@ pub fn resolve_pending_colliders(
                     }
                     if let Some((center, half)) = bounds() {
                         bounds_cuboid(&mut commands, entity, center, half, trigger, scripted);
+                        // Só marca resolvido quando há MESMO colisor: sem
+                        // bounds (render scene ainda a carregar) o prop ficava
+                        // `ColliderResolved` sem collider nenhum e o resolver
+                        // nunca voltava a olhar para ele.
+                        commands.entity(entity).insert(ColliderResolved);
                     }
-                    commands.entity(entity).insert(ColliderResolved);
                     continue;
                 }
                 if matches!(

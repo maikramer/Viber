@@ -36,10 +36,18 @@ use crate::terrain::runtime::TerrainRuntime;
 
 /// Static colliders only: a kinematic body is a creature, and creatures are
 /// agents that avoid each other at runtime, not holes in the navmesh.
+///
+/// Os corpos do ragdoll (`RagdollBodyOf`) são cápsulas dinâmicas que vivem
+/// 2,5 s: sem a exclusão cada morte furava a navmesh com as 7 cápsulas e
+/// mudava a contagem de obstáculos, forçando um re-bake do tile inteiro.
 pub type ObstacleFilter = (
     Without<crate::physics::VoxelCollider>,
     Without<crate::ai::AiLocomotion>,
     Without<crate::player::Player>,
+    // Triggers (loja/porta/água) não são paredes: sem isto viravam
+    // obstáculos NOT_WALKABLE no navmesh.
+    Without<bevy_rapier3d::prelude::Sensor>,
+    Without<crate::ragdoll::RagdollBodyOf>,
 );
 
 /// A collider whose local AABB is taller than this is a wall, a cliff body or a

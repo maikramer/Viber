@@ -83,8 +83,11 @@ pub fn heal_full(health: &mut Health) {
 /// Dano em área com falloff linear: cheio no centro → metade na borda.
 /// `None` fora do raio. Primitiva genérica usada por `viber.radial_damage`;
 /// a política (quem, quanto, knockback) é do script.
+///
+/// `radius <= 0` não tem área: devolvia `NaN` (0/0) e o `NaN` era ignorado
+/// pelo `apply_damage` mas seguia para os números de dano e para o evento.
 pub fn radial_damage(distance: f32, radius: f32, max_damage: f32) -> Option<f32> {
-    if distance > radius {
+    if radius.is_nan() || radius <= 0.0 || !distance.is_finite() || distance > radius {
         return None;
     }
     Some(max_damage * (1.0 - 0.5 * (distance / radius)))
@@ -145,5 +148,20 @@ mod tests {
         assert_eq!(radial_damage(6.0, 5.0, 10.0), None);
         assert!(approx(radial_damage(0.0, 5.0, 10.0).unwrap(), 10.0));
         assert!(approx(radial_damage(5.0, 5.0, 10.0).unwrap(), 5.0));
+    }
+
+    /// Raio zero/negativo não tem área: `0/0` dava `NaN` e o `NaN` seguia
+    /// para o evento de dano. O `None` é a resposta "sem alvo".
+    #[test]
+    fn test_radial_damage_rejects_a_degenerate_radius() {
+        assert_eq!(radial_damage(0.0, 0.0, 10.0), None);
+        assert_eq!(radial_damage(0.0, -2.0, 10.0), None);
+        assert_eq!(radial_damage(f32::NAN, 5.0, 10.0), None);
+        assert_eq!(radial_damage(f32::NAN, f32::NAN, 10.0), None);
+        // Raio infinito é válido (atinge tudo com o dano cheio).
+        assert!(approx(
+            radial_damage(100.0, f32::INFINITY, 10.0).unwrap(),
+            10.0
+        ));
     }
 }

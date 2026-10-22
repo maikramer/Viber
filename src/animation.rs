@@ -100,6 +100,9 @@ pub const LOCOMOTION_MIN_WEIGHT: f32 = 1e-4;
 const HIT_REACT_CLIPS: [&str; 2] = ["hit", "hithead"];
 /// Time constant of the measured-speed low-pass (s).
 pub const SPEED_SMOOTH_TAU: f32 = 0.12;
+/// Deslocamento horizontal por frame acima do qual assumimos teleporte (m):
+/// um passo normal a 60 fps é < 0,2 m; um portal são dezenas.
+pub const TELEPORT_JUMP_M: f32 = 8.0;
 /// Playback-rate clamp so the sync never turns a walk into a slideshow or a
 /// blur.
 pub const SPEED_SCALE_RANGE: (f32, f32) = (0.55, 1.7);
@@ -168,14 +171,9 @@ impl MotionSpeeds {
 /// (ver [`MotionSpeeds::scale_for`]) já trata de pisar mais devagar, por isso
 /// deixar o walk a meia peso a 4 m/s fazia as pernas mexerem metade do que
 /// deviam (o blend antigo esticava idle→run por toda a gama).
-pub fn locomotion_weights(
-    speed: f32,
-    gates: MotionGates,
-    speeds: MotionSpeeds,
-) -> (f32, f32, f32) {
+pub fn locomotion_weights(speed: f32, gates: MotionGates, speeds: MotionSpeeds) -> (f32, f32, f32) {
     let idle_edge = gates.idle.max(0.0);
-    let walk_edge = (speeds.walk * 0.5)
-        .clamp(idle_edge + 0.05, speeds.walk.max(idle_edge + 0.05));
+    let walk_edge = (speeds.walk * 0.5).clamp(idle_edge + 0.05, speeds.walk.max(idle_edge + 0.05));
     let run_edge = speeds.run.max(speeds.walk + 1e-3);
     if speed <= idle_edge {
         return (1.0, 0.0, 0.0);
@@ -787,7 +785,8 @@ fn build_clip_graph(
     let blend = distinct.then(|| graph.add_blend(1.0, graph.root));
     let mut nodes = Vec::with_capacity(clips.len());
     for (i, clip) in clips.iter().enumerate() {
-        let in_loco = distinct && matches!((idle_i, walk_i, run_i), (Some(a), Some(b), Some(c)) if i == a || i == b || i == c);
+        let in_loco = distinct
+            && matches!((idle_i, walk_i, run_i), (Some(a), Some(b), Some(c)) if i == a || i == b || i == c);
         let parent = if in_loco { blend.unwrap() } else { graph.root };
         let weight = if distinct && idle_i == Some(i) {
             1.0
@@ -837,12 +836,14 @@ fn drive_locomotion_blend(
         (
             loco.walk,
             weights.1,
-            (animator.speed / speeds.walk.max(1e-3)).clamp(speeds.scale_range.0, speeds.scale_range.1),
+            (animator.speed / speeds.walk.max(1e-3))
+                .clamp(speeds.scale_range.0, speeds.scale_range.1),
         ),
         (
             loco.run,
             weights.2,
-            (animator.speed / speeds.run.max(1e-3)).clamp(speeds.scale_range.0, speeds.scale_range.1),
+            (animator.speed / speeds.run.max(1e-3))
+                .clamp(speeds.scale_range.0, speeds.scale_range.1),
         ),
     ];
     for (node, weight, _) in specs {
@@ -1147,15 +1148,27 @@ fn advance_motion(
     // Speed from actual displacement, not from the input: the character
     // controller may have been blocked by a wall, and a hero pressed into one
     // should stand still rather than run on the spot.
+    //
+    // Um teletransporte (portal, `viber.debug.tp`, mudança de cena) produzia
+    // um delta de dezenas de metros num frame → milhares de m/s no filtro, e
+    // o herói "corria no sítio" durante ~1 s. Salto implausível = baseline
+    // novo, velocidade zero.
+    let teleported = animator.last_pos.is_some_and(|previous| {
+        let delta = position - previous;
+        Vec3::new(delta.x, 0.0, delta.z).length() > TELEPORT_JUMP_M
+    });
     let raw = match animator.last_pos {
-        Some(previous) => {
+        Some(previous) if !teleported && dt > 1e-5 => {
             let delta = position - previous;
             Vec3::new(delta.x, 0.0, delta.z).length() / dt
         }
         // First tick (or first tick after a freeze): no baseline, no speed.
-        None => 0.0,
+        _ => 0.0,
     };
     animator.last_pos = Some(position);
+    if teleported {
+        animator.speed = 0.0;
+    }
     // Low-pass: on a frame hitch the delta reads ~0 and the animation "stopped"
     // mid-walk (Idle↔Walk flip on every stutter).
     let alpha = 1.0 - (-dt / SPEED_SMOOTH_TAU).exp();
@@ -1223,11 +1236,7 @@ pub fn drive_player_animation(
             && !animator.is_busy()
             && !matches!(state, AnimState::Jump | AnimState::Fall);
         if let Ok(handle) = handles.get(animator.player) {
-            let weights = locomotion_weights(
-                animator.speed,
-                MotionGates::HERO,
-                MotionSpeeds::HERO,
-            );
+            let weights = locomotion_weights(animator.speed, MotionGates::HERO, MotionSpeeds::HERO);
             drive_locomotion_blend(
                 &mut animator,
                 &mut players,
@@ -1389,6 +1398,12 @@ pub fn freeze_distant_animation(
             &GlobalTransform,
             &CharacterAnimator,
             Option<&crate::luau::ScriptActivation>,
+            // O ragdoll é dono do rig: `ragdoll::freeze_ragdoll_graphs`
+            // tira o grafo para os ossos seguirem os corpos. Sem esta
+            // exclusão este sistema ACORDAVA-o ("está perto, visível"),
+            // o ragdoll voltava a congelá-lo no frame seguinte e a pose
+            // alternava entre o clip de morte e os corpos a cada frame.
+            Option<&crate::ragdoll::RagdollActive>,
         ),
         Without<crate::player::Player>,
     >,
@@ -1402,7 +1417,10 @@ pub fn freeze_distant_animation(
         return;
     };
     let hero_pos = hero.translation();
-    for (transform, animator, activation) in &characters {
+    for (transform, animator, activation, ragdoll) in &characters {
+        if ragdoll.is_some() {
+            continue;
+        }
         let Ok((graph, frozen, visibility)) = rigs.get(animator.player) else {
             continue;
         };
@@ -1509,7 +1527,10 @@ mod tests {
             let mut acc = 0.0_f32;
             for w in [idle, walk, run].map(|w| w.max(LOCOMOTION_MIN_WEIGHT)) {
                 acc += w;
-                assert!(acc > 0.0 && (w / acc).is_finite(), "speed {speed}: acc {acc}");
+                assert!(
+                    acc > 0.0 && (w / acc).is_finite(),
+                    "speed {speed}: acc {acc}"
+                );
             }
         }
     }

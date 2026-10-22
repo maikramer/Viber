@@ -204,6 +204,14 @@ pub fn drive_ragdolls(
             let _ = animator;
             continue;
         }
+        // Deslocamento MUNDO aplicado a cada osso neste frame. O `GlobalTransform`
+        // do pai só é reconstruído no fim do schedule: converter o osso filho
+        // contra a posição ANTIGA do pai (que este loop acabou de mover)
+        // deslocava a cadeia inteira pelo passo do pai — a pélvis andava e o
+        // tronco/cabeça/membros ficavam para trás. Os ossos chegam por ordem
+        // pai→filho (depth-first do `start_ragdolls`), por isso o delta do pai
+        // já está no map.
+        let mut moved: std::collections::HashMap<Entity, Vec3> = std::collections::HashMap::new();
         for (body, bone) in active.bodies.iter().zip(active.bones.iter()) {
             let Ok(body_xf) = bodies.get(*body) else {
                 continue;
@@ -215,10 +223,16 @@ pub fn drive_ragdolls(
             let Ok(parent_g) = globals.get(parent) else {
                 continue;
             };
+            let world = body_xf.translation();
+            let parent_delta = moved.get(&parent).copied().unwrap_or(Vec3::ZERO);
+            let local = parent_g
+                .affine()
+                .inverse()
+                .transform_point3(world - parent_delta);
             if let Ok(mut tf) = transforms.get_mut(*bone) {
-                let world = body_xf.translation();
-                let local = parent_g.affine().inverse().transform_point3(world);
                 tf.translation = local;
+                let old = globals.get(*bone).map(|g| g.translation()).unwrap_or(world);
+                moved.insert(*bone, world - old);
             }
         }
     }
@@ -325,7 +339,11 @@ mod tests {
         let _ = head;
         let armature = app
             .world_mut()
-            .spawn((Name::new("Armature"), Transform::default(), GlobalTransform::default()))
+            .spawn((
+                Name::new("Armature"),
+                Transform::default(),
+                GlobalTransform::default(),
+            ))
             .id();
         app.world_mut().entity_mut(pelvis).insert(ChildOf(armature));
         let creature = app

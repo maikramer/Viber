@@ -159,6 +159,9 @@ impl NavConfig {
                 continue;
             };
             match key.as_str() {
+                // `enabled="0"` parseia como f32 e caía no braço numérico
+                // sem arm: a flag documentada era ignorada.
+                "enabled" => self.enabled = number != 0.0,
                 "agent-radius" => self.agent_radius = number.max(0.05),
                 "agent-height" => self.agent_height = number.max(0.1),
                 "tile-size" => self.tile_size = number.max(16.0),
@@ -254,6 +257,9 @@ impl Plugin for NavPlugin {
         .add_systems(
             bevy::app::PostUpdate,
             (
+                agent::sync_hero_velocity
+                    .in_set(NavSystems::Push)
+                    .before(agent::push_nav_targets),
                 agent::push_nav_targets.in_set(NavSystems::Push),
                 agent::pull_nav_velocities.in_set(NavSystems::Pull),
             ),

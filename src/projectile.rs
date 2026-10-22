@@ -233,8 +233,13 @@ fn swept_body_distance(a: Vec3, b: Vec3, feet: Vec3) -> (f32, f32) {
 
 fn install_templates(
     mut templates: ResMut<ProjectileTemplates>,
+    mut visuals: ResMut<ProjectileVisuals>,
     configs: Option<Res<EngineConfigs>>,
 ) {
+    visuals.0.clear();
+    // Corre em Startup e SceneLoad: sem limpar, templates da cena anterior
+    // sobreviviam e os re-declarados davam aviso falso de "declarado 2×".
+    templates.0.clear();
     let Some(configs) = configs else { return };
     let mut warnings = Vec::new();
     for config in configs.all("projectiletemplate") {
@@ -262,7 +267,10 @@ fn install_templates(
 }
 
 /// Visual partilhado por template (uma mesh + um material por `id`).
-#[derive(Default)]
+/// Resource (e não `Local`) para o `install_templates` o poder limpar na
+/// troca de cena: um mundo seguinte que redefine o mesmo `id` com outro
+/// tamanho/cor herdava a mesh/material antigos.
+#[derive(Default, bevy::prelude::Resource)]
 struct ProjectileVisuals(HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>);
 
 #[allow(clippy::too_many_arguments)]
@@ -273,7 +281,7 @@ fn spawn_projectiles(
     live: Query<(), With<Projectile>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut visuals: Local<ProjectileVisuals>,
+    mut visuals: ResMut<ProjectileVisuals>,
     mut warned: Local<std::collections::HashSet<String>>,
 ) {
     if queue.requests.is_empty() {
@@ -403,7 +411,15 @@ fn step_projectiles(
         let pos = prev + shot.vel * step;
         transform.translation = pos;
         if let Some(dir) = shot.vel.try_normalize() {
-            transform.look_to(dir, Vec3::Y);
+            // `look_to` com o up PARALELO à direção (tiro vertical) produz
+            // uma base degenerada — rotação NaN no Transform. Um eixo
+            // alternativo mantém o rig válido (a esfera não tem frente).
+            let up = if dir.y.abs() > 0.999 {
+                Vec3::Z
+            } else {
+                Vec3::Y
+            };
+            transform.look_to(dir, up);
         }
 
         let reach = shot.sensor_radius + BODY_RADIUS;
@@ -444,13 +460,19 @@ fn step_projectiles(
         }
 
         // Terreno: a superfície sólida sob a posição ANTERIOR (grutas e
-        // overhangs contam) ficou acima da atual → atravessou o chão.
-        if let Some(rt) = runtime.as_deref()
-            && rt.in_field(pos.x, pos.z)
-            && rt
-                .surface_below(pos.x, pos.z, prev.y.max(pos.y) + 0.01)
-                .is_some_and(|ground| pos.y <= ground)
-        {
+        // overhangs contam) ficou acima da atual → atravessou o chão. Um
+        // projétil que entra na ENCOSTA pela lateral não tem superfície
+        // abaixo (o topo está acima dos dois pontos): o teste de sólido no
+        // ponto e a meio do passo apanha-o.
+        let hit_terrain = runtime.as_deref().is_some_and(|rt| {
+            rt.in_field(pos.x, pos.z)
+                && (rt.is_solid(pos)
+                    || rt.is_solid(prev.lerp(pos, 0.5))
+                    || rt
+                        .surface_below(pos.x, pos.z, prev.y.max(pos.y) + 0.01)
+                        .is_some_and(|ground| pos.y <= ground))
+        });
+        if hit_terrain {
             impact_burst(&mut commands, pos);
             commands.entity(entity).try_despawn();
         } else if expired {
@@ -472,6 +494,7 @@ impl Plugin for ProjectilePlugin {
             .add_message::<crate::ambient::SfxEvent>()
             .init_resource::<ProjectileTemplates>()
             .init_resource::<ProjectileQueue>()
+            .init_resource::<ProjectileVisuals>()
             .add_systems(
                 Startup,
                 install_templates.after(crate::recipes::spawn::startup),
@@ -581,6 +604,7 @@ mod tests {
             .add_message::<crate::ambient::SfxEvent>()
             .init_resource::<crate::luau::ScriptEventQueue>()
             .init_resource::<ProjectileQueue>()
+            .init_resource::<ProjectileVisuals>()
             .insert_resource(ProjectileTemplates(HashMap::from([(
                 template.id.clone(),
                 template,

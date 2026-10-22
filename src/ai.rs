@@ -347,14 +347,24 @@ pub fn apply_ai_locomotion(
             // PISO SOB A CRIATURA (Y conhecido → surface_below): sob um
             // cliff/arco fica SOB a rocha em vez de ser teletransportada para o
             // topo do mundo. Sem terreno (testes headless sem bootstrap) o Y
-            // fica como está.
+            // fica como está. FORA do heightfield (interior, cena sem terreno)
+            // os samplers saturam para a borda — não é o chão da criatura.
             let y = match runtime.as_deref() {
-                Some(rt) => rt
-                    .surface_below(x, z, world.y + crate::player::GROUND_PROBE)
-                    .unwrap_or_else(|| rt.sample_mesh_surface(x, z)),
-                None => world.y,
+                Some(rt) if rt.in_field(x, z) => {
+                    // `None` = não há piso sólido na coluna: o destino está
+                    // enterrado em rocha que desce até ao fundo (falésia,
+                    // encosta). O fallback antigo (`sample_mesh_surface`, o
+                    // TOPO do mundo) teleportava a criatura para cima do
+                    // penhasco a cada passo contra a parede. Sem collider
+                    // próprio, recusa-se o passo — a criatura encosta, como
+                    // o herói com o character controller.
+                    rt.surface_below(x, z, world.y + crate::player::GROUND_PROBE)
+                }
+                _ => Some(world.y),
             };
-            transform.translation = Vec3::new(x, y, z) - offset;
+            if let Some(y) = y {
+                transform.translation = Vec3::new(x, y, z) - offset;
+            }
         }
 
         let target_dir = if loco.speed() > FACING_MOVE_SPEED {
@@ -407,6 +417,9 @@ pub struct AiPlugin;
 
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
+        // Sem este plugin o `hear_combat` nunca corria (inimigos surdos) e
+        // os `NoisePing` dos impactos ficavam para sempre no mundo.
+        app.add_plugins(crate::senses::SensesPlugin);
         app.add_message::<crate::ambient::SfxEvent>()
             .add_systems(Update, (timed(Group::Ai, enemy_ai), ensure_fsm_vitals))
             // O consumidor único do [`AiLocomotion`] corre DEPOIS de todos os
@@ -987,5 +1000,4 @@ mod tests {
             "sem script não é puxada para o disco: {border_pos:?}"
         );
     }
-
 }

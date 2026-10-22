@@ -440,10 +440,10 @@ pub fn player_movement(
         (
             actions.move_x,
             actions.forward,
-            actions.sprint
-                || keys.pressed(KeyCode::ShiftLeft)
-                || keys.pressed(KeyCode::ShiftRight),
-            actions.jump_just || keys.just_pressed(KeyCode::Space),
+            // Com ActionMap presente, os binds mandam: Space/Shift fixos
+            // anulavam qualquer rebind de salto/corrida.
+            actions.sprint,
+            actions.jump_just,
         )
     } else {
         let (w, s, a, d) = (
@@ -616,7 +616,7 @@ pub fn player_movement(
         // a 2 km de distância usada para resgatar o herói — o salto de metro
         // que uma cena de interior fora do mapa levava. Fora do campo as duas
         // rede de segurança desligam-se e manda o collider.
-        let (px, py, pz) = (
+        let (px, mut py, pz) = (
             transform.translation.x,
             transform.translation.y,
             transform.translation.z,
@@ -637,6 +637,10 @@ pub fn player_movement(
                 transform.translation.y, top
             );
             transform.translation.y = top;
+            // A sonda de chão abaixo usa `py`: sem o atualizar, o resgate
+            // deixava `ground = -inf` no próprio frame e a gravidade puxava
+            // o herói resgatado para fora da superfície outra vez.
+            py = top;
             player.vel_y = 0.0;
             player.grounded = true;
         }

@@ -53,7 +53,9 @@ pub fn solve_two_bone(root: Vec3, mid: Vec3, end: Vec3, target: Vec3) -> (Vec3, 
     }
     let max_reach = (len_ab + len_bc) * 0.999;
     let min_reach = (len_ab - len_bc).abs() + 1e-4;
-    let dist = to_target.length().clamp(min_reach, max_reach.max(min_reach));
+    let dist = to_target
+        .length()
+        .clamp(min_reach, max_reach.max(min_reach));
     let dir = to_target.normalize_or_zero();
     let cos_a = ((len_ab * len_ab + dist * dist - len_bc * len_bc) / (2.0 * len_ab * dist))
         .clamp(-1.0, 1.0);
@@ -80,7 +82,9 @@ pub fn solve_two_bone(root: Vec3, mid: Vec3, end: Vec3, target: Vec3) -> (Vec3, 
 /// Nome normalizado casa com um osso (`leftfoot`, `mixamorig:LeftFoot`, …).
 pub fn bone_matches(name: &str, needles: &[&str]) -> bool {
     let n = crate::animation::normalize_clip_name(name);
-    needles.iter().any(|needle| n == *needle || n.ends_with(needle))
+    needles
+        .iter()
+        .any(|needle| n == *needle || n.ends_with(needle))
 }
 
 pub fn is_left_foot(name: &str) -> bool {
@@ -90,6 +94,7 @@ pub fn is_left_foot(name: &str) -> bool {
 
 pub fn is_right_foot(name: &str) -> bool {
     bone_matches(name, &["rightfoot", "footr", "rfoot", "righttoe"])
+        && !bone_matches(name, &["rightfootik", "ik"])
 }
 
 pub fn is_left_knee(name: &str) -> bool {
@@ -97,7 +102,10 @@ pub fn is_left_knee(name: &str) -> bool {
 }
 
 pub fn is_right_knee(name: &str) -> bool {
-    bone_matches(name, &["rightleg", "rightcalf", "rightshin", "rightlowerleg"])
+    bone_matches(
+        name,
+        &["rightleg", "rightcalf", "rightshin", "rightlowerleg"],
+    )
 }
 
 pub fn is_left_hip(name: &str) -> bool {
@@ -161,21 +169,13 @@ fn world_of(entity: Entity, globals: &Query<&GlobalTransform>) -> Option<Vec3> {
 
 fn apply_aim(
     entity: Entity,
-    parent: Entity,
+    parent_rot: Quat,
+    bone_world_rot: Quat,
     from: Vec3,
     to: Vec3,
     transforms: &mut Query<&mut Transform>,
-    globals: &Query<&GlobalTransform>,
 ) {
-    let (Ok(parent_g), Ok(self_g)) = (globals.get(parent), globals.get(entity)) else {
-        return;
-    };
-    let local = local_rotation_toward(
-        parent_g.rotation(),
-        self_g.rotation(),
-        from,
-        to,
-    );
+    let local = local_rotation_toward(parent_rot, bone_world_rot, from, to);
     if let Ok(mut tf) = transforms.get_mut(entity) {
         tf.rotation = local;
     }
@@ -256,18 +256,62 @@ fn plant_pair(
     ) else {
         return;
     };
-    let surface = terrain.sample(foot_p.x, foot_p.z);
-    let Some(y) = plant_foot_y(foot_p.y, surface).map(|target| {
-        foot_p.y + (target - foot_p.y) * weight
-    }) else {
+    let surface = if terrain.in_field(foot_p.x, foot_p.z) {
+        terrain
+            .surface_below(foot_p.x, foot_p.z, foot_p.y + FOOT_MAX_ERROR)
+            .unwrap_or_else(|| terrain.sample_mesh_surface(foot_p.x, foot_p.z))
+    } else {
+        return;
+    };
+    let Some(y) =
+        plant_foot_y(foot_p.y, surface).map(|target| foot_p.y + (target - foot_p.y) * weight)
+    else {
         return;
     };
     let goal = Vec3::new(foot_p.x, y, foot_p.z);
     let (new_knee, new_foot) = solve_two_bone(hip_p, knee_p, foot_p, goal);
     let hip_parent = parents.get(*hip).map(|c| c.parent()).unwrap_or(*hip);
+    let (Ok(hip_global), Ok(knee_global)) = (globals.get(*hip), globals.get(*knee)) else {
+        return;
+    };
+    let hip_parent_rot = globals
+        .get(hip_parent)
+        .map(|g| g.rotation())
+        .unwrap_or_else(|_| hip_global.rotation());
+    // `local_rotation_toward` trata os vetores como DIREÇÕES: passar posições
+    // absolutas alinhava o osso com o ponto do mundo (o joelho dobrava ao
+    // contrário perto da origem e o IK sumia longe dela).
+    let hip_local = local_rotation_toward(
+        hip_parent_rot,
+        hip_global.rotation(),
+        knee_p - hip_p,
+        new_knee - hip_p,
+    );
+    if let Ok(mut tf) = transforms.get_mut(*hip) {
+        tf.rotation = hip_local;
+    }
+    // A coxa acabou de rodar: o `GlobalTransform` do osso só é reconstruído
+    // depois deste sistema, por isso ler o pai da canela daqui devolvia a
+    // rotação ANTIGA. A canela herdava então o delta da coxa duas vezes (a
+    // direção saía rodada e o pé não chegava ao alvo). O pai efetivo da
+    // canela é a rotação NOVA da coxa.
     let knee_parent = parents.get(*knee).map(|c| c.parent()).unwrap_or(*hip);
-    apply_aim(*hip, hip_parent, knee_p, new_knee, transforms, globals);
-    apply_aim(*knee, knee_parent, foot_p, new_foot, transforms, globals);
+    let knee_parent_rot = if knee_parent == *hip {
+        hip_parent_rot * hip_local
+    } else {
+        globals
+            .get(knee_parent)
+            .map(|g| g.rotation())
+            .unwrap_or_else(|_| knee_global.rotation())
+    };
+    apply_aim(
+        *knee,
+        knee_parent_rot,
+        knee_global.rotation(),
+        foot_p - knee_p,
+        new_foot - knee_p,
+        transforms,
+    );
 }
 
 /// Envelope de voz que abre a mandíbula enquanto o clip toca.
@@ -300,7 +344,10 @@ pub fn jaw_system(
         let Some((jaw, _)) = bones.into_iter().find(|(_, n)| is_jaw(n)) else {
             continue;
         };
-        let parent = parents.get(jaw).map(|c| c.parent()).unwrap_or(animator.player);
+        let parent = parents
+            .get(jaw)
+            .map(|c| c.parent())
+            .unwrap_or(animator.player);
         let Ok(parent_g) = globals.get(parent) else {
             continue;
         };
@@ -314,17 +361,119 @@ pub fn jaw_system(
     }
 }
 
+/// Rotações ADITIVAS por osso do herói, aplicadas **depois** da animação
+/// (idle/walk/run/ataques) e **antes** da propagação de transforms.
+///
+/// É a camada que deixa o braço segurar a tocha inclinado à frente sem
+/// congelar a locomoção: o clipe escreve a pose, isto soma uma rotação local
+/// por cima. A chave é o nome do osso (`"upperarm_r"`, `"clavicle_r"`, …);
+/// `Quat::IDENTITY` remove a entrada.
+#[derive(Debug, Clone, Default, Resource)]
+pub struct PlayerBoneOffsets {
+    pub entries: Vec<(String, Quat)>,
+}
+
+impl PlayerBoneOffsets {
+    pub fn set(&mut self, bone: &str, rotation: Quat) {
+        if let Some(entry) = self.entries.iter_mut().find(|(name, _)| name == bone) {
+            entry.1 = rotation;
+        } else {
+            self.entries.push((bone.to_string(), rotation));
+        }
+    }
+
+    pub fn clear(&mut self, bone: &str) {
+        self.entries.retain(|(name, _)| name != bone);
+    }
+}
+
+/// Soma as rotações de [`PlayerBoneOffsets`] aos ossos do herói. Corre no
+/// `PostUpdate` depois de `AnimationSystems` (a pose do clipe já está
+/// escrita) e antes de `TransformSystems::Propagate` (os filhos — mão,
+/// lampião — vêem a rotação no mesmo frame).
+/// Desce a partir da entidade `<PlayerGLTF>` até ao `CharacterAnimator`.
+///
+/// O `Player` vive no nó XML; o `CharacterAnimator`/`FootIk` são inseridos
+/// no **root da cena glTF** (um descendente), por isso uma query
+/// `With<Player>` no animator vinha VAZIA — era o motivo de o braço da
+/// tocha não mexer. Isto atravessa a hierarquia e devolve o primeiro filho
+/// com animator (os tiers de LOD são rebindados pelo `rearm`).
+fn find_animator<'a>(
+    root: Entity,
+    children: &Query<&Children>,
+    animators: &'a Query<(Entity, &CharacterAnimator)>,
+) -> Option<&'a CharacterAnimator> {
+    if let Ok((_, animator)) = animators.get(root) {
+        return Some(animator);
+    }
+    for child in children.get(root).ok()?.iter() {
+        if let Some(found) = find_animator(child, children, animators) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+pub fn player_bone_offsets_system(
+    offsets: Res<PlayerBoneOffsets>,
+    players: Query<Entity, With<crate::player::Player>>,
+    animators: Query<(Entity, &CharacterAnimator)>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    rigs: Query<Has<FrozenAnimation>>,
+    mut transforms: Query<&mut Transform>,
+) {
+    if offsets.entries.is_empty() {
+        return;
+    }
+    let Some(player) = players.iter().next() else {
+        return;
+    };
+    let Some(animator) = find_animator(player, &children, &animators) else {
+        return;
+    };
+    if rigs.get(animator.player).unwrap_or(false) {
+        return;
+    }
+    let mut bones = Vec::new();
+    walk_bones(animator.player, &children, &names, &mut bones);
+    for (bone, rotation) in &offsets.entries {
+        // A chave vem do script (`upperarm_r`), mas `bone_matches` normaliza
+        // o NOME do osso (`upperarmr`) — sem normalizar a agulha também, o
+        // `viber.bone_offset` documentado nunca casava com nada.
+        let needle = crate::animation::normalize_clip_name(bone);
+        let Some((entity, _)) = bones
+            .iter()
+            .find(|(_, name)| bone_matches(name, &[needle.as_str()]))
+        else {
+            continue;
+        };
+        if let Ok(mut tf) = transforms.get_mut(*entity) {
+            // Pós-multiplica no espaço LOCAL do osso: a rotação soma-se à
+            // pose animada em vez de a substituir.
+            tf.rotation = (tf.rotation * *rotation).normalize();
+        }
+    }
+}
+
 pub struct IkPlugin;
 
 impl Plugin for IkPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoiceEnvelope>().add_systems(
-            PostUpdate,
-            (foot_ik_system, decay_voice_envelope, jaw_system)
-                .chain()
-                .after(bevy::app::AnimationSystems)
-                .before(bevy::transform::TransformSystems::Propagate),
-        );
+        app.init_resource::<VoiceEnvelope>()
+            .init_resource::<PlayerBoneOffsets>()
+            .add_systems(
+                PostUpdate,
+                (
+                    foot_ik_system,
+                    player_bone_offsets_system,
+                    decay_voice_envelope,
+                    jaw_system,
+                )
+                    .chain()
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 

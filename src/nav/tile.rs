@@ -113,7 +113,9 @@ pub fn retile_navmesh(
         );
         return;
     }
-    let Ok(player) = players.single() else {
+    // `single()` falha com 2+ players (co-op) e a navegação congelava;
+    // o resto do jogo tolera vários e usa o primeiro.
+    let Some(player) = players.iter().next() else {
         return; // no hero yet: nothing to centre on
     };
     let here = player.translation().xz();

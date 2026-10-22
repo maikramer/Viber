@@ -113,7 +113,15 @@ impl InteractionFocus {
 pub fn focus_interactions(
     mut focus: ResMut<InteractionFocus>,
     players: Query<&GlobalTransform, With<Player>>,
-    targets: Query<(Entity, &GlobalTransform, &ScriptInteraction), Without<Player>>,
+    targets: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            &ScriptInteraction,
+            Option<&crate::vitals::Health>,
+        ),
+        (Without<Player>, Without<crate::corpse::Corpse>),
+    >,
 ) {
     focus.clear();
     // `iter().next()` e não `single()`: ≥2 players não pode matar a interação.
@@ -121,7 +129,10 @@ pub fn focus_interactions(
         return;
     };
     let origin = player.translation();
-    for (entity, transform, interaction) in &targets {
+    for (entity, transform, interaction, health) in &targets {
+        if health.is_some_and(|h| h.current <= 0.0) {
+            continue;
+        }
         let distance = transform.translation().distance(origin);
         if distance <= interaction.range {
             focus.consider(interaction.key, entity, distance);
