@@ -13,8 +13,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use bevy::math::Vec2;
+use bevy::math::{Affine3A, Vec2, Vec3};
 
+use crate::glb_bounds::GlbBounds;
+use crate::physics::ColliderShape;
 use crate::recipes::{EntityKind, EntitySpec, ParsedWorld};
 use crate::terrain::cliffs::CliffSpec;
 use crate::terrain::cut::CutSpec;
@@ -66,6 +68,8 @@ enum RefKind {
     Audio,
     Script,
     Stylesheet,
+    /// Binário `.vinst` de instâncias pré-geradas (vegetação estática).
+    Instances,
 }
 
 struct AssetRef {
@@ -143,6 +147,13 @@ pub fn audit(
     collect_features(&world.entities, [0.0, 0.0], &mut features);
     report.issues.extend(audit_feature_conflicts(&features));
 
+    // Props sólidos gerados dentro uns dos outros (ou dentro de props autorais).
+    // Ver [`audit_static_overlaps`]: o `analyze` dizia "OK" com árvores geradas
+    // a nascer dentro da pedra de musgo e arbustos empilhados no mesmo ponto.
+    report
+        .issues
+        .extend(audit_static_overlaps(&world.entities, asset_roots));
+
     // SFX carregados por path HARDCODED na engine — ver
     // [`engine_audio_files`]. Os paths vêm do `sfx_dir` do config do jogo.
     for file in engine_audio_files(config) {
@@ -215,6 +226,17 @@ pub fn audit(
                 }
             }
             RefKind::Script | RefKind::Stylesheet => {}
+            RefKind::Instances => {
+                if let Err(error) = crate::vinst::read(&path) {
+                    report.issues.push(AuditIssue {
+                        severity: Severity::Warning,
+                        message: format!(
+                            "instâncias inválidas: {} ({error}) — {context}",
+                            path.display()
+                        ),
+                    });
+                }
+            }
         }
     }
     report
@@ -223,7 +245,7 @@ pub fn audit(
 /// Quest × mundo montado: conteúdo morto é bug de conteúdo.
 ///
 /// Duas ligações do `simple-rpg` só existem por NOME, e ambas falham em
- /// Recursão pela árvore de entidades recolhendo refs + GLBs sem collider.
+/// Recursão pela árvore de entidades recolhendo refs + GLBs sem collider.
 fn collect_entities(
     entities: &[EntitySpec],
     world_dir: &Path,
@@ -268,12 +290,27 @@ fn collect_entities(
             });
         }
         match &entity.kind {
-            EntityKind::GltfScene { url, .. } | EntityKind::PlayerGltf { url } => {
+            EntityKind::GltfScene {
+                url, lod1, lod2, ..
+            } => {
                 // O herói tem character controller próprio (colisão via
                 // Rapier, não via attr); o resto herda collider do ancestral.
-                if !collider_covered && matches!(entity.kind, EntityKind::GltfScene { .. }) {
+                if !collider_covered {
                     report.colliderless.push(url.clone());
                 }
+                // A ladder de LOD do `<GltfScene>` são ficheiros como os
+                // outros: sem este braço um `lod1-url`/`lod2-url` em falta
+                // (ou corrompido) passava o `analyze` em silêncio e o LOD só
+                // degradava no arranque com um warn.
+                for asset in std::iter::once(url).chain(lod1.iter()).chain(lod2.iter()) {
+                    refs.push(AssetRef {
+                        kind: RefKind::Glb,
+                        path: resolve_asset(asset_roots, asset),
+                        context: format!("<{asset}> {label}"),
+                    });
+                }
+            }
+            EntityKind::PlayerGltf { url } => {
                 refs.push(AssetRef {
                     kind: RefKind::Glb,
                     path: resolve_asset(asset_roots, url),
@@ -353,6 +390,15 @@ fn collect_entities(
                         kind: RefKind::Glb,
                         path: resolve_asset(asset_roots, mesh),
                         context: format!("<vegetation mesh=\"{mesh}\"> {label}"),
+                    });
+                }
+                // Um `.vinst` ausente/corrompido faz o runtime omitir o grupo
+                // inteiro com um warn no arranque; o analyze tem de o ver.
+                if let Some(instances) = &spec.instances {
+                    refs.push(AssetRef {
+                        kind: RefKind::Instances,
+                        path: resolve_asset(asset_roots, instances),
+                        context: format!("<vegetation instances=\"{instances}\"> {label}"),
                     });
                 }
             }
@@ -787,6 +833,237 @@ fn audit_feature_conflicts(idx: &FeatureIndex) -> Vec<AuditIssue> {
     }
     issues.sort_by(|a, b| a.message.cmp(&b.message));
     issues
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Props sólidos dentro uns dos outros.
+//
+// O gerador de vegetation/scatter coloca milhares de instâncias: o
+// `avoid-overlaps` do runtime já usa a pegada dos grupos, mas os grupos
+// pré-gerados do XML e o `viber tool scatter` antigo registavam 0,8 m fixos
+// por instância existente — árvores grandes passavam umas pelas outras e
+// nasciam dentro de props autorais (a pedra de musgo do pântano).
+//
+// Aqui a pegada é o AABB REAL do GLB (com a quantização i16 e o scale dos
+// nós), não o `footprint-radius` autoral: o audit vê o que o jogador vê. O
+// teste é conservador de propósito — só acusa quando o CENTRO de um prop cai
+// dentro da caixa do outro, com penetração ≥ 0,35 m. Encostar de lado é
+// normal tanto em pedras como em árvores; estar dentro não é.
+//
+// Props autorais entre si NÃO são acusados: um pilar caído "dentro" de uma
+// ruína e o obelisco encaixado no altar são composições à mão. O que o audit
+// protege é o que o BAKER pode estragar: pares com pelo menos uma instância
+// gerada (`inst-…`).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Folga (m) da borda ao testar se um centro está dentro da caixa.
+const OVERLAP_MARGIN: f32 = 0.15;
+/// Penetração mínima (m) — abaixo disto é encosto, não sobreposição.
+const OVERLAP_DEPTH_MIN: f32 = 0.35;
+/// Sobreposição vertical mínima (m) — dois props no mesmo XZ mas um em cima
+/// do outro (numa prateleira, no altar) não colidem.
+const OVERLAP_Y_MIN: f32 = 0.25;
+/// Lado da célula do índice espacial (m).
+const OVERLAP_CELL: f32 = 8.0;
+
+struct SolidBox {
+    label: String,
+    /// Instância de `<Group generated-by>` (`inst-…`) — o baker pode mexer.
+    generated: bool,
+    inverse: Affine3A,
+    local_min: Vec3,
+    local_max: Vec3,
+    center: Vec3,
+    world_min: Vec3,
+    world_max: Vec3,
+    y_min: f32,
+    y_max: f32,
+}
+
+fn bounds_corners(world: Affine3A, bounds: GlbBounds) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for corner in 0..8 {
+        let local = Vec3::new(
+            if corner & 1 == 0 {
+                bounds.min.x
+            } else {
+                bounds.max.x
+            },
+            if corner & 2 == 0 {
+                bounds.min.y
+            } else {
+                bounds.max.y
+            },
+            if corner & 4 == 0 {
+                bounds.min.z
+            } else {
+                bounds.max.z
+            },
+        );
+        let point = world.transform_point3(local);
+        min = min.min(point);
+        max = max.max(point);
+    }
+    (min, max)
+}
+
+/// Recolhe os `<GltfScene>` que ocupam espaço. Um nó é sólido quando ele (ou
+/// um ancestral) tem collider, ou quando é uma instância gerada — a folhagem
+/// gerada também conta: arbusto dentro de arbusto é o mesmo bug.
+fn collect_solids(
+    entities: &[EntitySpec],
+    parent_world: Affine3A,
+    ancestor_collider: bool,
+    roots: &[PathBuf],
+    bounds_cache: &mut HashMap<PathBuf, Option<GlbBounds>>,
+    out: &mut Vec<SolidBox>,
+) {
+    for entity in entities {
+        let world = parent_world * crate::placement::entity_affine(&entity.transform);
+        let has_collider = !matches!(entity.physics.collider, ColliderShape::None);
+        let generated = entity
+            .name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("inst-"));
+        let solid = has_collider || ancestor_collider || generated;
+        if let EntityKind::GltfScene { url, .. } = &entity.kind
+            && solid
+        {
+            let path = resolve_asset(roots, url);
+            let bounds = *bounds_cache
+                .entry(path.clone())
+                .or_insert_with(|| crate::glb_bounds::read(&path));
+            if let Some(bounds) = bounds {
+                let (min, max) = bounds_corners(world, bounds);
+                let inverse = world.inverse();
+                if world.matrix3.determinant().abs() > 1e-12
+                    && inverse.matrix3.is_finite()
+                    && min.is_finite()
+                    && max.is_finite()
+                {
+                    let center = (min + max) * 0.5;
+                    let label = entity.name.clone().unwrap_or_else(|| {
+                        let file = url.rsplit('/').next().unwrap_or(url);
+                        format!("{file} em ({:.0}, {:.0})", center.x, center.z)
+                    });
+                    out.push(SolidBox {
+                        label,
+                        generated,
+                        inverse,
+                        local_min: bounds.min,
+                        local_max: bounds.max,
+                        center,
+                        world_min: min,
+                        world_max: max,
+                        y_min: min.y,
+                        y_max: max.y,
+                    });
+                }
+            }
+        }
+        collect_solids(&entity.children, world, solid, roots, bounds_cache, out);
+    }
+}
+
+/// Profundidade (m) com que `point` penetra a caixa, ou `None` quando está
+/// fora (com [`OVERLAP_MARGIN`] de folga). O teste é no referencial LOCAL —
+/// a Y global do par não bastava: uma árvore inclinada tem AABB mundo alto,
+/// mas o ponto pode estar acima do topo LOCAL da caixa.
+fn containment_depth(solid: &SolidBox, point: Vec3) -> Option<f32> {
+    let local = solid.inverse.transform_point3(point);
+    let x = (solid.local_min.x, solid.local_max.x);
+    let z = (solid.local_min.z, solid.local_max.z);
+    if local.x < x.0 - OVERLAP_MARGIN
+        || local.x > x.1 + OVERLAP_MARGIN
+        || local.y < solid.local_min.y - OVERLAP_MARGIN
+        || local.y > solid.local_max.y + OVERLAP_MARGIN
+        || local.z < z.0 - OVERLAP_MARGIN
+        || local.z > z.1 + OVERLAP_MARGIN
+    {
+        return None;
+    }
+    let dx = (local.x - x.0).min(x.1 - local.x);
+    let dz = (local.z - z.0).min(z.1 - local.z);
+    Some(dx.min(dz))
+}
+
+fn audit_static_overlaps(entities: &[EntitySpec], roots: &[PathBuf]) -> Vec<AuditIssue> {
+    let mut solids = Vec::new();
+    let mut bounds_cache = HashMap::new();
+    collect_solids(
+        entities,
+        Affine3A::IDENTITY,
+        false,
+        roots,
+        &mut bounds_cache,
+        &mut solids,
+    );
+    if solids.len() < 2 {
+        return Vec::new();
+    }
+
+    // Índice espacial barato: 4,5 mil props não podem ser O(n²).
+    let mut cells: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (index, solid) in solids.iter().enumerate() {
+        let half_x = (solid.world_max.x - solid.world_min.x) * 0.5;
+        let half_z = (solid.world_max.z - solid.world_min.z) * 0.5;
+        let radius = half_x.max(half_z);
+        let x0 = ((solid.center.x - radius) / OVERLAP_CELL).floor() as i32;
+        let x1 = ((solid.center.x + radius) / OVERLAP_CELL).floor() as i32;
+        let z0 = ((solid.center.z - radius) / OVERLAP_CELL).floor() as i32;
+        let z1 = ((solid.center.z + radius) / OVERLAP_CELL).floor() as i32;
+        for cz in z0..=z1 {
+            for cx in x0..=x1 {
+                cells.entry((cx, cz)).or_default().push(index);
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut hits: Vec<(f32, usize, usize)> = Vec::new();
+    for bucket in cells.values() {
+        for (slot, &a) in bucket.iter().enumerate() {
+            for &b in &bucket[(slot + 1)..] {
+                let key = (a.min(b), a.max(b));
+                if !seen.insert(key) {
+                    continue;
+                }
+                let (left, right) = (&solids[key.0], &solids[key.1]);
+                if !left.generated && !right.generated {
+                    continue; // composição autoral: pilar caído na ruína, obelisco no altar
+                }
+                let y_overlap = left.y_max.min(right.y_max) - left.y_min.max(right.y_min);
+                if y_overlap < OVERLAP_Y_MIN {
+                    continue;
+                }
+                let depth = containment_depth(left, right.center)
+                    .into_iter()
+                    .chain(containment_depth(right, left.center))
+                    .fold(0.0f32, f32::max);
+                if depth >= OVERLAP_DEPTH_MIN {
+                    hits.push((depth, key.0, key.1));
+                }
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    hits.into_iter()
+        .map(|(depth, a, b)| {
+            let left = &solids[a];
+            let right = &solids[b];
+            let x = (left.center.x + right.center.x) * 0.5;
+            let z = (left.center.z + right.center.z) * 0.5;
+            AuditIssue {
+                severity: Severity::Warning,
+                message: format!(
+                    "sobreposição: `{}` dentro de `{}` em ({x:.0}, {z:.0}) — {depth:.1} m de \
+                     penetração; move um deles ou regenera o scatter (`viber tool scatter`)",
+                    left.label, right.label
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Testa UMA estrada (de `<Road>` ou expandida de rede) contra lagos, rios e
@@ -1423,6 +1700,44 @@ mod tests {
         );
     }
 
+    /// A ladder `lod1-url`/`lod2-url` de um `<GltfScene>` é uma referência de
+    /// ficheiro: um tier em falta tem de sair no relatório (antes só o URL
+    /// principal era auditado — o LOD degradava em silêncio no arranque).
+    #[test]
+    fn test_gltf_scene_lod_tiers_are_audited() {
+        let (_dir, world_dir, asset_root) = setup();
+        std::fs::write(asset_root.join("assets/meshes/a_lod0.glb"), glb_bytes(None)).unwrap();
+        let world = ParsedWorld {
+            entities: vec![entity(
+                "tree",
+                EntityKind::GltfScene {
+                    url: "/assets/meshes/a_lod0.glb".into(),
+                    lod1: Some("/assets/meshes/a_lod1.glb".into()),
+                    lod2: None,
+                    lod_near: 40.0,
+                    lod_mid: 100.0,
+                },
+                Default::default(),
+            )],
+            ..Default::default()
+        };
+        let report = audit(
+            &world,
+            &world_dir,
+            &[asset_root.clone()],
+            &crate::config::fixture(),
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.severity == Severity::Missing
+                    && issue.message.contains("a_lod1.glb")),
+            "{:?}",
+            report.issues
+        );
+    }
+
     #[test]
     fn test_draco_is_flagged_and_meshopt_is_not() {
         let (_dir, world_dir, asset_root) = setup();
@@ -1988,5 +2303,90 @@ mod tests {
             .collect();
         assert_eq!(hits.len(), 1, "{issues:?}");
         assert_eq!(hits[0].severity, Severity::Warning);
+    }
+
+    /// GLB de um cubo unitário centrado na origem — bounds de 1 m para o
+    /// teste de sobreposição.
+    fn glb_cube_bytes() -> Vec<u8> {
+        let json = r#"{"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],"accessors":[{"componentType":5126,"type":"VEC3","count":8,"min":[-0.5,-0.5,-0.5],"max":[0.5,0.5,0.5]}]}"#;
+        let mut out = Vec::from(&b"glTF"[..]);
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(12 + 8 + json.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(json.as_bytes());
+        out
+    }
+
+    /// O bug real: uma instância gerada nasce dentro de um prop autoral. O
+    /// audit antigo dizia OK; agora acusa com os dois nomes.
+    #[test]
+    fn test_generated_inside_authored_is_reported() {
+        let (_dir, world_dir, asset_root) = setup();
+        std::fs::write(asset_root.join("assets/meshes/cube.glb"), glb_cube_bytes()).unwrap();
+        let rock = entity(
+            "pedra",
+            EntityKind::gltf_scene("/assets/meshes/cube.glb"),
+            ColliderShape::Auto,
+        );
+        let mut tree = entity(
+            "inst-grp-1-0000",
+            EntityKind::gltf_scene("/assets/meshes/cube.glb"),
+            ColliderShape::None,
+        );
+        tree.transform.translation = [0.1, 0.0, 0.0];
+        let world = ParsedWorld {
+            entities: vec![rock, tree],
+            ..Default::default()
+        };
+        let config = crate::config::fixture();
+        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let hits: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.message.contains("sobreposição"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{:?}", report.issues);
+        assert!(hits[0].message.contains("pedra"), "{}", hits[0].message);
+        assert!(
+            hits[0].message.contains("inst-grp-1-0000"),
+            "{}",
+            hits[0].message
+        );
+        assert_eq!(hits[0].severity, Severity::Warning);
+    }
+
+    /// Composição AUTORAL (pilar caído dentro da ruína, obelisco no altar)
+    /// não é o bug do baker — o audit não acusa autoral×autoral.
+    #[test]
+    fn test_authored_props_may_overlap_on_purpose() {
+        let (_dir, world_dir, asset_root) = setup();
+        std::fs::write(asset_root.join("assets/meshes/cube.glb"), glb_cube_bytes()).unwrap();
+        let mut altar = entity(
+            "altar",
+            EntityKind::gltf_scene("/assets/meshes/cube.glb"),
+            ColliderShape::Auto,
+        );
+        let mut needle = entity(
+            "obelisco",
+            EntityKind::gltf_scene("/assets/meshes/cube.glb"),
+            ColliderShape::Auto,
+        );
+        needle.transform.translation = [0.1, 0.0, 0.0];
+        altar.transform.translation = [0.0, 0.0, 0.0];
+        let world = ParsedWorld {
+            entities: vec![altar, needle],
+            ..Default::default()
+        };
+        let config = crate::config::fixture();
+        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains("sobreposição")),
+            "{:?}",
+            report.issues
+        );
     }
 }

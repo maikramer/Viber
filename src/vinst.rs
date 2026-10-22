@@ -77,7 +77,12 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<PlacedInstance>> {
         .0
         .iter()
         .map(|c| {
-            let rotation = Quat::from_xyzw(f(c, 3), f(c, 4), f(c, 5), f(c, 6)).normalize();
+            let raw = Quat::from_xyzw(f(c, 3), f(c, 4), f(c, 5), f(c, 6));
+            let rotation = if raw.length_squared() > 1e-12 {
+                raw.normalize()
+            } else {
+                Quat::IDENTITY
+            };
             let yaw_deg = rotation.to_euler(bevy::math::EulerRot::YXZ).0.to_degrees();
             PlacedInstance {
                 position: Vec3::new(f(c, 0), f(c, 1), f(c, 2)),

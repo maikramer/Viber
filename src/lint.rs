@@ -487,10 +487,18 @@ fn check_scripts(
 /// `stream`), colocados em `EntitySpec.props` pelo parser. Não são props
 /// autorais de script: não se comparam com `--@export` nem contam como
 /// órfãos quando o nó não tem `script=`.
+///
+/// Os dados de COLHEITA (`destructible`, `resource-kind`, `resource-yield`)
+/// viajam no mesmo `EntitySpec.props` (é assim que o Lua os lê por
+/// `viber.props` em qualquer entidade, com ou sem script), mas não são
+/// `prop-*` exportados: sem esta exclusão cada árvore estática do Vael virava
+/// um `script-prop-orphan` (2166 avisos num mundo só).
+const DATA_PROPS: [&str; 3] = ["destructible", "resource-kind", "resource-yield"];
+
 fn authored_props(props: &[(String, String)]) -> Vec<(String, String)> {
     props
         .iter()
-        .filter(|(key, _)| !key.starts_with("__"))
+        .filter(|(key, _)| !key.starts_with("__") && !DATA_PROPS.contains(&key.as_str()))
         .cloned()
         .collect()
 }
@@ -1049,11 +1057,7 @@ mod tests {
             2
         );
         assert!(kinds.contains(&"script-load"), "{kinds:?}");
-        assert_eq!(
-            report.errors().count(),
-            3,
-            "sintaxe×2 + viber.load"
-        );
+        assert_eq!(report.errors().count(), 3, "sintaxe×2 + viber.load");
     }
 
     #[test]

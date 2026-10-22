@@ -101,7 +101,8 @@ pub fn scatter(world: &mut World, selector: &str) -> Result<ToolOutput> {
         bail!("scatter `{id}`: o template não tem glTF");
     }
     if spec.avoid_overlaps && spec.footprint_radius <= 0.0 {
-        spec.footprint_radius = DEFAULT_FOOTPRINT;
+        let roots = doc_asset_roots(world.resource::<SceneDoc>());
+        spec.footprint_radius = auto_footprint(&spec.template_urls, &roots);
     }
 
     // Frames mundo das entidades vivas, por origem (para ocupação e para o referencial).
@@ -154,7 +155,7 @@ pub fn scatter(world: &mut World, selector: &str) -> Result<ToolOutput> {
         });
     }
     debug!(
-        "scatter `{id}`: {} placed, {others} instâncias de outros geradores na ocupação",
+        "scatter `{id}`: {} placed, {others} sólidos (gerados + autorais) na ocupação",
         instances.len()
     );
     Ok(ToolOutput {
@@ -207,7 +208,8 @@ pub fn scatter_in_region(
         bail!("scatter_brush `{id}`: o template não tem glTF");
     }
     if spec.avoid_overlaps && spec.footprint_radius <= 0.0 {
-        spec.footprint_radius = DEFAULT_FOOTPRINT;
+        let roots = doc_asset_roots(world.resource::<SceneDoc>());
+        spec.footprint_radius = auto_footprint(&spec.template_urls, &roots);
     }
     // região = o dab; contagem escala pela fração de área
     let half = spec_region_half(&recipe, &mut warnings);
@@ -287,8 +289,14 @@ fn spec_region_half(recipe: &crate::xml::XmlNode, warnings: &mut Vec<String>) ->
     let spec = crate::recipes::parse_scatter(recipe, warnings).ok();
     let min = spec.as_ref().map(|s| s.region_min).unwrap_or([0.0; 3]);
     let max = spec.as_ref().map(|s| s.region_max).unwrap_or([0.0; 3]);
-    let half_x = ((max[0] - min[0]) * 0.5).abs().max(50.0);
-    let half_z = ((max[2] - min[2]) * 0.5).abs().max(50.0);
+    let half_x = {
+        let extent = (max[0] - min[0]).abs();
+        if extent < 1e-3 { 50.0 } else { extent * 0.5 }
+    };
+    let half_z = {
+        let extent = (max[2] - min[2]).abs();
+        if extent < 1e-3 { 50.0 } else { extent * 0.5 }
+    };
     bevy::math::Vec2::new(half_x, half_z)
 }
 
@@ -327,7 +335,11 @@ fn scatter_vegetation(world: &mut World, recipe: crate::xml::XmlNode) -> Result<
     }
 
     let doc = world.resource::<SceneDoc>();
-    let path: PathBuf = doc.root_dir.join(&rel);
+    // `instances` é relativo à pasta do mundo; um `/` inicial (forma das
+    // asset roots) não pode fazer `Path::join` descartar a pasta — o
+    // `spawn_parsed` já o aparava, esta ferramenta escrevia no filesystem
+    // root.
+    let path: PathBuf = doc.root_dir.join(rel.trim_start_matches('/'));
     let previous = if path.is_file() {
         Some(std::fs::read(&path).map_err(|e| anyhow!("ler {}: {e}", path.display()))?)
     } else {
@@ -339,8 +351,8 @@ fn scatter_vegetation(world: &mut World, recipe: crate::xml::XmlNode) -> Result<
         .map_or(0, |old: Vec<_>| old.len());
     crate::vinst::write_atomic(&path, &instances)?;
     debug!(
-        "scatter vegetation `{rel}`: {before}→{} instâncias, {others} instâncias de \
-         geradores na ocupação",
+        "scatter vegetation `{rel}`: {before}→{} instâncias, {others} sólidos \
+         (gerados + autorais) na ocupação",
         instances.len()
     );
     // O XML não muda (o attr `instances` já aponta ao ficheiro): ZERO EditOps, nada para
@@ -363,9 +375,12 @@ fn scatter_vegetation(world: &mut World, recipe: crate::xml::XmlNode) -> Result<
 }
 
 /// A ocupação de partida de um scatter: as `<SpawnExclusion>` do mundo (o arranque
-/// publica-as como recurso) mais o que os OUTROS geradores já puseram no documento
-/// (os filhos dos grupos `generated-by`; `self_id` exclui o grupo do próprio).
-/// Devolve a ocupação e quantas instâncias alheias entraram nela.
+/// publica-as como recurso) mais TUDO o que já ocupa espaço no documento — as
+/// instâncias dos outros geradores (`generated-by`, `self_id` exclui a do próprio) e os
+/// props autorais com `<GltfScene>`. Sem os autorais, uma árvore gerada nascia dentro da
+/// pedra de musgo que o autor pôs à mão (o caso real do pântano); sem a pegada REAL de
+/// cada template, o registo de 0,8 m deixava as árvores grandes passarem umas pelas outras.
+/// Devolve a ocupação e quantos sólidos entraram nela.
 fn doc_occupancy(
     world: &mut World,
     frames: &HashMap<NodeOrigin, Affine3A>,
@@ -378,30 +393,110 @@ fn doc_occupancy(
         }
     }
     let doc = world.resource::<SceneDoc>();
-    let mut generated = Vec::new();
+    // A pegada vem do GLB em disco (o mesmo AABB que o audit usa); as roots do
+    // config resolvem `/assets/...` para o pool. A cache evita reler o mesmo
+    // template centenas de vezes.
+    let roots = doc_asset_roots(doc);
+    let mut footprints: HashMap<String, Option<f32>> = HashMap::new();
+    let mut others = 0usize;
     doc.walk(|node, xml| {
-        if xml
-            .attr("generated-by")
-            .is_some_and(|by| Some(by) != self_id)
+        if !xml.tag.eq_ignore_ascii_case("gltfscene") {
+            return;
+        }
+        // Templates de `<Scatter>`/`<Vegetation>` e definições de `<Prototype>` não são
+        // entidades no sítio: quem os materializa é o grupo `generated-by` ou a `<Use>`
+        // expandida. Registá-los aqui punha ocupação fantasma na origem do mundo.
+        let mut generated_by: Option<String> = None;
+        let mut current = Some(node.clone());
+        while let Some(at) = current {
+            let Some(ancestor) = doc.node(&at) else {
+                break;
+            };
+            let tag = ancestor.tag.to_ascii_lowercase();
+            if matches!(
+                tag.as_str(),
+                "scatter" | "staticspawner" | "dynamicspawner" | "vegetation" | "prototype"
+            ) {
+                return;
+            }
+            if generated_by.is_none() {
+                generated_by = ancestor.attr("generated-by").map(str::to_owned);
+            }
+            if at.is_root() {
+                break;
+            }
+            current = at.parent();
+        }
+        if generated_by
+            .as_deref()
+            .is_some_and(|by| Some(by) == self_id)
         {
-            generated.push(node.clone());
+            return;
+        }
+        let Some(url) = xml.attr("url") else {
+            return;
+        };
+        let Some(frame) = frames.get(&doc.origin_of(node)) else {
+            return;
+        };
+        let (scale, _, translation) = frame.to_scale_rotation_translation();
+        let scale_xz = scale.x.abs().max(scale.z.abs());
+        let footprint =
+            footprint_for(&roots, url, &mut footprints).unwrap_or(DEFAULT_FOOTPRINT) * scale_xz;
+        if footprint > 0.0 {
+            occupancy.register(translation.x, translation.z, footprint);
+            others += 1;
         }
     });
-    let mut others = 0;
-    for group in generated {
-        for index in 0..doc.children(&group).map_or(0, Vec::len) {
-            if let Some(frame) = frames.get(&doc.origin_of(&group.child(index))) {
-                let (scale, _, translation) = frame.to_scale_rotation_translation();
-                occupancy.register(
-                    translation.x,
-                    translation.z,
-                    DEFAULT_FOOTPRINT * scale.x.max(scale.z),
-                );
-                others += 1;
-            }
+    (occupancy, others)
+}
+
+/// Roots de assets do jogo (pasta do mundo + extras do `config.yaml`), na mesma ordem
+/// que o runtime e o audit usam. `config` ausente cai na pasta do mundo.
+fn doc_asset_roots(doc: &SceneDoc) -> Vec<PathBuf> {
+    crate::config::load(&doc.root_dir)
+        .map(|config| config.asset_roots(&doc.root_dir))
+        .unwrap_or_else(|_| vec![doc.root_dir.clone()])
+}
+
+/// Pegada de um `<Scatter>` sem `footprint-radius`: a MAIOR meia-largura entre os
+/// templates (o mesmo critério do auto-footprint do runtime). O 0,8 fixo antigo
+/// deixava carvalhos de 4 m de copa (meia-largura 2,05) passarem uns pelos outros.
+/// `DEFAULT_FOOTPRINT` só quando nenhum GLB tem bounds.
+pub(crate) fn auto_footprint(urls: &[String], roots: &[PathBuf]) -> f32 {
+    let mut cache = HashMap::new();
+    let mut largest = 0.0f32;
+    for url in urls {
+        if let Some(radius) = footprint_for(roots, url, &mut cache) {
+            largest = largest.max(radius);
         }
     }
-    (occupancy, others)
+    if largest > 0.0 {
+        largest
+    } else {
+        DEFAULT_FOOTPRINT
+    }
+}
+
+/// Pegada XZ de um template glTF (maior meia-largura do AABB), lida do disco e cacheada
+/// por URL. `None` = asset ausente/sem bounds: o chamador aplica o fallback conservador.
+fn footprint_for(
+    roots: &[PathBuf],
+    url: &str,
+    cache: &mut HashMap<String, Option<f32>>,
+) -> Option<f32> {
+    if let Some(hit) = cache.get(url) {
+        return *hit;
+    }
+    let rel = url.trim_start_matches('/');
+    let radius = roots
+        .iter()
+        .map(|root| root.join(rel))
+        .find(|path| path.is_file())
+        .and_then(|path| crate::glb_bounds::read(&path))
+        .map(|bounds| bounds.footprint_radius());
+    cache.insert(url.to_string(), radius);
+    radius
 }
 
 /// Assenta no terreno ATUAL do documento (o heightmap com as pinceladas, gravadas ou não):
@@ -656,7 +751,7 @@ pub fn list_scatters(doc: &SceneDoc) -> Value {
             }));
         } else if tag == "vegetation" && xml.attr("instances").is_some() {
             let file = xml.attr("instances").unwrap_or_default();
-            let count = std::fs::read(doc.root_dir.join(file))
+            let count = std::fs::read(doc.root_dir.join(file.trim_start_matches('/')))
                 .ok()
                 .and_then(|bytes| crate::vinst::decode(&bytes).ok())
                 .map_or(0, |instances: Vec<_>| instances.len());
