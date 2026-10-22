@@ -146,6 +146,11 @@ impl CaptureStore {
             );
         }
         let path = dir.join(format!("shot-{id}.png"));
+        // Um PNG completo de OUTRO processo com o mesmo pid (os ids reiniciam
+        // em 1 a cada arranque) seria devolvido como esta captura no primeiro
+        // poll que o visse. O id é único dentro do processo: apagar antes de
+        // pedir elimina o resto antigo sem tocar em capturas em voo.
+        let _ = std::fs::remove_file(&path);
         let info = CaptureInfo {
             id,
             status: "pending".into(),

@@ -39,10 +39,22 @@ pub struct BridgeEvent {
 
 /// Ring partilhado (mesmo padrão do `logs` ring): escrito pelo coletor,
 /// lido pelo handler da REPL/BRP.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct BridgeEventLog {
     buffer: VecDeque<BridgeEvent>,
     next_seq: u64,
+}
+
+impl Default for BridgeEventLog {
+    fn default() -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            // `seq` começa em 1: o cursor documentado é "último seq visto" e o
+            // default dos clientes é 0 (`> since`) — com `seq` 0 o PRIMEIRO
+            // evento da sessão nunca era devolvido.
+            next_seq: 1,
+        }
+    }
 }
 
 impl BridgeEventLog {

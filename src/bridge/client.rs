@@ -356,11 +356,7 @@ impl BridgeClient {
 
     /// Exporta o trace (`viber.profiler.trace_export`) e devolve
     /// `{path, bytes, frames, events, truncated}`.
-    pub fn trace_export(
-        &self,
-        path: Option<&std::path::Path>,
-        format: &str,
-    ) -> Result<Value> {
+    pub fn trace_export(&self, path: Option<&std::path::Path>, format: &str) -> Result<Value> {
         let mut params = json!({ "format": format });
         if let Some(path) = path {
             params["path"] = json!(path.display().to_string());

@@ -85,10 +85,7 @@ Threads:\t23
         assert!((snap.rss_mb.unwrap() - 384.0).abs() < 1e-6);
         assert!((snap.peak_rss_mb.unwrap() - 512.0).abs() < 1e-6);
         assert_eq!(snap.threads, Some(23));
-        assert_eq!(
-            snap.line().as_deref(),
-            Some("384 MiB (pico 512) · 23 thr")
-        );
+        assert_eq!(snap.line().as_deref(), Some("384 MiB (pico 512) · 23 thr"));
     }
 
     #[test]

@@ -129,10 +129,7 @@ fn test_bridge_end_to_end_headless() {
     }
     click.join().unwrap().expect("input.click responde");
     mouse_move.join().unwrap().expect("input.move responde");
-    assert!(
-        cursors.len() >= 2,
-        "CursorMoved de click+move: {cursors:?}"
-    );
+    assert!(cursors.len() >= 2, "CursorMoved de click+move: {cursors:?}");
     // O clique é injectado no PreUpdate do frame SEGUINTE (press agora,
     // release depois — ver `deferred_mouse_release`): dá-lhe dois frames.
     app.update();
@@ -1120,9 +1117,7 @@ fn test_bridge_lua_control_round4() {
     );
     assert_eq!(r["applied"], serde_json::json!(0));
     assert!(
-        r["warnings"]
-            .as_array()
-            .is_some_and(|w| w.len() >= 3),
+        r["warnings"].as_array().is_some_and(|w| w.len() >= 3),
         "as três ops avisam: {}",
         r["warnings"]
     );

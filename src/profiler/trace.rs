@@ -145,7 +145,9 @@ static STATE: Mutex<State> = Mutex::new(State::new());
 static ON: AtomicBool = AtomicBool::new(false);
 
 fn lock() -> std::sync::MutexGuard<'static, State> {
-    STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `true` enquanto há um trace a gravar.
@@ -259,7 +261,13 @@ pub fn record_system_event(group: Group, name: &'static str, ms: f32) {
     let Some(rec) = state.recording.as_mut() else {
         return;
     };
-    push_event(rec, Cow::Borrowed(name), group.as_str(), ms, EventKind::System);
+    push_event(
+        rec,
+        Cow::Borrowed(name),
+        group.as_str(),
+        ms,
+        EventKind::System,
+    );
 }
 
 /// Registo de um escopo por script (`script/<ficheiro>`).
@@ -335,12 +343,7 @@ fn push_event(
 /// configurada fecha o trace sozinho. `hitch_top` só vem preenchido quando o
 /// frame passou o limiar (a atribuição que o resumo publica); `counters`
 /// entra nas amostras periódicas.
-pub fn record_frame(
-    frame: u64,
-    ms: f32,
-    hitch_top: Option<Value>,
-    counters: Option<Value>,
-) {
+pub fn record_frame(frame: u64, ms: f32, hitch_top: Option<Value>, counters: Option<Value>) {
     if !is_recording() {
         return;
     }
@@ -672,7 +675,11 @@ fn write_chrome(out: &mut impl Write, finished: &Finished) -> std::io::Result<()
         };
         if take_event {
             let event = &finished.events[ei];
-            let ph = if event.kind == EventKind::Mark { "i" } else { "X" };
+            let ph = if event.kind == EventKind::Mark {
+                "i"
+            } else {
+                "X"
+            };
             emit!(ChromeEvent {
                 name: event.name.as_ref(),
                 cat: Some(event.group),
@@ -682,8 +689,7 @@ fn write_chrome(out: &mut impl Write, finished: &Finished) -> std::io::Result<()
                 ts: event.ts_us,
                 dur: (event.kind != EventKind::Mark).then_some(event.dur_us),
                 s: (event.kind == EventKind::Mark).then_some("g"),
-                args: (event.kind == EventKind::Mark)
-                    .then(|| json!({ "frame": event.frame })),
+                args: (event.kind == EventKind::Mark).then(|| json!({ "frame": event.frame })),
             });
             ei += 1;
         } else {
@@ -834,7 +840,12 @@ mod tests {
         record_script_event("enemies/wolf.lua", 0.5);
         mark("checkpoint").expect("marca gravada");
         record_frame(7, 16.0, None, Some(json!({ "entities": 100 })));
-        record_frame(8, 80.0, Some(json!([{ "name": "combat.melee", "ms": 40.0 }])), None);
+        record_frame(
+            8,
+            80.0,
+            Some(json!([{ "name": "combat.melee", "ms": 40.0 }])),
+            None,
+        );
         let status = stop();
         assert_eq!(status["recording"], false);
         assert!(status["last"]["events"].as_u64().unwrap() >= 3);
@@ -852,30 +863,40 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("ler trace");
         let value: Value = serde_json::from_str(&text).expect("json válido");
         let events = value["traceEvents"].as_array().expect("traceEvents");
-        assert!(events.iter().any(|event| {
-            event["name"] == "process_name" && event["ph"] == "M"
-        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["name"] == "process_name" && event["ph"] == "M" })
+        );
         assert!(events.iter().any(|event| {
             event["name"] == "combat.melee"
                 && event["cat"] == "combat"
                 && event["ph"] == "X"
                 && event["tid"] == 1
         }));
-        assert!(events.iter().any(|event| {
-            event["name"] == "enemies/wolf.lua" && event["tid"] == 2
-        }));
-        assert!(events.iter().any(|event| {
-            event["name"] == "checkpoint" && event["ph"] == "i"
-        }));
-        assert!(events.iter().any(|event| {
-            event["name"] == "frame_ms" && event["ph"] == "C"
-        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["name"] == "enemies/wolf.lua" && event["tid"] == 2 })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["name"] == "checkpoint" && event["ph"] == "i" })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["name"] == "frame_ms" && event["ph"] == "C" })
+        );
         assert!(events.iter().any(|event| {
             event["name"] == "hitch" && event["args"]["ms"].as_f64() == Some(80.0)
         }));
-        assert!(events.iter().any(|event| {
-            event["name"] == "entities" && event["ph"] == "C"
-        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["name"] == "entities" && event["ph"] == "C" })
+        );
     }
 
     #[test]

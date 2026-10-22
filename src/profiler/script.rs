@@ -235,6 +235,12 @@ pub fn run_profiler_cmd(world: &mut World, cmd: &str) -> String {
         _ => {
             if let Some(delta) = cmd.strip_prefix("radius:") {
                 let delta: f32 = delta.trim().parse().unwrap_or(0.0);
+                // NaN/inf: `clamp` propaga NaN e `dist > NaN` é sempre falso —
+                // a aba Mundo passava a listar TODAS as entidades e nunca
+                // recuperava (o raio ficava NaN para sempre).
+                if !delta.is_finite() {
+                    return "raio inválido".into();
+                }
                 if let Some(mut state) = world.get_resource_mut::<ProfilerState>() {
                     state.nearby_radius = (state.nearby_radius + delta).clamp(5.0, 200.0);
                     return format!("raio: {:.0} m", state.nearby_radius);
@@ -323,6 +329,15 @@ mod tests {
         assert_eq!(run_profiler_cmd(&mut world, "radius:+15"), "raio: 45 m");
         assert_eq!(run_profiler_cmd(&mut world, "radius:-100"), "raio: 5 m");
         assert_eq!(run_profiler_cmd(&mut world, "radius:+500"), "raio: 200 m");
+        // NaN/inf não podem contaminar o raio (a comparação com NaN é sempre
+        // falsa e a aba Mundo listava tudo).
+        assert_eq!(run_profiler_cmd(&mut world, "radius:nan"), "raio inválido");
+        assert_eq!(
+            world.resource::<ProfilerState>().nearby_radius,
+            200.0,
+            "raio intacto"
+        );
+        assert_eq!(run_profiler_cmd(&mut world, "radius:inf"), "raio inválido");
         assert_eq!(
             run_profiler_cmd(&mut world, "wat"),
             "comando desconhecido: wat"

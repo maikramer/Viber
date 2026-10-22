@@ -1043,9 +1043,11 @@ mod tests {
         assert!((rows[0].ms - 5.0).abs() < 1e-4);
         assert_eq!(rows[0].calls, 2);
         assert!((rows[0].pct - 50.0).abs() < 1e-4);
-        assert!(rows.iter().any(|row| {
-            row.name == "test-hot.lua" && row.group == "scripts" && row.calls == 1
-        }));
+        assert!(
+            rows.iter().any(|row| {
+                row.name == "test-hot.lua" && row.group == "scripts" && row.calls == 1
+            })
+        );
 
         // O frame seguinte começa limpo — a atribuição não atravessa frames.
         begin_frame(12);

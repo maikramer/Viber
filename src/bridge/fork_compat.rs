@@ -208,9 +208,11 @@ fn run(
 pub(crate) fn entity_bits_to_string(bits: u64) -> Option<String> {
     let raw_index = bits as u32;
     let generation = (bits >> 32) as u32;
-    if raw_index == u32::MAX {
-        // `EntityIndex::PLACEHOLDER` (NonMaxU32::MAX) — o fork também tem a
-        // forma textual.
+    // `NonMaxU32` guarda `!index`: o índice 0 tem bits `u32::MAX`, enquanto
+    // o `PLACEHOLDER` (`NonMaxU32::MAX`, índice MAX-1) tem bits `1`. A versão
+    // anterior tratava o índice 0 como placeholder e o "PLACEHOLDER" como o
+    // bits da entidade 0 — um cliente que enviasse "PLACEHOLDER" mexia nela.
+    if raw_index == 1 && generation == 0 {
         return Some("PLACEHOLDER".into());
     }
     Some(format!("{}v{}", u32::MAX - raw_index, generation))
@@ -219,7 +221,7 @@ pub(crate) fn entity_bits_to_string(bits: u64) -> Option<String> {
 /// Forma legível do fork → bits opacos do `Entity` 0.20.0.
 pub(crate) fn entity_string_to_bits(text: &str) -> Option<u64> {
     if text == "PLACEHOLDER" {
-        return Some(u64::from(u32::MAX));
+        return Some(1);
     }
     let (index, generation) = text.split_once('v')?;
     let index: u32 = index.parse().ok()?;
@@ -327,14 +329,14 @@ mod tests {
 
     #[test]
     fn test_placeholder_forms() {
-        assert_eq!(
-            entity_string_to_bits("PLACEHOLDER"),
-            Some(u64::from(u32::MAX))
-        );
+        assert_eq!(entity_string_to_bits("PLACEHOLDER"), Some(1));
+        assert_eq!(entity_bits_to_string(1).as_deref(), Some("PLACEHOLDER"));
+        // O índice 0 é uma entidade REAL (bits `u32::MAX`), não o placeholder.
         assert_eq!(
             entity_bits_to_string(u64::from(u32::MAX)).as_deref(),
-            Some("PLACEHOLDER")
+            Some("0v0")
         );
+        assert_eq!(entity_string_to_bits("0v0"), Some(u64::from(u32::MAX)));
     }
 
     #[test]

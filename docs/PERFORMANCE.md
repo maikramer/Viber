@@ -975,3 +975,44 @@ braços **interleaved no mesmo processo**, e o `nvidia-smi
    baratos que se querem confirmar; e o `frame_ms.max`/`p95` do snapshot vêm a
    zero, portanto o pico do frame não é observável por esta via. Um gate
    `VIBER_PROF_SYSTEMS` resolveria o primeiro.
+
+## Passagem 2026-10-22 — desempenho homogéneo pelo mapa
+
+Levantamento de 13 pontos do Vael (vila, deserto, floresta, picos, pântano,
+contrabandistas, grutas, wilds, Alto de Vael, Bosque Encantado, Cidadela,
+duas zonas vazias), 4 direções de câmara por ponto, tempo de GPU por passe
+(robusto a CPU ocupado — nesta máquina há sempre outros agentes a compilar,
+o que torna os números de CPU inutilizáveis) e triângulos por vista
+(`VIBER_DRAW_DIAG=1`). RTX 4050, 1280×720, tier máximo.
+
+| GPU média (ms) | início | fim |
+|---|---|---|
+| centro do vale (vila…grutas) | 17–18 | 13,6–15 |
+| periferia (wilds, Alto, Bosque, Cidadela) | 9–12 | 8,7–9,5 |
+
+O que pesava e o que mudou:
+
+1. **As `<GltfScene>` cozidas não tinham culling nenhum.** O mundo estático
+   transforma os spawners em `<GltfScene>` soltas e só os `StaticSpawner`
+   ganhavam `CullDistance`: numa vista do vale desenhavam-se 620 arbustos e
+   200 cactos a centenas de metros. Agora cada `<GltfScene>` ganha corte
+   **pelo tamanho no ecrã** quando a cena aterra (`render_lod::AutoCull`,
+   raio × 144 ≈ 8 px a 720p, 40–800 m; `VIBER_AUTO_CULL_PX` para A/B).
+   O `CullDistance` passou a lembrar-se do que escondeu — um `Hidden` de
+   outra origem não é revertido.
+2. **Sombras do `equilibrado`: 3 cascatas × 150 m → 2 × 110 m.** A cascata
+   longa apanhava 8–12 M triângulos no centro (o frustum estende-se para o
+   lado do sol). Sombra 6–7,5 → 3,6–4,5 ms na vila, sem diferença visível
+   perto do herói.
+3. **LOD2 que não eram LOD2.** `moss_rock` tem os três tiers iguais (16 k
+   tri), o lobo 21 k, o pilar 8,4 k — a geração parou no piso de costuras.
+   `render_lod::simplify_far_tiers` corta as malhas de `*_lod2.glb` acima de
+   2 500 triângulos ao carregar (meshopt; `sloppy` quando as costuras
+   travam). Os assets no pool continuam por regerar.
+4. **Estradas/praça com miolo opaco** e **volumétrico 24 passos** (passagem
+   anterior) entram nos números acima.
+
+Armadilhas de medição desta máquina: `rustc` dos outros agentes (CPU 5×
+mais lento por igual), a janela oculta no Wayland (GPU a 0 % e spans de GPU
+inflacionados), throttle térmico da GPU (`clocks_throttle_reasons` 0x24), e
+o herói a morrer durante o levantamento (usar `viber.game().iframes`).

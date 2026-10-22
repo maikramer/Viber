@@ -262,14 +262,11 @@ pub fn collect_counters(world: &mut World) -> GameCounters {
 
     // O engine toca por kira (`LoopInstance`); o bevy_audio do Bevy não tem
     // players, por isso contar `AudioSink` dava sempre 0.
-    let mut q_sinks = world.query_filtered::<
-        (),
-        Or<(
-            With<crate::music::LoopInstance>,
-            With<AudioSink>,
-            With<bevy::audio::SpatialAudioSink>,
-        )>,
-    >();
+    let mut q_sinks = world.query_filtered::<(), Or<(
+        With<crate::music::LoopInstance>,
+        With<AudioSink>,
+        With<bevy::audio::SpatialAudioSink>,
+    )>>();
     let audio_sinks = q_sinks.iter(world).count();
 
     let mut q_shadow_lights = world.query::<&PointLight>();
@@ -370,9 +367,12 @@ fn counters_json(counters: &GameCounters) -> serde_json::Value {
 /// atribuição) e o gravador de traces. Corre no `Last` — depois do
 /// `PostUpdate`, com todos os sistemas instrumentados do frame já medidos.
 fn end_frame(world: &mut World) {
-    let frame_ms = world.resource::<Time>().delta_secs() * 1000.0;
+    // Tempo REAL: o `Time` genérico segue o virtual (pausa do editor,
+    // `set_time_scale`, `max_delta` de 250 ms) — com scale 0 todos os frames
+    // mediam 0 ms e um hitch de 600 ms era registado como 250.
+    let frame_ms = world.resource::<Time<bevy::time::Real>>().delta_secs() * 1000.0;
     let frame = world.resource::<FrameCounter>().0;
-    let uptime_s = world.resource::<Time>().elapsed_secs();
+    let uptime_s = world.resource::<Time<bevy::time::Real>>().elapsed_secs();
     world.resource_mut::<FrameStats>().push(frame_ms);
 
     let threshold = world
@@ -415,7 +415,6 @@ fn end_frame(world: &mut World) {
     let counters = sampled.as_ref().map(counters_json);
     trace::record_frame(frame, frame_ms, hitch_top, counters);
 }
-
 
 /// FPS/frame-time suavizados do `DiagnosticsStore` (`None` sem o plugin).
 fn diagnostics_snapshot(store: &DiagnosticsStore) -> (Option<f64>, Option<f64>) {
@@ -1039,7 +1038,9 @@ fn spawn_overlay(mut commands: Commands) {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn profiler_overlay_update(
     mut state: ResMut<HudState>,
-    time: Res<Time>,
+    // REAL: com o relógio virtual pausado (modo edição) o throttle nunca
+    // atingia `OVERLAY_REFRESH` e o F3 ficava vazio.
+    time: Res<Time<bevy::time::Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     menus: Res<crate::menus::MenusOpen>,
     mut q_text: Query<&mut Text, With<ProfilerText>>,
@@ -1146,9 +1147,7 @@ pub fn overlay_body(
         .1
         .map(|v| format!("  pico {v:.1}"))
         .unwrap_or_default();
-    let p95_text = p95_ms
-        .map(|v| format!("  p95 {v:.1}"))
-        .unwrap_or_default();
+    let p95_text = p95_ms.map(|v| format!("  p95 {v:.1}")).unwrap_or_default();
     let top_text = if top.is_empty() {
         String::new()
     } else {
@@ -1281,7 +1280,10 @@ mod tests {
             &counters,
             123.4,
             Some(19.8),
-            &[("viber::combat::melee".into(), 1.2), ("ai::chase".into(), 0.4)],
+            &[
+                ("viber::combat::melee".into(), 1.2),
+                ("ai::chase".into(), 0.4),
+            ],
             2,
             Some(512.0),
         );

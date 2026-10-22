@@ -247,7 +247,6 @@ pub struct NavInfo {
     pub census: Vec<(&'static str, usize)>,
 }
 
-
 /// Uma `<BiomeRegion>` no snapshot (`viber.debug.regions`/`biome_at`).
 pub struct RegionInfo {
     pub id: String,
@@ -299,7 +298,8 @@ pub struct InteriorInfo {
 pub struct UiNodeInfo {
     /// id autoral da UI declarativa OU `Name` (`hud:health`, `chip:gold`…).
     pub id: String,
-    /// Rect computado (píxeis físicos) — dá o clique exato via `input.click`.
+    /// Rect computado em píxeis LÓGICOS (top-left) — o mesmo espaço do
+    /// `viber.input.click`, que dá o clique exato.
     pub x: f32,
     pub y: f32,
     pub w: f32,
@@ -1262,10 +1262,20 @@ fn build_view(world: &mut World) -> DebugView {
     for e in world.iter_entities() {
         let entity = e.id();
         let name = e.get::<Name>().map(|n| n.to_string());
-        let position = e
-            .get::<Transform>()
-            .map(|t| t.translation)
-            .or_else(|| e.get::<GlobalTransform>().map(|t| t.translation()));
+        // Filhos de um grupo têm `Transform` LOCAL: a posição publicada tem
+        // de ser a do mundo (`GlobalTransform`). Num nó RAIZ as duas são
+        // iguais, e o `Transform` é a única que está sempre fresca (o
+        // `GlobalTransform` só é propagado no PostUpdate — num mundo headless
+        // sem esse passo ficaria em zero).
+        let position = if e.get::<ChildOf>().is_some() {
+            e.get::<GlobalTransform>()
+                .map(|t| t.translation())
+                .or_else(|| e.get::<Transform>().map(|t| t.translation))
+        } else {
+            e.get::<Transform>()
+                .map(|t| t.translation)
+                .or_else(|| e.get::<GlobalTransform>().map(|t| t.translation()))
+        };
         let disabled = e.get::<Disabled>().is_some();
         if let Some(name) = &name {
             by_name.entry(name.clone()).or_insert(entity);
@@ -1572,7 +1582,7 @@ fn build_nav(world: &mut World) -> Option<NavInfo> {
     })
 }
 
- /// `<BiomeRegion>` do mundo — polígonos são pequenos (dezenas de pontos).
+/// `<BiomeRegion>` do mundo — polígonos são pequenos (dezenas de pontos).
 fn build_regions(world: &World) -> Vec<RegionInfo> {
     world
         .get_resource::<crate::worldsys::BiomeRegions>()
@@ -1665,14 +1675,32 @@ fn build_interior(world: &World) -> Option<InteriorInfo> {
     })
 }
 
-/// Rect + estado de um nó de UI (rect = GlobalTransform XY + ComputedNode).
+/// Rect + estado de um nó de UI.
+///
+/// No Bevy 0.20 os nós de UI têm `UiGlobalTransform` (físico, centrado no
+/// nó), NÃO `GlobalTransform`: ler o segundo devolvia `None` para TODOS os
+/// nós e a `ui_tree()` saía sempre vazia. A rect publicada é convertida para
+/// píxeis LÓGICOS — o espaço do `viber.input.click`/`Window::cursor_position`
+/// (em HiDPI o clique levava o offset do scale factor).
 fn ui_node_info(world: &World, entity: Entity, id: String) -> Option<UiNodeInfo> {
     let e = world.get_entity(entity).ok()?;
     let node = e.get::<bevy::ui::ComputedNode>()?;
-    let g = e.get::<GlobalTransform>()?;
-    let pos = g.translation().xy();
-    // Texto próprio + descendentes (o Bevy 0.19 põe spans nos filhos).
+    let logical = node.inverse_scale_factor;
+    let size = node.size * logical;
+    let top_left = e
+        .get::<bevy::ui::UiGlobalTransform>()
+        .map(|ui| ui.translation * logical - size * 0.5)
+        .or_else(|| {
+            // Nó sem `UiGlobalTransform` (UI antiga/editor): o
+            // `GlobalTransform` é um ponto, não uma rect.
+            e.get::<GlobalTransform>().map(|g| g.translation().xy())
+        })?;
+    // Texto próprio + descendentes (o Bevy 0.20 guarda o texto-raiz em
+    // `Text` e os spans adicionais nos filhos).
     let mut text = String::new();
+    if let Some(root) = e.get::<bevy::ui::widget::Text>() {
+        text.push_str(&root.0);
+    }
     if let Some(span) = e.get::<bevy::text::TextSpan>() {
         text.push_str(&span.0);
     }
@@ -1687,11 +1715,21 @@ fn ui_node_info(world: &World, entity: Entity, id: String) -> Option<UiNodeInfo>
     }
     Some(UiNodeInfo {
         id,
-        x: pos.x,
-        y: pos.y,
-        w: node.size.x,
-        h: node.size.y,
-        visible: e.get::<Visibility>() != Some(&Visibility::Hidden),
+        x: top_left.x,
+        y: top_left.y,
+        w: size.x,
+        h: size.y,
+        // `Visibility::Hidden` propaga aos filhos por herança: ler só o
+        // componente próprio dava `visible=true` para labels dentro de um
+        // modal fechado (e a QA clicava em coordenadas que não existem).
+        visible: e
+            .get::<InheritedVisibility>()
+            .map(|visibility| visibility.get())
+            .or_else(|| {
+                e.get::<Visibility>()
+                    .map(|visibility| *visibility != Visibility::Hidden)
+            })
+            .unwrap_or(true),
         disabled: e.get::<crate::ui::runtime::UiDisabled>().is_some(),
         text: (!text.is_empty()).then_some(text),
         classes: e
@@ -1957,6 +1995,14 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
             ctx.dt = 1.0;
             ctx.elapsed = elapsed;
             ctx.terrain = terrain_reader;
+            // Sem script a correr: NÃO herdar o `path`/props do último
+            // `on_update`. Sem isto um `viber.events()` na REPL drenava (e
+            // apagava) a fila de eventos de um script de jogo, e `viber.prop`
+            // lia os props de OUTRA entidade.
+            ctx.path = None;
+            ctx.self_name = None;
+            ctx.self_props = None;
+            ctx.sender = None;
         }
         host.lua.set_app_data(view);
         host.lua.set_app_data(DebugOps::default());
@@ -4266,8 +4312,12 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             set_translation(world, entity, pos, warnings)
         }
         DebugOp::MoveBySnap(entity, delta) => {
+            // Posição de PARTIDA no mundo (o `Transform` só é local para
+            // entidades dentro de grupos).
             let current = with_entity(world, entity, warnings, |e| {
-                e.get::<Transform>().map(|t| t.translation)
+                e.get::<GlobalTransform>()
+                    .map(|g| g.translation())
+                    .or_else(|| e.get::<Transform>().map(|t| t.translation))
             })
             .flatten();
             let Some(current) = current else {
@@ -4340,7 +4390,9 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             false
         }
         DebugOp::Give(kind, amount) => {
-            warnings.push(format!("give: '{kind}'x{amount} — o cofre e do JOGO (viber.game()), a engine nao o conhece"));
+            warnings.push(format!(
+                "give: '{kind}'x{amount} — o cofre e do JOGO (viber.game()), a engine nao o conhece"
+            ));
             false
         }
         DebugOp::SetSpeed(entity, speed) => {
@@ -4426,8 +4478,10 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             let Some(mut transform) = e.get_mut::<Transform>() else {
                 return false;
             };
-            let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
-            transform.rotation = Quat::from_rotation_y(yaw + deg.to_radians());
+            // SOMA yaw em torno do Y: compor a rotação preserva o pitch/roll
+            // autorados (uma pedra inclinada ficava direita — `from_euler`
+            // deitava fora tudo o que não fosse yaw).
+            transform.rotation = Quat::from_rotation_y(deg.to_radians()) * transform.rotation;
             true
         })
         .unwrap_or(false),
@@ -4477,7 +4531,9 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
         DebugOp::SetClock(minute) => {
             match world.get_resource_mut::<crate::worldsys::DayCycleState>() {
                 Some(mut clock) => {
-                    clock.minute_of_day = minute.clamp(0.0, 1440.0).rem_euclid(1440.0);
+                    // Documentado como 0–1440 com wrap: o clamp antes do rem_euclid
+                    // transformava 1500 em 0 (meia-noite) em vez de 60 (01:00).
+                    clock.minute_of_day = minute.rem_euclid(1440.0);
                     true
                 }
                 None => {
@@ -4568,12 +4624,16 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
         DebugOp::SetWeather { rain, clouds, wind } => {
             match world.get_resource_mut::<crate::worldsys::WeatherState>() {
                 Some(mut weather) => {
+                    // Congela o ciclo SEMPRE que o debug fixa um campo: o
+                    // `weather_drive` reescreve `rain`/`clouds` todos os
+                    // frames a caminho do alvo do scheduler, e um A/B de QA
+                    // evaporava em 10 s. O `clouds` sozinho ficava a ser
+                    // reescrito pelo scheduler.
+                    if rain.is_some() || clouds.is_some() || wind.is_some() {
+                        weather.cycle = false;
+                    }
                     if let Some(rain) = rain {
                         weather.rain = rain.clamp(0.0, 1.0);
-                        // Congela o ciclo: o `weather_drive` reescreve
-                        // `rain` todos os frames a caminho do alvo do
-                        // scheduler, e o braço de QA evaporava em 10 s.
-                        weather.cycle = false;
                     }
                     if let Some(clouds) = clouds {
                         weather.clouds = clouds.clamp(0.0, 1.0);
@@ -4768,7 +4828,9 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             false
         }
         DebugOp::QuestProgress(id, _n) => {
-            warnings.push(format!("quest_progress '{id}': as quests sao do JOGO (Lua)"));
+            warnings.push(format!(
+                "quest_progress '{id}': as quests sao do JOGO (Lua)"
+            ));
             false
         }
         DebugOp::VaultSet(what, _n) => {
@@ -4975,14 +5037,27 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 warnings.push(format!("teleport_to: '{name}' não encontrado"));
                 return false;
             };
-            let pos = world
-                .get::<Transform>(target)
-                .map(|t| t.translation)
-                .or_else(|| {
-                    world
-                        .get::<GlobalTransform>(target)
-                        .map(|t| t.translation())
-                });
+            // Posição de MUNDO. Num nó RAIZ o `Transform` já é mundo (e é o
+            // que está fresco: o `GlobalTransform` só propaga no PostUpdate —
+            // num mundo headless ficaria em zero); dentro de um grupo o
+            // `Transform` é LOCAL e a pose de mundo vive no `GlobalTransform`
+            // (um marco sob `<Group translation>` teleportava o herói para a
+            // cota local, tipicamente y=0).
+            let pos = if world.get::<ChildOf>(target).is_some() {
+                world
+                    .get::<GlobalTransform>(target)
+                    .map(|t| t.translation())
+                    .or_else(|| world.get::<Transform>(target).map(|t| t.translation))
+            } else {
+                world
+                    .get::<Transform>(target)
+                    .map(|t| t.translation)
+                    .or_else(|| {
+                        world
+                            .get::<GlobalTransform>(target)
+                            .map(|t| t.translation())
+                    })
+            };
             let Some(mut pos) = pos else {
                 warnings.push(format!("teleport_to: '{name}' sem posição"));
                 return false;
@@ -5317,10 +5392,20 @@ fn set_translation(
     pos: Vec3,
     warnings: &mut Vec<String>,
 ) -> bool {
+    // A API promete posição ABSOLUTA. A maioria dos nós vive dentro de grupos
+    // transladados (`<Group>`/`<Spawner>`), e escrever `pos` no `Transform`
+    // local punha-os no sítio errado. Converte mundo→local pelo pai.
+    let local = match world.get::<ChildOf>(entity).map(ChildOf::parent) {
+        Some(parent) => match world.get::<GlobalTransform>(parent) {
+            Some(parent_global) => parent_global.affine().inverse().transform_point3(pos),
+            None => pos,
+        },
+        None => pos,
+    };
     let applied = with_entity(world, entity, warnings, |e| {
         let moved = match e.get_mut::<Transform>() {
             Some(mut transform) => {
-                transform.translation = pos;
+                transform.translation = local;
                 true
             }
             None => false,

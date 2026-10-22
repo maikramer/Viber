@@ -253,17 +253,16 @@ impl BurstStore {
         // = flicker (VIBER_POSTFX_ORDER_FLICKER.md). No deposit porque é
         // thread-side: não custa frame time.
         let (mean, std) = image_luma_stats(&image);
-        if burst.frame_stats.len() != slot as usize {
-            // fora de ordem: preencher até ao slot para manter o índice
-            while burst.frame_stats.len() < slot as usize {
-                burst.frame_stats.push(None);
-            }
+        // Depósitos chegam fora de ordem (readbacks assíncronos): indexar
+        // pelo slot, em vez de `push`, mantém a sequência temporal certa.
+        if burst.frame_stats.len() <= slot as usize {
+            burst.frame_stats.resize(slot as usize + 1, None);
         }
-        burst.frame_stats.push(Some(FrameStat {
+        burst.frame_stats[slot as usize] = Some(FrameStat {
             index: slot,
             mean,
             std,
-        }));
+        });
         *cell = Some(image);
         burst.collected_count += 1;
         burst.last_progress = Instant::now();

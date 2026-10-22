@@ -824,7 +824,18 @@ pub fn cinematic_shot_method(input: In<Option<Value>>, world: &mut World) -> Brp
     };
     let (eye, look) = match (&p.from, &p.look) {
         (Some(from), Some(look)) => (parse(from, "from")?, parse(look, "look")?),
-        _ => active_camera_pose(world).ok_or_else(|| invalid("sem câmara ativa".into()))?,
+        (None, None) => {
+            active_camera_pose(world).ok_or_else(|| invalid("sem câmara ativa".into()))?
+        }
+        // Só um dos dois era aceite em silêncio: a pose era a da câmara e o
+        // parâmetro dado desaparecia — o `<Shot>` ficava no sítio errado sem
+        // aviso nenhum.
+        _ => {
+            return Err(invalid(
+                "shot: `from` e `look` vão juntos (ou nenhum dos dois, para usar a câmara ativa)"
+                    .into(),
+            ));
+        }
     };
     let op = crate::cinematic_cli::shot_op(doc(world)?, &p.id, eye, look, p.duration)
         .map_err(|e| invalid(format!("{e:#}")))?;

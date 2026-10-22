@@ -30,7 +30,9 @@ pub fn snapshot(world: &World) -> Value {
     let hitches = world
         .get_resource::<HitchLog>()
         .map(hitch_json)
-        .unwrap_or_else(|| json!({ "threshold_ms": super::DEFAULT_HITCH_MS, "count": 0, "recent": [] }));
+        .unwrap_or_else(
+            || json!({ "threshold_ms": super::DEFAULT_HITCH_MS, "count": 0, "recent": [] }),
+        );
 
     json!({
         "frame_ms": {
