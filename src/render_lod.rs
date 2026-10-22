@@ -30,12 +30,148 @@ use bevy::prelude::*;
 pub struct CullDistance {
     /// Distance (meters) past which the subtree stops rendering.
     pub radius: f32,
+    /// O `Hidden` atual foi posto pelo cull. Um `Hidden` de outra origem
+    /// (QA a esconder, um script) não é revertido quando a câmara chega
+    /// perto.
+    pub hidden_by_cull: bool,
 }
 
 impl CullDistance {
     pub fn new(radius: f32) -> Self {
-        Self { radius }
+        Self {
+            radius,
+            hidden_by_cull: false,
+        }
     }
+}
+
+/// Raiz de uma `<GltfScene>` estática à espera de ganhar [`CullDistance`]
+/// pelo tamanho, quando as malhas da cena tiverem `Aabb`.
+#[derive(Component, Debug, Default)]
+pub struct AutoCull;
+
+/// Píxeis de altura (a 720p, FOV ~64°) abaixo dos quais um objeto sai de
+/// cena: a distância de corte é `raio × AUTO_CULL_PER_RADIUS`.
+///
+/// O mundo estático cozia os spawners em `<GltfScene>` soltas SEM culling:
+/// numa vista do vale desenhavam-se 600 arbustos e 200 cactos a centenas de
+/// metros (sub-píxel), e o custo variava 3× entre sítios do mapa. Com o
+/// corte pelo tamanho no ecrã um arbusto (r ≈ 0,6 m) sai aos ~85 m, um cacto
+/// aos ~200 m, e uma muralha fica até ao teto.
+pub const AUTO_CULL_PER_RADIUS: f32 = 144.0;
+/// Piso e teto do corte automático (m), antes do `cull_scale` do preset.
+pub const AUTO_CULL_MIN: f32 = 40.0;
+pub const AUTO_CULL_MAX: f32 = 800.0;
+
+/// Teto de triângulos de uma malha de tier distante (`*_lod2.glb`).
+///
+/// Vários LOD2 do pool chegavam a 8–21 k triângulos (o `moss_rock` tem os
+/// três tiers iguais, 16 k; o lobo 21 k; o pilar 8,4 k) — a geração parou no
+/// piso de costuras UV. Um LOD2 vive a ≥ 70–110 m, onde 2 500 triângulos
+/// chegam para qualquer adereço: [`simplify_far_tiers`] corta-os ao carregar.
+pub const FAR_TIER_MAX_TRIS: usize = 2500;
+
+/// Índices simplificados para ≤ `target_tris`, ou `None` se não reduzir.
+///
+/// Primeiro a simplificação que respeita costuras (erro até 5 % da
+/// extensão); se as costuras a travarem acima do dobro do alvo, a `sloppy`
+/// (ignora topologia — a esta distância não se vê).
+pub fn simplify_far_indices(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    target_tris: usize,
+) -> Option<Vec<u32>> {
+    let current = indices.len() / 3;
+    if current <= target_tris {
+        return None;
+    }
+    let target = target_tris * 3;
+    let mut out = meshopt::simplify_decoder(
+        indices,
+        positions,
+        target,
+        0.05,
+        meshopt::SimplifyOptions::None,
+        None,
+    );
+    if out.len() > target * 2 {
+        out = meshopt::simplify_sloppy_decoder(indices, positions, target, 0.02, None);
+    }
+    (!out.is_empty() && out.len() < indices.len()).then_some(out)
+}
+
+/// Simplifica, ao carregar, as malhas de `*_lod2.glb` acima de
+/// [`FAR_TIER_MAX_TRIS`]. Uma vez por asset (o `Added`): sem churn de upload.
+pub fn simplify_far_tiers(
+    mut events: MessageReader<AssetEvent<Mesh>>,
+    // `Option`: apps mínimas (testes de LOD/animação) montam o plugin sem
+    // AssetPlugin; a validação rígida abortava o sistema em vez de o saltar.
+    server: Option<Res<AssetServer>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    mut total: Local<(usize, usize, usize)>,
+) {
+    let (Some(server), Some(mut meshes)) = (server, meshes) else {
+        return;
+    };
+    let mut touched = false;
+    for event in events.read() {
+        let AssetEvent::Added { id } = event else {
+            continue;
+        };
+        let is_far = server
+            .get_path(*id)
+            .is_some_and(|p| p.path().to_string_lossy().ends_with("_lod2.glb"));
+        if !is_far {
+            continue;
+        }
+        let Some(mesh) = meshes.get(*id) else {
+            continue;
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+        let indices: Vec<u32> = match mesh.indices() {
+            Some(bevy::mesh::Indices::U32(v)) => v.clone(),
+            Some(bevy::mesh::Indices::U16(v)) => v.iter().map(|i| *i as u32).collect(),
+            None => continue,
+        };
+        let Some(simplified) = simplify_far_indices(positions, &indices, FAR_TIER_MAX_TRIS) else {
+            continue;
+        };
+        total.0 += 1;
+        total.1 += indices.len() / 3;
+        total.2 += simplified.len() / 3;
+        if let Some(mut mesh) = meshes.get_mut(*id) {
+            mesh.insert_indices(bevy::mesh::Indices::U32(simplified));
+        }
+        touched = true;
+    }
+    if touched {
+        info!(
+            "lod2: {} malhas simplificadas ({} → {} triângulos)",
+            total.0, total.1, total.2
+        );
+    }
+}
+
+/// Distância de corte para um objeto de raio `radius` (m).
+pub fn auto_cull_radius(radius: f32, scale: f32) -> f32 {
+    (radius * auto_cull_per_radius()).clamp(AUTO_CULL_MIN, AUTO_CULL_MAX) * scale
+}
+
+/// [`AUTO_CULL_PER_RADIUS`], ou o equivalente a `VIBER_AUTO_CULL_PX`
+/// píxeis de altura mínima (8 px = o default) — o knob do A/B.
+fn auto_cull_per_radius() -> f32 {
+    static FACTOR: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("VIBER_AUTO_CULL_PX")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|px| *px > 0.0)
+            .map_or(AUTO_CULL_PER_RADIUS, |px| AUTO_CULL_PER_RADIUS * 8.0 / px)
+    })
 }
 
 /// Fraction of `radius` at which a hidden object becomes visible again.
@@ -159,10 +295,16 @@ pub struct RenderLodPlugin;
 impl bevy::app::Plugin for RenderLodPlugin {
     fn build(&self, app: &mut bevy::app::App) {
         app.init_resource::<MeshLodStats>()
+            // `simplify_far_tiers` lê `AssetEvent<Mesh>`; sem o registo aqui,
+            // apps mínimas (o teste de swap de LOD) abortavam com "Message not
+            // initialized". `add_message` é idempotente.
+            .add_message::<AssetEvent<Mesh>>()
             .add_observer(retag_no_shadow_on_ready)
+            .add_systems(bevy::app::PreUpdate, simplify_far_tiers)
             .add_systems(
                 bevy::app::PostUpdate,
                 (
+                    timed(Group::Render, auto_cull_from_bounds),
                     timed(Group::Render, cull_distant_objects),
                     timed(Group::Render, update_mesh_lod),
                     timed(Group::Render, propagate_no_shadow),
@@ -270,13 +412,17 @@ fn update_mesh_lod(
 fn cull_distant_objects(
     editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    mut objects: Query<(&GlobalTransform, &CullDistance, &mut Visibility)>,
+    mut objects: Query<(&GlobalTransform, &mut CullDistance, &mut Visibility)>,
 ) {
     let Some(camera) = crate::editor_camera::active_camera_eye(&editor, &cameras) else {
         return;
     };
     let eye = camera.translation();
-    for (transform, cull, mut visibility) in &mut objects {
+    for (transform, mut cull, mut visibility) in &mut objects {
+        // Escondido por outra coisa: não é nosso para mostrar.
+        if *visibility == Visibility::Hidden && !cull.hidden_by_cull {
+            continue;
+        }
         let radius = cull.radius.max(1.0);
         let distance_sq = transform.translation().distance_squared(eye);
         let wanted = match *visibility {
@@ -301,6 +447,52 @@ fn cull_distant_objects(
         // every frame and re-run visibility propagation over the whole tree.
         if *visibility != wanted {
             *visibility = wanted;
+            cull.hidden_by_cull = wanted == Visibility::Hidden;
+        }
+    }
+}
+
+/// Dá [`CullDistance`] às raízes [`AutoCull`] assim que a cena tem malhas
+/// com `Aabb`: o raio é o da maior esfera envolvente das malhas (em espaço
+/// de mundo, com a escala da instância), medido à origem da raiz.
+pub fn auto_cull_from_bounds(
+    mut commands: Commands,
+    roots: Query<(Entity, &GlobalTransform), With<AutoCull>>,
+    children: Query<&Children>,
+    meshes: Query<(&GlobalTransform, &bevy::camera::primitives::Aabb), With<Mesh3d>>,
+    time: Res<Time<Real>>,
+    mut report: Local<(f32, usize)>,
+) {
+    // Diagnóstico barato: a cada 10 s com raízes pendentes, quantas faltam e
+    // quantas já ganharam corte (uma raiz sem malhas nunca resolve).
+    report.0 += time.delta_secs();
+    if report.0 >= 10.0 {
+        report.0 = 0.0;
+        let pending = roots.iter().count();
+        if pending > 0 {
+            info!("auto-cull: {} resolvidas, {pending} pendentes", report.1);
+        }
+    }
+    let scale = crate::graphics::cull_scale();
+    for (root, root_xf) in &roots {
+        let origin = root_xf.translation();
+        let mut radius = 0.0_f32;
+        let mut found = false;
+        for node in children.iter_descendants(root) {
+            let Ok((xf, aabb)) = meshes.get(node) else {
+                continue;
+            };
+            found = true;
+            let center = xf.transform_point(Vec3::from(aabb.center));
+            let extent = Vec3::from(aabb.half_extents) * xf.scale().abs();
+            radius = radius.max(center.distance(origin) + extent.length());
+        }
+        if found {
+            report.1 += 1;
+            commands
+                .entity(root)
+                .remove::<AutoCull>()
+                .try_insert(CullDistance::new(auto_cull_radius(radius, scale)));
         }
     }
 }
@@ -350,6 +542,71 @@ mod tests {
             GlobalTransform::from_translation(Vec3::ZERO),
         ));
         app
+    }
+
+    /// Uma grelha densa desce para o teto; uma malha já leve fica intacta.
+    #[test]
+    fn test_far_tier_simplification_hits_the_budget() {
+        let n = 80;
+        let mut positions = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                let (fx, fz) = (x as f32 / n as f32, z as f32 / n as f32);
+                positions.push([fx, (fx * 6.0).sin() * 0.1 + (fz * 5.0).cos() * 0.1, fz]);
+            }
+        }
+        let mut indices = Vec::new();
+        let row = n as u32 + 1;
+        for z in 0..n as u32 {
+            for x in 0..n as u32 {
+                let i = z * row + x;
+                indices.extend_from_slice(&[i, i + row, i + 1, i + 1, i + row, i + row + 1]);
+            }
+        }
+        assert_eq!(indices.len() / 3, 12_800);
+        let out = simplify_far_indices(&positions, &indices, 2500).expect("reduz");
+        assert!(out.len() / 3 <= 5000, "{} tri", out.len() / 3);
+        assert!(simplify_far_indices(&positions, &indices[..300], 2500).is_none());
+    }
+
+    /// Arbusto sai cedo, muralha fica até ao teto, nada abaixo do piso.
+    #[test]
+    fn test_auto_cull_radius_follows_screen_size() {
+        assert!((auto_cull_radius(0.6, 1.0) - 86.4).abs() < 0.1);
+        assert_eq!(auto_cull_radius(0.1, 1.0), AUTO_CULL_MIN);
+        assert_eq!(auto_cull_radius(20.0, 1.0), AUTO_CULL_MAX);
+        assert!((auto_cull_radius(0.6, 0.7) - 60.48).abs() < 0.1);
+    }
+
+    /// Um `Hidden` posto por outra coisa (QA, script) não é revertido pelo
+    /// cull quando a câmara se aproxima.
+    #[test]
+    fn test_cull_never_reveals_what_it_did_not_hide() {
+        let mut app = app_with_camera();
+        let entity = spawn_at(&mut app, 10.0, 100.0);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Visibility::Hidden);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(entity).unwrap(),
+            Visibility::Hidden
+        );
+        // E o que ELE escondeu volta.
+        let far = spawn_at(&mut app, 500.0, 100.0);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(far).unwrap(),
+            Visibility::Hidden
+        );
+        app.world_mut()
+            .entity_mut(far)
+            .insert(GlobalTransform::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(far).unwrap(),
+            Visibility::Inherited
+        );
     }
 
     fn spawn_at(app: &mut App, x: f32, radius: f32) -> Entity {

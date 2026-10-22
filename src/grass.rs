@@ -525,6 +525,15 @@ impl bevy::app::Plugin for GrassPlugin {
                 bevy::app::Startup,
                 configure_shader.after(crate::recipes::spawn::startup),
             )
+            // Troca de cena: o `<Weather>` do mundo NOVO tem de voltar a
+            // especializar as consts do vento no shader. O `Assets<Shader>` é
+            // do app, não da cena: sem isto a relva ficava com o vento da
+            // cena anterior (o menu tem `<Weather wind-strength="1.5">`, o
+            // mundo do jogo não declara nenhum) para sempre.
+            .add_systems(
+                crate::scene_loader::SceneLoad,
+                configure_shader.after(crate::recipes::spawn::startup),
+            )
             .add_systems(
                 bevy::app::Update,
                 timed(Group::Terrain, grass_daynight_tint).after(stream_grass_tiles),
@@ -1189,15 +1198,22 @@ fn lattice_normal(height: &[f32], fx: f32, fz: f32, step: f32) -> Vec3 {
     Vec3::new(hx0 - hx1, 2.0 * step, hz0 - hz1).normalize_or_zero()
 }
 
-/// Nearest-lattice occupancy test, with the four neighbours included so the
-/// grass line stops a lattice cell short of a road or a waterline instead of
-/// growing right up to (and visibly through) the edge.
+/// Nearest-lattice occupancy test, with the four orthogonal neighbours
+/// included so the grass line stops a lattice cell short of a road or a
+/// waterline instead of growing right up to (and visibly through) the edge.
 fn lattice_blocked(blocked: &[bool], fx: f32, fz: f32) -> bool {
-    let gx = (fx * (LATTICE - 1) as f32).round() as usize;
-    let gz = (fz * (LATTICE - 1) as f32).round() as usize;
-    let gx = gx.min(LATTICE - 1);
-    let gz = gz.min(LATTICE - 1);
-    blocked[gz * LATTICE + gx]
+    let gx = ((fx * (LATTICE - 1) as f32).round() as isize).clamp(0, LATTICE as isize - 1);
+    let gz = ((fz * (LATTICE - 1) as f32).round() as isize).clamp(0, LATTICE as isize - 1);
+    for (dz, dx) in [(0isize, 0isize), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let (x, z) = (gx + dx, gz + dz);
+        if x < 0 || z < 0 || x >= LATTICE as isize || z >= LATTICE as isize {
+            continue;
+        }
+        if blocked[z as usize * LATTICE + x as usize] {
+            return true;
+        }
+    }
+    false
 }
 
 /// A blocked lattice cell within one step — used to crowd reeds at the bank.
@@ -1616,6 +1632,31 @@ mod tests {
         // …and the normal must tilt away from +X, never stay flat.
         let n = lattice_normal(&height, 0.5, 0.5, 1.0);
         assert!(n.x < -0.1, "normal não segue a rampa: {n:?}");
+    }
+
+    #[test]
+    fn lattice_occupancy_includes_the_orthogonal_neighbours() {
+        let mut blocked = [false; LATTICE * LATTICE];
+        // A célula (8,8) é a única bloqueada.
+        blocked[8 * LATTICE + 8] = true;
+        let cell_fx = |i: usize| i as f32 / (LATTICE - 1) as f32;
+        assert!(lattice_blocked(&blocked, cell_fx(8), cell_fx(8)), "self");
+        assert!(
+            lattice_blocked(&blocked, cell_fx(7), cell_fx(8)),
+            "a linha de relva pára uma célula antes (vizinho −X)"
+        );
+        assert!(
+            lattice_blocked(&blocked, cell_fx(8), cell_fx(9)),
+            "vizinho +Z"
+        );
+        assert!(
+            !lattice_blocked(&blocked, cell_fx(6), cell_fx(8)),
+            "duas células de distância continua livre"
+        );
+        assert!(
+            !lattice_blocked(&blocked, cell_fx(7), cell_fx(7)),
+            "a diagonal não conta (4-vizinhança)"
+        );
     }
 
     #[test]

@@ -113,11 +113,7 @@ pub fn stream_rings(
         let Some(record) = store.records.remove(&key) else {
             continue;
         };
-        let mut spawned = commands.spawn((
-            Streamable,
-            record.transform,
-            Visibility::Inherited,
-        ));
+        let mut spawned = commands.spawn((Streamable, record.transform, Visibility::Inherited));
         if let Some(name) = record.name.clone() {
             spawned.insert(Name::new(name));
         }
@@ -134,7 +130,7 @@ pub fn stream_rings(
         }
         let _ = key;
     }
-    let mut sleep = Vec::new();
+    let mut sleep: Vec<(Entity, ColdRecord)> = Vec::new();
     for (entity, global, source, name, scene, script, has_mesh, pending, resident, streamable) in
         &query
     {
@@ -162,16 +158,20 @@ pub fn stream_rings(
         // registo da primeira e uma instância desaparecia para sempre. A
         // primeira mantém a chave histórica (`ficheiro#path`), a colisão
         // leva o id — saves/testes antigos continuam a reconhecê-la.
+        // A colisão testa TAMBÉM os registos desta passagem: `store.records`
+        // só recebe os `sleep` no fim do loop, e dois irmãos da mesma origem
+        // adormecidos no MESMO frame ficavam ambos com a chave base (o
+        // segundo `insert` apagava o primeiro).
         let base = source_key(source);
-        let key = if store.records.contains_key(&base) {
+        let key = if store.records.contains_key(&base)
+            || sleep.iter().any(|(_, record)| record.key == base)
+        {
             format!("{}#{}", base, entity.to_bits())
         } else {
             base
         };
-        let state_json = script.and_then(|_| {
-            host.as_ref()
-                .and_then(|h| h.dump_entity_state(entity))
-        });
+        let state_json =
+            script.and_then(|_| host.as_ref().and_then(|h| h.dump_entity_state(entity)));
         sleep.push((
             entity,
             ColdRecord {
@@ -244,7 +244,10 @@ mod tests {
         ));
         app.update();
         assert!(
-            app.world().resource::<ColdStore>().records.contains_key("world/npc.xml#0"),
+            app.world()
+                .resource::<ColdStore>()
+                .records
+                .contains_key("world/npc.xml#0"),
             "500 m adormece"
         );
         {
@@ -259,12 +262,10 @@ mod tests {
             let world = app.world();
             q.iter(world).next().unwrap()
         };
-        app.world_mut()
-            .entity_mut(player)
-            .insert((
-                Transform::from_xyz(0.0, 0.0, 500.0),
-                GlobalTransform::from_xyz(0.0, 0.0, 500.0),
-            ));
+        app.world_mut().entity_mut(player).insert((
+            Transform::from_xyz(0.0, 0.0, 500.0),
+            GlobalTransform::from_xyz(0.0, 0.0, 500.0),
+        ));
         app.update();
         let names: Vec<_> = app
             .world_mut()
@@ -272,7 +273,44 @@ mod tests {
             .iter(app.world())
             .map(|n| n.as_str().to_string())
             .collect();
-        assert!(names.iter().any(|n| n == "mina"), "acorda com o nome: {names:?}");
+        assert!(
+            names.iter().any(|n| n == "mina"),
+            "acorda com o nome: {names:?}"
+        );
         assert!(app.world().resource::<ColdStore>().records.is_empty());
+    }
+
+    /// Dois irmãos da MESMA origem (`<Use>`/include repetido) adormecidos no
+    /// mesmo frame: cada um precisa do seu registo, senão o segundo `insert`
+    /// apagava o primeiro e uma instância desaparecia para sempre.
+    #[test]
+    fn two_entities_with_the_same_source_both_sleep() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::transform::TransformPlugin);
+        app.add_plugins(StreamingPlugin);
+        app.world_mut().spawn((
+            crate::player::Player::default(),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        let origin = crate::xml::NodeOrigin {
+            file: std::sync::Arc::from(std::path::Path::new("world/npc.xml")),
+            path: vec![0],
+        };
+        for _ in 0..2 {
+            app.world_mut().spawn((
+                Streamable,
+                Transform::from_xyz(0.0, 0.0, 500.0),
+                GlobalTransform::from_xyz(0.0, 0.0, 500.0),
+                crate::scene::SceneSource(std::sync::Arc::new(origin.clone())),
+            ));
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<ColdStore>().records.len(),
+            2,
+            "os dois irmãos hibernam (chaves distintas)"
+        );
     }
 }

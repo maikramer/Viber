@@ -876,18 +876,18 @@ impl MultiRootFileReader {
 
 impl AssetReader for MultiRootFileReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
-        let mut missing = AssetReaderError::NotFound(path.to_path_buf());
         for reader in &self.roots {
             match reader.read(path).await {
                 Ok(reader) => return Ok(reader),
-                // A root that simply does not have the file falls through to
-                // the next one; any other error (permissions, IO) is real and
-                // ends the search.
+                // Só `NotFound` cai para a raiz seguinte. Um erro de
+                // permissões/IO na raiz do mundo era engolido e a pesquisa
+                // seguia para o pool partilhado, carregando um ficheiro
+                // homónimo (potencialmente velho).
                 Err(AssetReaderError::NotFound(_)) => {}
-                Err(other) => missing = other,
+                Err(other) => return Err(other),
             }
         }
-        Err(missing)
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
     }
 
     async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
