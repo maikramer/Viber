@@ -46,6 +46,8 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
+use crate::worldsys::AtmosphereState;
+
 /// Template WGSL do céu (defaults; `viber run` reescreve o bloco CONFIG com
 /// os valores do mundo antes de o renderer o carregar).
 pub const SKY_WGSL: &str = include_str!("sky.wesl");
@@ -89,6 +91,13 @@ impl SkyModel {
 pub struct SkyModelState {
     pub model: SkyModel,
     pub nishita: crate::sky_nishita::NishitaModel,
+    /// O `<DayCycle>` conduz o sol (a posição vem do `AtmosphereState`).
+    pub drive: bool,
+    /// Elevação/azimute do sol ESTÁTICO (`<Sky sun-elevation/sun-azimuth>`) —
+    /// só usados quando `drive == false` (o shader resolve-os de
+    /// `CFG_SUN_ELEV/CFG_SUN_AZ` no ramo `CFG_DRIVE < 0.5`).
+    pub sun_elevation: f32,
+    pub sun_azimuth: f32,
 }
 
 impl SkyModelState {
@@ -96,8 +105,51 @@ impl SkyModelState {
         Self {
             model: config.model,
             nishita: config.nishita_model(),
+            drive: config.drive,
+            sun_elevation: config.sun_elevation,
+            sun_azimuth: config.sun_azimuth,
         }
     }
+
+    /// Direção PARA o sol que o DOMO desenha num mundo sem relógio, ou
+    /// `None` quando o `<DayCycle>` manda (aí a direção é a do
+    /// `AtmosphereState`, publicada pelo `sun_drive`).
+    pub fn static_sun_dir(&self) -> Option<Vec3> {
+        if self.drive {
+            return None;
+        }
+        Some(direction(self.sun_elevation, self.sun_azimuth))
+    }
+
+    /// Paleta que o cubemap do IBL tem de pintar.
+    ///
+    /// Com `<DayCycle>` é a VIVA (o `sun_drive`/`atmosphere_drive` já
+    /// publicaram a posição real). Sem relógio, o `AtmosphereState` fica no
+    /// default de 45° com o sol no ZÉNITE — o `atmosphere_drive` não vê o
+    /// `<Sky>` —, enquanto o domo desenha o sol ESTÁTICO autorado. Usar a
+    /// paleta viva punha o disco de ambiente a pino e o bounce de um dia de
+    /// 45° sobre um céu de 17°.
+    pub fn ibl_palette(&self, live: &AtmosphereState) -> AtmosphereState {
+        let Some(sun_dir) = self.static_sun_dir() else {
+            return live.clone();
+        };
+        let mut palette = crate::worldsys::atmosphere_for_elevation(self.sun_elevation);
+        palette.sun_dir = sun_dir;
+        // A lua nasce oposta ao sol e alta — o mesmo contrato do
+        // `atmosphere_drive` (disco e sombra da lua apontam ao mesmo sítio).
+        palette.moon_dir = direction(
+            crate::worldsys::MOON_ELEVATION_DEG,
+            self.sun_azimuth + 180.0,
+        );
+        palette
+    }
+}
+
+/// Direção unitária (Y-up) para elevação/azimute em graus — a mesma
+/// convenção de `worldsys::sky_direction` (que é privada).
+fn direction(elevation_deg: f32, azimuth_deg: f32) -> Vec3 {
+    let (el, az) = (elevation_deg.to_radians(), azimuth_deg.to_radians());
+    Vec3::new(el.cos() * az.sin(), el.sin(), el.cos() * az.cos()).normalize_or_zero()
 }
 
 impl Default for SkyModelState {
@@ -105,6 +157,9 @@ impl Default for SkyModelState {
         Self {
             model: SkyModel::Analytic,
             nishita: crate::sky_nishita::NishitaModel::default(),
+            drive: false,
+            sun_elevation: SkyConfig::default().sun_elevation,
+            sun_azimuth: SkyConfig::default().sun_azimuth,
         }
     }
 }
@@ -629,6 +684,43 @@ mod tests {
             SkyModelState::from_config(&SkyConfig::default()).model,
             SkyModel::Analytic
         );
+    }
+
+    /// Sem `<DayCycle>` o `AtmosphereState` vivo fica no 45°/zénite default:
+    /// o IBL tem de pintar o sol ESTÁTICO autorado (`CFG_SUN_ELEV/AZ`) e a
+    /// paleta dessa elevação, senão o disco de ambiente nasce a pino.
+    #[test]
+    fn test_static_sun_ibl_palette_matches_the_dome() {
+        let cfg = SkyConfig {
+            drive: false,
+            sun_elevation: 17.0,
+            sun_azimuth: 205.0,
+            ..SkyConfig::default()
+        };
+        let state = SkyModelState::from_config(&cfg);
+        let dir = state.static_sun_dir().expect("mundo estático tem sol fixo");
+        assert!((dir.length() - 1.0).abs() < 1e-5);
+        assert!((dir.y - 17.0f32.to_radians().sin()).abs() < 1e-5, "{dir:?}");
+        // A paleta viva mente (45°/zénite): a do IBL segue a elevação real.
+        let mut live = AtmosphereState::default();
+        live.sun_dir = Vec3::Y;
+        let palette = state.ibl_palette(&live);
+        assert!(
+            (palette.sun_dir - dir).length() < 1e-5,
+            "o sol do cubemap tem de ser o autorado: {:?}",
+            palette.sun_dir
+        );
+        assert!(palette.day > 0.9, "17° ainda é dia");
+        assert!(palette.sun_dir.y < 0.5, "não pode ficar a pino");
+        // Com relógio, a paleta viva (posição real) manda intacta.
+        let state = SkyModelState::from_config(&SkyConfig {
+            drive: true,
+            ..SkyConfig::default()
+        });
+        assert!(state.static_sun_dir().is_none());
+        let mut live = AtmosphereState::default();
+        live.sun_dir = Vec3::new(0.3, 0.9, 0.2).normalize();
+        assert_eq!(state.ibl_palette(&live).sun_dir, live.sun_dir);
     }
 
     /// O shader gerado substitui o bloco CONFIG e mantém o resto intacto.

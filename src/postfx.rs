@@ -1412,7 +1412,13 @@ pub fn grade_temperature_full(golden: f32, low_sun: f32, night: f32) -> f32 {
     let g = if golden.is_finite() { golden } else { 0.0 };
     let l = if low_sun.is_finite() { low_sun } else { 0.0 };
     let n = if night.is_finite() { night } else { 0.0 };
-    g * GOLDEN_GRADE_TEMPERATURE + l * GOLDEN_GRADE_WARMTH - n * 0.25
+    // O braço do sol baixo NÃO aquece a noite: `low_sun_split_weight` vale 1
+    // para qualquer elevação abaixo de 25°, incluindo o sol já sob o
+    // horizonte. Sem o `(1 − night)` o −0,25 aprovado da LOOP A/C lia
+    // −0,24 (a noite ganhava +0,01 de stock quente por baixo) e o número do
+    // teste deixava de ser o do look.
+    let warm = l * GOLDEN_GRADE_WARMTH * (1.0 - n.clamp(0.0, 1.0));
+    g * GOLDEN_GRADE_TEMPERATURE + warm - n * 0.25
 }
 
 /// Saturação pós-tonemap do grading CDL pela hora. A golden hour satura
@@ -2735,6 +2741,12 @@ const FOG_VOLUME_NIGHT_ATTENUATION: f32 = 0.0;
 fn spawn_fog_volume(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         CinematicFogVolume,
+        // O volume é da ENGINE (segue o herói e existe uma vez por processo),
+        // não da cena: sem `Persistent` o sweep do `unload_scene` podia
+        // levá-lo numa troca de cena e o `VolumetricFog` da câmara ficava a
+        // raymarchar um volume que já não existe (god-rays mortos até
+        // reiniciar).
+        crate::scene_loader::Persistent,
         FogVolume {
             // God-rays ADITIVOS: absorção ~nula — a transmissão nunca
             // escurece o céu para breu (as "faixas pretas" do topo); a
@@ -2952,8 +2964,14 @@ fn drive_fog_texture(
     for mut volume in &mut volumes {
         // Scroll lento na direcção do vento (UV/s × força 0.004).
         let speed = 0.004 * time.delta_secs();
-        volume.density_texture_offset.x += wind_x * speed;
-        volume.density_texture_offset.z += wind_z * speed;
+        // O sampler é REPEAT: manter o offset em [0,1) é visualmente igual e
+        // impede o acumulador de crescer sem limite (a partir de ~512 o passo
+        // por frame fica abaixo do ULP do f32 e o scroll CONGELA em sessões
+        // longas; a 0,0028 UV/s isso chega em ~50 h de uptime).
+        volume.density_texture_offset.x =
+            (volume.density_texture_offset.x + wind_x * speed).rem_euclid(1.0);
+        volume.density_texture_offset.z =
+            (volume.density_texture_offset.z + wind_z * speed).rem_euclid(1.0);
         // Engrossa à alvorada/crepúsculo e no pântano; meio-dia limpo. A base
         // é a MESMA do spawn ([`FOG_VOLUME_DENSITY`]) — escrever aqui um
         // literal tornava o valor do spawn letra morta.
@@ -3567,6 +3585,14 @@ mod tests {
         assert!(t0730 >= GOLDEN_GRADE_WARMTH * 0.95, "07:30 aquece: {t0730}");
         // A noite continua a arrefecer NA MESMA proporção de sempre.
         assert!((grade_temperature_full(0.0, 0.0, 1.0) + 0.25).abs() < 1e-6);
+        // O braço do sol baixo não pode diluir o −0,25 da noite: o
+        // `low_sun_split_weight` vale 1 sob o horizonte e sem o gate a noite
+        // lia −0,24.
+        assert!((grade_temperature_full(0.0, 1.0, 1.0) + 0.25).abs() < 1e-6);
+        assert!(
+            (grade_temperature_full(0.0, 1.0, 0.0) - GOLDEN_GRADE_WARMTH).abs() < 1e-6,
+            "de dia o braço de sol baixo continua inteiro"
+        );
         // Lixo não finito não propaga.
         assert_eq!(grade_temperature_full(f32::NAN, f32::NAN, f32::NAN), 0.0);
     }

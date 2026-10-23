@@ -446,6 +446,10 @@ fn damage_numbers_system(
             *visibility = Visibility::Hidden;
             continue;
         };
+        // Um frame atrás da câmara escondia o slot para o resto da vida
+        // (0,9 s) — quando a câmara voltava a apontar-lhe, nada o repunha
+        // visível. O sucesso reafirma a visibilidade.
+        *visibility = Visibility::Inherited;
         if slot.age - dt < 0.05 {
             debug!(target: "viber::feedback", "número projetado em {screen:?}");
         }

@@ -191,8 +191,14 @@ pub struct GrassField {
     /// same nearest `BUILD_BUDGET` blocked tiles EVERY frame, starving the
     /// rest of the ring and burning the frame budget forever. Terrain
     /// blocking state (pads/roads/water) is static after bootstrap, so the
-    /// tombstone is permanent for the session.
+    /// tombstone is permanent for the session — EXCETO quando uma edição viva
+    /// muda as alturas (ver `edit_rev`).
     failed: std::collections::HashSet<(i32, i32)>,
+    /// Revisão do overlay de edições vista no último passe. Um crater/aterro
+    /// muda a altura e o declive debaixo de um tile: um tile enterrado por
+    /// "altitude > fade" ou "declive > 38°" ficava com a lápide para sempre e
+    /// a relva nunca voltava depois de o terreno ser baixado.
+    edit_rev: u64,
 }
 
 struct LiveTile {
@@ -615,15 +621,19 @@ fn stream_grass_tiles(
     mut materials: ResMut<Assets<GrassMaterial>>,
     mut starve: Local<StarveDiag>,
     boost: Option<Res<crate::cinematic::StreamingBoost>>,
+    weather: Option<Res<WeatherState>>,
 ) {
     if !settings.enabled {
+        field.busy = false;
         return;
     }
     let Some(terrain) = terrain else {
+        field.busy = false;
         return;
     };
     // Modo editor: o anel segue a câmara de editor (ver `active_camera_eye`).
     let Some(camera) = crate::editor_camera::active_camera_eye(&editor, &cameras) else {
+        field.busy = false;
         return;
     };
     let eye = camera.translation();
@@ -632,7 +642,42 @@ fn stream_grass_tiles(
     // de interior posta fora do mapa acordava com tufos de erva a flutuar à
     // cota da borda do mundo, dentro da sala.
     if !terrain.in_field(eye.x, eye.z) {
+        // Não há trabalho possível: um `busy` herdado do frame anterior
+        // prendia a espera em negro da cinemática até ao teto (`HOLD_MAX`)
+        // numa cena sem terreno por baixo da câmara.
+        field.busy = false;
         return;
+    }
+    // Força do vento que o shader recebeu (`configure_shader` clampa
+    // 0,25..2,5). Usada no padding da AABB dos tiles.
+    let wind_strength = weather
+        .as_deref()
+        .map(|w| w.wind_strength)
+        .unwrap_or(1.0)
+        .clamp(0.25, 2.5);
+
+    // Edição viva: as lápides dos tiles que a área editada toca voltam à fila.
+    // `bounds()` devolve o envelope de todas as edições (nunca encolhe), por
+    // isso cada revisão re-testa só esses tiles; os que continuam bloqueados
+    // voltam a ficar marcados quando o orçamento os visita.
+    let edit_rev = terrain.deltas.revision();
+    if edit_rev != field.edit_rev {
+        field.edit_rev = edit_rev;
+        if let Some((min, max)) = terrain.deltas.bounds() {
+            let retry: Vec<(i32, i32)> = field
+                .failed
+                .iter()
+                .copied()
+                .filter(|(cx, cz)| {
+                    let x0 = *cx as f32 * TILE;
+                    let z0 = *cz as f32 * TILE;
+                    x0 <= max.x && x0 + TILE >= min.x && z0 <= max.y && z0 + TILE >= min.y
+                })
+                .collect();
+            for coord in retry {
+                field.failed.remove(&coord);
+            }
+        }
     }
 
     let material = match &field.material {
@@ -749,6 +794,14 @@ fn stream_grass_tiles(
         let blades = built.blades;
         let half_y = (built.max_y - built.min_y) * 0.5;
         let center_y = (built.max_y + built.min_y) * 0.5;
+        // Deslocamento de vento do vértice (`grass.wesl`): inclinação
+        // `BEND_BASE + BEND_GUST + FLUTTER_AMP·1.6 = 0,928` × força, e o
+        // afundamento `travel²·0,55/blade_height`. Com 1,5 de vento um junco
+        // de 2,5 m anda ~3,5 m e desce ~2,6 m: o padding fixo de 1,5 m deixava
+        // o tile a ser cortado pelo frustum com as pontas ainda em ecrã.
+        let span = built.max_y - built.min_y;
+        let wind_pad = WIND_LEAN * wind_strength * span;
+        let sink_pad = 0.55 * (WIND_LEAN * wind_strength).powi(2) * span;
         let mesh = meshes.add(built.mesh);
         let entity = commands
             .spawn((
@@ -761,8 +814,12 @@ fn stream_grass_tiles(
                 // keeps a leaning tile from popping at the screen edge.
                 Aabb {
                     center: Vec3::new(TILE * 0.5, center_y, TILE * 0.5).into(),
-                    half_extents: Vec3::new(TILE * 0.5 + 1.5, half_y + 1.0, TILE * 0.5 + 1.5)
-                        .into(),
+                    half_extents: Vec3::new(
+                        TILE * 0.5 + 1.5 + wind_pad,
+                        half_y + 1.0 + sink_pad,
+                        TILE * 0.5 + 1.5 + wind_pad,
+                    )
+                    .into(),
                 },
             ))
             .id();
@@ -837,6 +894,11 @@ const ALTITUDE_FADE_START: f32 = 118.0;
 const ALTITUDE_FADE_END: f32 = 168.0;
 /// Clearance (meters) kept around road ribbons and water edges.
 const ROAD_CLEARANCE: f32 = 1.1;
+/// Inclinação máxima do vento por unidade de força do `<Weather>` — a soma
+/// `BEND_BASE (0,20) + BEND_GUST (0,52) + FLUTTER_AMP·1,6 (0,208)` do
+/// `grass.wesl` (a componente transversal usa 1,6× a amplitude de flutter).
+/// O padding da AABB de cada tile usa-a multiplicada pela força do vento.
+const WIND_LEAN: f32 = 0.928;
 
 /// Bake one tile's merged blade mesh. `tile: None` when nothing grows there
 /// (a plaza, a lake, a cliff) — the caller tombstones it. The counts ride
@@ -861,6 +923,11 @@ fn build_tile(
     let step = TILE / (LATTICE - 1) as f32;
     let mut height = [0.0f32; LATTICE * LATTICE];
     let mut blocked = [false; LATTICE * LATTICE];
+    // Máscara SÓ de água: o bónus de juncos do pântano mede a proximidade da
+    // margem. Usar `blocked` (que também carrega estrada, pad e exclusão)
+    // fazia os juncos crescerem 1,35× mais alto ao lado de calçada e de
+    // acampamentos — terra seca a ler-se como leito.
+    let mut wet_cells = [false; LATTICE * LATTICE];
     let mut any_open = false;
     for iz in 0..LATTICE {
         for ix in 0..LATTICE {
@@ -872,6 +939,7 @@ fn build_tile(
                 .water_surface_at(x, z)
                 .is_some_and(|surface| y <= surface + 0.25)
                 || terrain.in_water(x, z);
+            wet_cells[iz * LATTICE + ix] = wet;
             let paved = terrain
                 .roads
                 .iter()
@@ -976,7 +1044,9 @@ fn build_tile(
         };
 
         // Wetland bonus: reeds crowd the waterline, the way a real bank does.
-        let near_water = terrain.water_surface_at(x, z).is_some() || nearby_water(&blocked, fx, fz);
+        // `wet_cells` (e não `blocked`): só a água dá o bónus — estrada,
+        // pad e `<SpawnExclusion>` não são margem.
+        let near_water = terrain.water_surface_at(x, z).is_some() || nearby_water(&wet_cells, fx, fz);
         let height_boost = if near_water && biome == GrassBiome::Swamp {
             1.35
         } else {
@@ -1216,7 +1286,9 @@ fn lattice_blocked(blocked: &[bool], fx: f32, fz: f32) -> bool {
     false
 }
 
-/// A blocked lattice cell within one step — used to crowd reeds at the bank.
+/// A água do lattice a um passo — usado para acastelar juncos na margem.
+/// Só a máscara HÚMIDA conta (não `blocked`): estrada/pad/exclusão não é
+/// margem de água.
 fn nearby_water(blocked: &[bool], fx: f32, fz: f32) -> bool {
     let gx = (fx * (LATTICE - 1) as f32).round() as i32;
     let gz = (fz * (LATTICE - 1) as f32).round() as i32;

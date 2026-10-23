@@ -196,7 +196,11 @@ pub fn wave_height_at(p: Vec2, t: f32, wind: [f32; 2], wind_strength: f32, wave_
     h += (q.dot(d3) * k3 + t * k3.sqrt() * 0.80 * speed).sin() * 0.07;
 
     let drift = wdir * t * 0.35 * speed;
-    h += wave_fbm(q * 0.9 + drift, drift * 0.4) * 0.62 * (0.6 + 0.4 * strength.min(2.0));
+    // 0.32 — o MESMO peso do termo FBM no `water.wesl` (`wave_height`). Com
+    // 0.62 o espelho CPU devolvia quase o dobro da amplitude que a GPU
+    // desenha, e um flutuador (a API `get_wave_point`) andava até ~0.2·amp
+    // acima/abaixo da lâmina visível.
+    h += wave_fbm(q * 0.9 + drift, drift * 0.4) * 0.32 * (0.6 + 0.4 * strength.min(2.0));
     h * wave_amp
 }
 
@@ -3331,6 +3335,54 @@ mod tests {
         assert!(
             wave_height_at(Vec2::new(3.0, 4.0), 1.0, [0.0, 0.0], strength, amp).is_finite(),
             "zero wind stays finite"
+        );
+    }
+
+    /// O peso do termo FBM tem de ser o do shader (0.32, `water.wesl`,
+    /// `wave_height`). O espelho CPU esteve em 0.62 — quase o dobro da
+    /// amplitude DENSENHADA — e a lâmina que um flutuador lia não era a que a
+    /// GPU desenha. A soma dos quatro senos é reproduzida aqui à mão para
+    /// isolar o resíduo.
+    #[test]
+    fn test_wave_height_fbm_matches_the_shader_weight() {
+        let (wind, strength, amp) = ([0.7, 0.25], 1.5f32, 1.0f32);
+        let (x, z, t) = (13.3f32, -7.1f32, 2.7f32);
+        let p = Vec2::new(x, z);
+        let wdir = (Vec2::new(wind[0], wind[1]) + Vec2::new(1e-4, 0.0)).normalize();
+        let speed = 0.7 + 0.5 * strength.clamp(0.05, 3.0);
+        let warp = Vec2::new(
+            wave_value_noise(p * 0.11 + Vec2::new(t * 0.03, 0.0)),
+            wave_value_noise(p * 0.13 - Vec2::new(0.0, t * 0.025)),
+        ) * 2.2
+            - Vec2::splat(1.1);
+        let q = p + warp;
+        let d0 = wdir;
+        let d1 = Vec2::new(
+            wdir.x * 0.829 - wdir.y * 0.559,
+            wdir.x * 0.559 + wdir.y * 0.829,
+        );
+        let d2 = Vec2::new(
+            wdir.x * 0.629 + wdir.y * 0.777,
+            -wdir.x * 0.777 + wdir.y * 0.629,
+        );
+        let d3 = Vec2::new(
+            wdir.x * 0.292 - wdir.y * 0.956,
+            wdir.x * 0.956 + wdir.y * 0.292,
+        );
+        let (k0, k1, k2, k3) = (0.897f32, 1.366, 2.094, 3.396);
+        let mut sines = 0.0;
+        sines += (q.dot(d0) * k0 - t * k0.sqrt() * 1.35 * speed).sin() * 0.22;
+        sines += (q.dot(d1) * k1 + t * k1.sqrt() * 1.10 * speed).sin() * 0.18;
+        sines += (q.dot(d2) * k2 - t * k2.sqrt() * 0.95 * speed).sin() * 0.12;
+        sines += (q.dot(d3) * k3 + t * k3.sqrt() * 0.80 * speed).sin() * 0.07;
+        let drift = wdir * t * 0.35 * speed;
+        let fbm_term =
+            wave_fbm(q * 0.9 + drift, drift * 0.4) * 0.32 * (0.6 + 0.4 * strength.min(2.0));
+        let h = wave_height_at(p, t, wind, strength, amp);
+        assert!(
+            (h - (sines + fbm_term)).abs() < 1e-5,
+            "CPU mirror = shader: {h} vs {} (o peso do FBM divergiu)",
+            sines + fbm_term
         );
     }
 }

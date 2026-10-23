@@ -44,6 +44,15 @@ pub const DAY_PHASES: u32 = 12;
 /// Quanto do chão default o tint regional substitui (probes regionais).
 const TINT_MIX_GROUND: f32 = 0.65;
 
+/// Chão do cubemap por baixo do horizonte, como fração da cor do horizonte.
+///
+/// É o MESMO valor que o domo desenha (`sky.wesl`: `a.horizon * 0.42` no
+/// hemisfério de baixo, nos dois modelos). O filtro diffuse do bevy integra
+/// o cubemap inteiro: um chão mais claro que o céu visível sobe o ambiente
+/// por baixo e achata o contraste do topo (a "luz de baixo" que o crítico
+/// lia como falta de ancoragem das silhuetas).
+const IBL_GROUND_FROM_HORIZON: f32 = 0.42;
+
 /// Escala da intensidade do IBL gerado. O filtro integra a RADIÂNCIA do
 /// cubemap — a paleta do `AtmosphereState` vive na mesma escala que o domo
 /// do céu desenha, portanto 1.0 deixa o ambiente proporcional ao céu visível.
@@ -66,11 +75,23 @@ impl Plugin for SkyIblPlugin {
             return;
         }
         app.add_systems(Startup, spawn_sky_probe);
-        app.add_systems(Update, update_sky_cubemap);
+        // A paleta é publicada por `atmosphere_drive` NESTE frame: sem a
+        // aresta, o scheduler podia correr o cubemap primeiro na fronteira de
+        // fase e gravá-lo com a paleta ANTERIOR — o `last_phase` ficava lá e
+        // o IBL passava a fase inteira (2 h de jogo) com o céu errado.
+        app.add_systems(
+            Update,
+            update_sky_cubemap.after(crate::worldsys::atmosphere_drive),
+        );
     }
 }
 
 fn spawn_sky_probe(mut commands: Commands) {
+    spawn_sky_probe_entity(&mut commands);
+}
+
+/// Cria a entidade do probe mundial (Startup e reposição defensiva).
+fn spawn_sky_probe_entity(commands: &mut Commands) {
     // Probe REGIONAL cobrindo o mundo inteiro (a parallax correction usa o
     // AABB do probe — com 4 km de lado é efetivamente "para toda a view").
     // SEM `GeneratedEnvironmentMapLight` aqui: nascer com `Handle::default()`
@@ -79,10 +100,17 @@ fn spawn_sky_probe(mut commands: Commands) {
     // cubemap default 1×1 produzia specular de 1 mip e os
     // `radiance_bind_group_mip_N` inválidos (crash com <DayCycle>, r3).
     // O componente entra com o handle REAL na primeira geração.
+    //
+    // `Persistent`: o probe é da ENGINE (um céu, um mundo), não da cena. O
+    // sweep do `unload_scene` apanha raízes sem `Persistent` nascidas depois
+    // do snapshot — sem isto uma troca de cena podia levá-lo (o
+    // `update_sky_cubemap` repõe-no, mas o ambiente ficava um frame sem
+    // probe e o cubemap da fase era regerado à toa).
     commands.spawn((
         SkyIblProbe,
         LightProbe::default(),
         Transform::from_scale(Vec3::splat(4000.0)),
+        crate::scene_loader::Persistent,
     ));
 }
 
@@ -113,12 +141,21 @@ fn update_sky_cubemap(
     current: Query<&GeneratedEnvironmentMapLight, With<SkyIblProbe>>,
 ) {
     let phase = day_phase(clock.as_deref());
-    if last_phase.is_some_and(|last| last == phase) {
+    // Uma edição viva do `<Sky model>`/coeficientes troca o `SkyModelState`
+    // sem mexer no minuto: sem isto o cubemap ficava com o modelo ANTIGO
+    // para sempre (o cenário de edição do editor, onde o std e o nishita se
+    // alternam no Inspector).
+    let model_changed = model_state.as_ref().is_some_and(|state| state.is_changed());
+    if !model_changed && last_phase.is_some_and(|last| last == phase) {
         return;
     }
     // Só marca a fase DEPOIS de o probe existir: se a query falhasse na
-    // primeira frame útil, o IBL nunca era gerado.
+    // primeira frame útil, o IBL nunca era gerado. Um sweep de cena pode
+    // levar o probe (raiz sem `Persistent` em builds antigas) — repõe-se.
     let Ok(probe_entity) = probes.single() else {
+        if probes.is_empty() {
+            spawn_sky_probe_entity(&mut commands);
+        }
         return;
     };
     *last_phase = Some(phase);
@@ -128,7 +165,15 @@ fn update_sky_cubemap(
         .as_deref()
         .filter(|s| s.model == crate::sky::SkyModel::Nishita)
         .map(|s| s.nishita);
-    let handle = images.add(sky_cubemap(&atmosphere, nishita.as_ref()));
+    // Num mundo SEM `<DayCycle>` o `AtmosphereState` fica no default de 45°
+    // com o sol no ZÉNITE (`atmosphere_drive` não conhece o `<Sky>`); o domo
+    // desenha o sol ESTÁTICO autorado. O cubemap tem de usar a MESMA paleta
+    // e a MESMA direção, senão o disco de ambiente nasce a pino.
+    let palette = model_state
+        .as_deref()
+        .map(|state| state.ibl_palette(&atmosphere))
+        .unwrap_or_else(|| atmosphere.clone());
+    let handle = images.add(sky_cubemap(&palette, nishita.as_ref()));
     // Primeira geração OU troca de fase: o componente entra (re-entra) com
     // o handle REAL. Na troca, o handle antigo sai dos Assets — o filtro GPU
     // re-emite por Added do novo (6/dia × ~260 KB — GC explícito).
@@ -355,7 +400,7 @@ fn sky_radiance(
         }
         None => mix_rgb(a.horizon, a.zenith, smoothstep(0.0, 0.45, up)),
     };
-    let ground_default = a.horizon.map(|c| c * 0.18 + a.fog_of(c));
+    let ground_default = a.horizon.map(|c| c * IBL_GROUND_FROM_HORIZON);
     let ground = match ground_tint {
         Some(t) => mix_rgb(ground_default, t, TINT_MIX_GROUND),
         None => ground_default,
@@ -445,14 +490,6 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-impl AtmosphereState {
-    /// O chão sob o horizonte mistura o fog (bounce do terreno); helper
-    /// local para não expor `fog` como método.
-    fn fog_of(&self, horizon_channel: f32) -> f32 {
-        horizon_channel * 0.5 + (self.fog[0] + self.fog[1] + self.fog[2]) / 3.0 * 0.5
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +543,30 @@ mod tests {
         a.moon_dir = Vec3::Y;
         let night = sky_radiance(&a, Vec3::Y, a.sun_dir, a.moon_dir, None, None);
         assert!(night[2] > night[0], "noite azulada");
+    }
+
+    /// O chão do cubemap tem de bater com o domo (`a.horizon * 0.42`): a
+    /// fórmula antiga somava `0.5·fog` e, com `fog == horizon`, dava
+    /// `1.18·horizon` — o hemisfério de baixo era MAIS CLARO que o horizonte
+    /// e o filtro diffuse ganhava luz de baixo que o céu visível não tem.
+    #[test]
+    fn chao_do_cubemap_bate_com_o_domo() {
+        let mut a = AtmosphereState::default();
+        a.day = 1.0;
+        a.night = 0.0;
+        a.sun_dir = Vec3::Y;
+        let down = sky_radiance(&a, -Vec3::Y, a.sun_dir, a.moon_dir, None, None);
+        for channel in 0..3 {
+            let expected = a.horizon[channel] * IBL_GROUND_FROM_HORIZON;
+            assert!(
+                (down[channel] - expected).abs() < 1e-6,
+                "canal {channel}: chão {down:?}, esperado {expected}"
+            );
+            assert!(
+                down[channel] < a.horizon[channel],
+                "o chão não pode ser mais claro que o horizonte: {down:?}"
+            );
+        }
     }
 
     #[test]

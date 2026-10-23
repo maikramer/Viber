@@ -88,6 +88,10 @@ fn patch_transmissive_gltf(
     // para não re-percorrer a árvore todos os frames.
     for (entity, _root, _marker) in roots.iter() {
         let mut stack = vec![entity];
+        // Falso enquanto houver um material ainda não carregado: aí o
+        // marcador FICA (o `WorldAssetRoot` aparece quando a CENA carrega;
+        // os sub-assets — materiais — chegam em paralelo).
+        let mut pending = false;
         while let Some(current) = stack.pop() {
             let Ok(kids) = children.get(current) else {
                 continue;
@@ -97,18 +101,26 @@ fn patch_transmissive_gltf(
                 let Ok(handle) = mesh_materials.get(kid) else {
                     continue;
                 };
-                if !patched.insert(handle.id()) {
+                if patched.contains(&handle.id()) {
                     continue;
                 }
-                if let Some(mut material) = materials.get_mut(handle.id()) {
-                    material.specular_transmission = 0.85;
-                    material.ior = 1.45;
-                    material.thickness = 0.6;
-                    material.perceptual_roughness = 0.05;
-                }
+                // O `insert` no `patched` vinha ANTES do `get_mut`: um
+                // material ainda em voo era dado como tratado e nunca mais
+                // era revisto — o cristal ficava opaco para sempre.
+                let Some(mut material) = materials.get_mut(handle.id()) else {
+                    pending = true;
+                    continue;
+                };
+                material.specular_transmission = 0.85;
+                material.ior = 1.45;
+                material.thickness = 0.6;
+                material.perceptual_roughness = 0.05;
+                patched.insert(handle.id());
             }
         }
-        commands.entity(entity).remove::<TransmissiveGltf>();
+        if !pending {
+            commands.entity(entity).remove::<TransmissiveGltf>();
+        }
     }
 }
 
@@ -179,9 +191,13 @@ fn prop_daynight_tint(
     if let Some(tint) = finished_tint {
         state.last_tint = Some(tint);
     }
-    // Uma passagem por frame: não abre outra no mesmo frame em que ainda
-    // está a aplicar (o throttle abaixo decide a próxima).
-    if state.sweep.is_some() && state.throttle > 0.0 {
+    // Uma passagem em curso NUNCA é substituída: o guarda antigo
+    // (`sweep.is_some() && throttle > 0`) reiniciava o cursor a 0 quando a
+    // passagem demorava mais que o throttle (roster > 960 materiais a 64/
+    // frame e 0,25 s = 15 frames) — o FIM da lista nunca era visitado e
+    // esses props ficavam ao albedo de dia sob luar para sempre. Terminada a
+    // passagem (None), o throttle decide a próxima.
+    if state.sweep.is_some() {
         return;
     }
 
@@ -193,6 +209,10 @@ fn prop_daynight_tint(
 
     // ids são Copy — o Vec termina o borrow imutável antes do get_mut.
     let ids: Vec<_> = materials.ids().collect();
+    // Materiais que já não existem (troca de cena / glTF recarregado) não
+    // podem ficar para sempre no mapa de originais: o asset é removido e o
+    // `AssetId` nunca volta, mas a entrada ficava.
+    state.originals.retain(|id, _| materials.contains(*id));
     let roster_changed = ids.len() != state.last_len;
     state.last_len = ids.len();
 
@@ -258,6 +278,126 @@ mod tests {
     fn tint_at_night_darkens_below_half() {
         let night = day_tint(0.0);
         assert!(night.iter().all(|c| *c < 0.5), "{night:?}");
+    }
+
+    /// Uma passagem orçamentada em curso não pode ser reiniciada: o guarda
+    /// antigo só travava com `throttle > 0` e, num roster grande (a passagem
+    /// demora mais que os 0,25 s do throttle), o cursor voltava a 0 e o FIM
+    /// da lista nunca era tintado (props ao albedo de dia sob luar).
+    #[test]
+    fn sweep_in_progress_is_never_restarted() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<PropTintState>()
+            .add_systems(Update, prop_daynight_tint);
+        // Noite cheia: `daylight_factor(0, 330, 1170) == 0` ⇒ tint escuro.
+        app.insert_resource(crate::worldsys::DayCycleState {
+            minute_of_day: 0.0,
+            minutes_per_real_second: 1.0,
+            dawn_minute: 330.0,
+            dusk_minute: 1170.0,
+            ambient_day: 1.0,
+            ambient_night: 0.2,
+            ambient_reference: 1.0,
+            drive_ambient: true,
+            max_sun_elevation: 60.0,
+            sun_azimuth_base: 205.0,
+            min_sun_elevation: 8.0,
+            day_speed_scale: 1.0,
+            night_speed_scale: 1.0,
+            night_cap_minute: 0.0,
+        });
+        let handles: Vec<_> = {
+            let mut assets = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>();
+            (0..200)
+                .map(|_| {
+                    assets.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        ..Default::default()
+                    })
+                })
+                .collect()
+        };
+        // 1.º update abre a passagem (cursor 0); os seguintes aplicam 64/frame.
+        app.update();
+        for _ in 0..8 {
+            // Simula frames lentos: o throttle já devia ter expirado.
+            app.world_mut().resource_mut::<PropTintState>().throttle = 0.0;
+            app.update();
+        }
+        let night = day_tint(0.0);
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        for handle in &handles {
+            let color = materials
+                .get(handle.id())
+                .expect("material ainda existe")
+                .base_color
+                .to_linear();
+            for (channel, expected) in [(0, night[0]), (1, night[1]), (2, night[2])] {
+                let got = [color.red, color.green, color.blue][channel];
+                assert!(
+                    (got - expected).abs() < 1e-3,
+                    "material {handle:?} ficou sem o tint de noite: {color:?} \
+                     (canal {channel}: {got} != {expected})"
+                );
+            }
+        }
+    }
+
+    /// O material de um glTF pode chegar DEPOIS do `WorldAssetRoot` (os
+    /// sub-assets carregam em paralelo). Marcar o id como "já tratado" antes
+    /// de o `get_mut` ter sucesso deixava o cristal opaco para sempre.
+    #[test]
+    fn transmissive_patch_waits_for_the_material_asset() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, patch_transmissive_gltf);
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        // Sub-asset ainda em voo: o handle existe (a cena referencia-o) mas
+        // o asset não.
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .remove(handle.id());
+        let root = app
+            .world_mut()
+            .spawn((
+                bevy::world_serialization::WorldAssetRoot(Handle::default()),
+                TransmissiveGltf,
+            ))
+            .id();
+        let mesh = app
+            .world_mut()
+            .spawn(MeshMaterial3d(handle.clone()))
+            .id();
+        app.world_mut().entity_mut(root).add_child(mesh);
+        app.update();
+        assert!(
+            app.world().get::<TransmissiveGltf>(root).is_some(),
+            "sem o material, o marcador fica para a próxima passagem"
+        );
+        // O material chega (mesmo id, geracional — `remove` não recicla).
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .insert(handle.id(), StandardMaterial::default())
+            .expect("id ainda válido");
+        app.update();
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(handle.id())
+            .expect("material carregado");
+        assert_eq!(material.specular_transmission, 0.85);
+        assert_eq!(material.ior, 1.45);
+        assert!(
+            app.world().get::<TransmissiveGltf>(root).is_none(),
+            "tratado o material, o marcador sai"
+        );
     }
 
     /// R2-G8: o tint preserva o alpha ATUAL do material — o fade de

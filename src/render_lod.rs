@@ -73,9 +73,11 @@ pub const FAR_TIER_MAX_TRIS: usize = 2500;
 
 /// Índices simplificados para ≤ `target_tris`, ou `None` se não reduzir.
 ///
-/// Primeiro a simplificação que respeita costuras (erro até 5 % da
-/// extensão); se as costuras a travarem acima do dobro do alvo, a `sloppy`
-/// (ignora topologia — a esta distância não se vê).
+/// Só a simplificação que respeita costuras (erro até 5 % da extensão).
+/// Se as costuras UV a travarem acima do alvo, fica onde parou: a `sloppy`
+/// (e o `gltfpack -sa`) solda vértices de ilhas diferentes do atlas e o
+/// triângulo passa a amostrar texturas de outra peça — a casa do pastor
+/// aparecia toda embaralhada, mesmo de perto.
 pub fn simplify_far_indices(
     positions: &[[f32; 3]],
     indices: &[u32],
@@ -86,7 +88,7 @@ pub fn simplify_far_indices(
         return None;
     }
     let target = target_tris * 3;
-    let mut out = meshopt::simplify_decoder(
+    let out = meshopt::simplify_decoder(
         indices,
         positions,
         target,
@@ -94,9 +96,6 @@ pub fn simplify_far_indices(
         meshopt::SimplifyOptions::None,
         None,
     );
-    if out.len() > target * 2 {
-        out = meshopt::simplify_sloppy_decoder(indices, positions, target, 0.02, None);
-    }
     (!out.is_empty() && out.len() < indices.len()).then_some(out)
 }
 
@@ -109,22 +108,32 @@ pub fn simplify_far_tiers(
     server: Option<Res<AssetServer>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     mut total: Local<(usize, usize, usize)>,
+    // Triângulos que ESTE sistema escreveu por asset: distingue o nosso
+    // próprio `Modified` (o `get_mut` abaixo) de um asset RECARREGADO com a
+    // malha original. Sem isto, tratar `Modified` re-simplificava em cascata
+    // a cada frame (a malha simplificada ainda pode estar acima do alvo por
+    // causa das costuras UV).
+    mut written_tris: Local<std::collections::HashMap<bevy::asset::AssetId<Mesh>, usize>>,
 ) {
     let (Some(server), Some(mut meshes)) = (server, meshes) else {
         return;
     };
     let mut touched = false;
     for event in events.read() {
-        let AssetEvent::Added { id } = event else {
-            continue;
+        // `Modified` conta: um asset recarregado (hot-reload no editor,
+        // reimport do pack) devolve a malha ORIGINAL ao Assets e sem isto o
+        // LOD2 voltava aos 8–21 k triângulos até reiniciar o jogo.
+        let id = match event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => *id,
+            _ => continue,
         };
         let is_far = server
-            .get_path(*id)
+            .get_path(id)
             .is_some_and(|p| p.path().to_string_lossy().ends_with("_lod2.glb"));
         if !is_far {
             continue;
         }
-        let Some(mesh) = meshes.get(*id) else {
+        let Some(mesh) = meshes.get(id) else {
             continue;
         };
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
@@ -137,15 +146,22 @@ pub fn simplify_far_tiers(
             Some(bevy::mesh::Indices::U16(v)) => v.iter().map(|i| *i as u32).collect(),
             None => continue,
         };
+        // Evento que nós próprios causámos (mesma contagem que escrevemos):
+        // não é um reload, não há nada a fazer.
+        if written_tris.get(&id).copied() == Some(indices.len() / 3) {
+            continue;
+        }
         let Some(simplified) = simplify_far_indices(positions, &indices, FAR_TIER_MAX_TRIS) else {
             continue;
         };
         total.0 += 1;
         total.1 += indices.len() / 3;
         total.2 += simplified.len() / 3;
-        if let Some(mut mesh) = meshes.get_mut(*id) {
+        let tris = simplified.len() / 3;
+        if let Some(mut mesh) = meshes.get_mut(id) {
             mesh.insert_indices(bevy::mesh::Indices::U32(simplified));
         }
+        written_tris.insert(id, tris);
         touched = true;
     }
     if touched {
@@ -362,6 +378,14 @@ fn update_mesh_lod(
         } else {
             1
         };
+    if budget == 0 {
+        // `VIBER_LOD_SWAP_BUDGET=0` DESLIGA a escada (braço de A/B do
+        // profiler). Reportar `pending` aqui dizia ao `tick_cinematic` que o
+        // mundo estava em streaming para sempre: cada cena esperava o teto
+        // de 7 s em negro no arranque.
+        *stats = MeshLodStats::default();
+        return;
+    }
     let mut swaps = 0usize;
     let mut pending = 0usize;
     for (transform, mut lod, mut root, visibility) in &mut instances {
@@ -569,6 +593,38 @@ mod tests {
         assert!(simplify_far_indices(&positions, &indices[..300], 2500).is_none());
     }
 
+    /// Duas ilhas UV que partilham uma aresta (vértices duplicados na mesma
+    /// posição): nenhum triângulo simplificado pode misturar as ilhas.
+    #[test]
+    fn test_simplify_far_never_welds_uv_islands() {
+        let n = 40usize;
+        let row = n as u32 + 1;
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for island in 0..2u32 {
+            let base = positions.len() as u32;
+            for z in 0..=n {
+                for x in 0..=n {
+                    let fx = x as f32 / n as f32 + island as f32;
+                    let fz = z as f32 / n as f32;
+                    positions.push([fx, (fx * 7.0).sin() * 0.05, fz]);
+                }
+            }
+            for z in 0..n as u32 {
+                for x in 0..n as u32 {
+                    let i = base + z * row + x;
+                    indices.extend_from_slice(&[i, i + row, i + 1, i + 1, i + row, i + row + 1]);
+                }
+            }
+        }
+        let per_island = (row * row) as u32;
+        let out = simplify_far_indices(&positions, &indices, 200).expect("reduz");
+        for tri in out.chunks(3) {
+            let island = tri[0] / per_island;
+            assert!(tri.iter().all(|&v| v / per_island == island), "{tri:?}");
+        }
+    }
+
     /// Arbusto sai cedo, muralha fica até ao teto, nada abaixo do piso.
     #[test]
     fn test_auto_cull_radius_follows_screen_size() {
@@ -617,6 +673,33 @@ mod tests {
                 Visibility::Inherited,
             ))
             .id()
+    }
+
+    /// `VIBER_LOD_SWAP_BUDGET=0` desliga a escada: as instâncias com tier
+    /// diferente NÃO estão "em espera" (o `tick_cinematic` lê `pending` como
+    /// streaming e esperava o teto de 7 s em negro em cada cena).
+    #[test]
+    fn disabled_ladder_reports_no_pending_work() {
+        // (set_var é unsafe na edition 2024; nenhum outro teste lê esta env.)
+        unsafe { std::env::set_var("VIBER_LOD_SWAP_BUDGET", "0") };
+        let mut app = App::new();
+        app.init_resource::<MeshLodStats>()
+            .add_systems(Update, update_mesh_lod);
+        app.world_mut().spawn((
+            Camera3d::default(),
+            GlobalTransform::from_translation(Vec3::ZERO),
+        ));
+        app.world_mut().spawn((
+            GlobalTransform::from_translation(Vec3::new(500.0, 0.0, 0.0)),
+            ladder(3),
+            bevy::world_serialization::WorldAssetRoot(Handle::default()),
+            Visibility::Inherited,
+        ));
+        app.update();
+        let stats = *app.world().resource::<MeshLodStats>();
+        assert_eq!(stats.pending, 0, "escada desligada não tem fila");
+        assert_eq!(stats.swaps_last_frame, 0);
+        unsafe { std::env::remove_var("VIBER_LOD_SWAP_BUDGET") };
     }
 
     #[test]

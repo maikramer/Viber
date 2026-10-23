@@ -194,7 +194,7 @@ fn wave_height(p: vec2<f32>, t: f32) -> f32 {
     h += sin(dot(q, d3) * k3 + t * sqrt(k3) * 0.80 * speed) * 0.07;
 
     let drift = wdir * t * 0.35 * speed;
-    h += fbm(q * 0.9 + drift, drift * 0.4) * 0.62 * (0.6 + 0.4 * min(strength, 2.0));
+    h += fbm(q * 0.9 + drift, drift * 0.4) * 0.32 * (0.6 + 0.4 * min(strength, 2.0));
     // `ripple` do <Lake> — amplitude das ondas (multiplier de mundo).
     return h * CFG_WAVE_AMP;
 }
@@ -380,14 +380,14 @@ fn fragment(
     // Seen from below keep the flipped geometric normal (front_facing path
     // already normalized it); from above blend in the waves — mix alto
     // (0.92): a 0.85 o campo lia-se quase plano em céu difuso.
-    pbr_input.N = select(pbr_input.N, normalize(mix(pbr_input.N, n, 0.92)), is_front);
+    pbr_input.N = select(pbr_input.N, normalize(mix(pbr_input.N, n, 0.55)), is_front);
 
     // Altura da onda no ponto — modula a COR (cristas mais claras, vales
     // mais escuros). Sob céu encoberto o specular/glint morre e, sem isto,
     // a superfície lê-se como um espelho liso (o "aerogel parado"): a
     // variação difusa é o que mantém a água viva em qualquer luz.
     let hh = wave_height(world.xz, t);
-    let wave_tint = 1.0 + 0.22 * clamp(hh, -1.0, 1.0);
+    let wave_tint = 1.0 + 0.08 * clamp(hh, -1.0, 1.0);
     // Correnteza: faixas de noise à deriva na direção do vento — vendem
     // FLUXO (o campo anda com t) em cor, não em specular.
     let streak = fbm(world.xz * vec2<f32>(0.5, 1.1) + vec2<f32>(t * 0.3, 0.0),
@@ -475,7 +475,7 @@ fn fragment(
     let crest_mask = smoothstep(0.38, 0.78,
         value_noise(world.xz * 0.045 + vec2<f32>(t * 0.02, 0.0)));
     let crest = (1.0 - smoothstep(0.10, 0.55, wave_jacobian(world.xz, t)))
-        * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) * 0.22 * damp * shore * crest_mask;
+        * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) * 0.12 * damp * shore * crest_mask;
     let foam = clamp(foam_band * foam_band * foam_noise + crest, 0.0, 1.0) * shore * 0.75;
 
     // Corpo: cor rasa → cor profunda ao longo da absorção. O reflexo do CÉU
@@ -489,7 +489,7 @@ fn fragment(
     let deep = body * 0.52;
     var col = mix(shallow, deep, absorb) * wave_tint;
     col += sky_tint * fres * 0.10;
-    col = mix(col, col * 1.3 + vec3<f32>(0.02), streak * 0.35);
+    col = mix(col, col * 1.12 + vec3<f32>(0.01), streak * 0.15);
     col = mix(col, vec3<f32>(0.90, 0.94, 0.95), foam);
 
     // Opacidade: absorção do corpo + reflexão de Fresnel por cima, tudo
@@ -506,7 +506,7 @@ fn fragment(
     // (o IBL especular sobre o campo de ondas lia-se como ladrilho). 0,42
     // espalha o lóbulo: a água mantém o brilho sem o padrão de mosaico.
     pbr_input.material.perceptual_roughness = clamp(
-        0.42 + 0.06 * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) + 0.30 * foam,
+        0.65 + 0.05 * clamp(CFG_WIND_STRENGTH, 0.0, 2.0) + 0.25 * foam,
         0.02,
         1.0,
     );

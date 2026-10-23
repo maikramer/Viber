@@ -327,6 +327,13 @@ fn world_to_uv(p_world: vec3<f32>) -> vec2<f32> {
     // Com a matriz unjittered lia-se o texel vizinho, e um vizinho diferente
     // por frame — era a fonte da piscação (medido 2026-09-10).
     let c = ssr_view.clip_from_view * (ssr_view.view_from_world * vec4<f32>(p_world, 1.0));
+    // Atrás da câmara `w <= 0`: a divisão espelha o XY e devolvia um UV VÁLIDO
+    // do lado errado do ecrã — um raio refletido que aponta para trás (normal
+    // de onda inclinada) apanhava profundidade alheia e o reflexo saltava.
+    // `(-1, -1)` cai no teste de bounds do raymarch e corta o vão.
+    if (c.w <= 1e-6) {
+        return vec2<f32>(-1.0, -1.0);
+    }
     let ndc = c.xy / c.w;
     return vec2<f32>((ndc.x + 1.0) * 0.5, 0.5 - ndc.y * 0.5);
 }
@@ -1214,6 +1221,12 @@ mod tests {
         );
         assert!(WATER_SSR_WGSL.contains("fn fragment"));
         assert!(WATER_SSR_WGSL.contains("prepass_depth"));
+        // `world_to_uv` recusa pontos atrás da câmara (w<=0 espelhava o XY e
+        // devolvia um UV válido do lado errado do ecrã).
+        assert!(
+            WATER_SSR_WGSL.contains("c.w <= 1e-6"),
+            "world_to_uv tem de cortar pontos atrás da câmara"
+        );
         for marker in ["DEBUG SPLIT", "DEBUG OVERLAY"] {
             assert!(
                 !WATER_SSR_WGSL.contains(marker),

@@ -393,6 +393,19 @@ pub fn rain_max_alpha() -> f32 {
         .unwrap_or(RAIN_MAX_ALPHA)
 }
 
+/// Tectos de sanidade de `start-speed` (m/s), `start-size` (m) e
+/// `shape-radius` (m).
+///
+/// O parser de XML rejeita NaN/inf mas aceita qualquer f32 FINITO — um
+/// `start-size-max="1e30"` ou `start-speed-max="1e30"` passava, e o
+/// `resolve` só travava `emission-rate` e `start-life` contra valores
+/// absurdos. Um quad de 1e30 m cobre o ecrã inteiro (overdraw + clip
+/// inválido) e uma partícula a 1e30 m/s sai do mundo no 1.º frame. Os tetos
+/// ficam muito acima dos presets (chuva 24 m/s, faíscas 6 m/s, gota 0.05 m).
+pub const MAX_PARTICLE_SPEED: f32 = 200.0;
+pub const MAX_PARTICLE_SIZE_M: f32 = 20.0;
+pub const MAX_PARTICLE_RADIUS_M: f32 = 100.0;
+
 /// Warn 1×/processo: o pedido (`rate × vida-máx`) estourou o teto declarativo
 /// do mesh — partículas extra nascem mas nunca são desenhadas. Dedupe global
 /// (padrão "warn 1x" do repo) porque `resolve` corre por emissor.
@@ -445,9 +458,34 @@ pub fn resolve(spec: &ParticleSpec) -> ResolvedEmitter {
         0.0
     };
     resolved.life = (a.min(b), a.max(b));
+    // Os MESMOS guardos de sanidade de rate/vida, para os eixos do quad e a
+    // velocidade (ver [`MAX_PARTICLE_SIZE_M`]): valores finitos mas absurdos
+    // não podem chegar aos vértices. A ordem min/max preserva o contrato do
+    // `Rng::range` (args trocados).
+    let sane_pair = |pair: (f32, f32), limit: f32, negative_ok: bool| {
+        let sane = |v: f32| {
+            if !v.is_finite() {
+                0.0
+            } else if negative_ok {
+                v.clamp(-limit, limit)
+            } else {
+                v.clamp(0.0, limit)
+            }
+        };
+        let (a, b) = (sane(pair.0), sane(pair.1));
+        (a.min(b), a.max(b))
+    };
+    resolved.speed = sane_pair(resolved.speed, MAX_PARTICLE_SPEED, true);
+    resolved.size = sane_pair(resolved.size, MAX_PARTICLE_SIZE_M, false);
+    resolved.size_y = sane_pair(resolved.size_y, MAX_PARTICLE_SIZE_M, false);
     if let Some(radius) = spec.shape_radius {
-        resolved.radius = radius.max(0.0);
+        resolved.radius = radius;
     }
+    resolved.radius = if resolved.radius.is_finite() {
+        resolved.radius.clamp(0.0, MAX_PARTICLE_RADIUS_M)
+    } else {
+        0.0
+    };
     // Teto mais apertado primeiro: emissores ambiente (teto 1024) só
     // truncam acima disso, mas o autor precisa de saber do limite do
     // `<ParticleSystem>` na mesma — a mensagem nomeia os dois.
@@ -537,7 +575,14 @@ impl EmitterSim {
         let life = r.range(self.resolved.life.0, self.resolved.life.1);
         let speed = r.range(self.resolved.speed.0, self.resolved.speed.1);
         let size = r.range(self.resolved.size.0, self.resolved.size.1);
-        let size_y = r.range(self.resolved.size_y.0, self.resolved.size_y.1);
+        let mut size_y = r.range(self.resolved.size_y.0, self.resolved.size_y.1);
+        // Presets quadrados (`size_y` com os MESMOS limites que `size`): um
+        // só sorteio para os dois eixos. Sortear em separado dava X e Y
+        // independentes — cada chama do preset de fogo saía um retângulo
+        // aleatório em vez do quadrado que o preset declara.
+        if self.resolved.size_y == self.resolved.size {
+            size_y = size;
+        }
         let mix = r.next_f32();
         let color = [
             self.resolved.color_a[0] + (self.resolved.color_b[0] - self.resolved.color_a[0]) * mix,
@@ -646,9 +691,16 @@ pub fn write_billboards(
     let live = particles.len().min(capacity);
 
     let to_camera = (camera_pos - emitter_pos).normalize_or_zero();
-    let right = Vec3::Y.cross(to_camera).normalize_or_zero();
-    let up = if right.length_squared() > f32::EPSILON {
-        to_camera.cross(right).normalize_or_zero()
+    let mut right = Vec3::Y.cross(to_camera).normalize_or_zero();
+    if right.length_squared() <= f32::EPSILON {
+        // Câmara a pino (to_camera ≈ ±Y): Y×Y é zero e o quad ficava com
+        // largura nula — o emissor desaparecia visto de cima/baixo. Um eixo
+        // horizontal serve de `right` e o `up` sai perpendicular a ele.
+        right = Vec3::X;
+    }
+    let up = to_camera.cross(right).normalize_or_zero();
+    let up = if up.length_squared() > f32::EPSILON {
+        up
     } else {
         Vec3::Y
     };
@@ -1369,7 +1421,10 @@ fn mount_ambient_fx(
             handle
         }
     };
-    commands.entity(entity).insert((
+    // `try_insert`: o marker pode ser despawnado por um sweep de cena entre
+    // o scan e a aplicação dos comandos — um insert num Entity morto usa o
+    // handler de erro por omissão (panic) e derrubava o jogo na troca.
+    commands.entity(entity).try_insert((
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Visibility::Inherited,
@@ -1401,7 +1456,9 @@ fn dismount_ambient_fx(
         positions.fill([0.0; 3]);
     }
     pool.park_mesh(emitter.capacity, mesh.0.clone());
-    commands.entity(entity).remove::<(
+    // `try_remove`: mesmo motivo do `try_insert` do mount (entidade morta
+    // pelo unload da cena entre o scan e o apply).
+    commands.entity(entity).try_remove::<(
         Mesh3d,
         MeshMaterial3d<StandardMaterial>,
         Visibility,
@@ -1512,7 +1569,10 @@ fn burst_despawn_system(
     mut pool: ResMut<BurstPool>,
     mut commands: Commands,
 ) {
-    let dt = time.delta_secs();
+    // O MESMO teto de `particle_emitter_update`: com o dt cru, um soluço de
+    // meio segundo esgotava o timer enquanto as partículas (que só andam
+    // 0,1 s) ainda estavam vivas — o burst desaparecia a meio.
+    let dt = time.delta_secs().clamp(0.0, 0.1);
     for (entity, mut burst, emitter, mesh) in &mut bursts {
         burst.timer -= dt;
         if burst.timer <= 0.0 {
@@ -1871,6 +1931,25 @@ mod tests {
         );
     }
 
+    /// Num preset QUADRADO (`size_y` com os mesmos limites de `size`) o quad
+    /// tem de sair quadrado: sortear X e Y em separado dava retângulos
+    /// aleatórios que cintilavam.
+    #[test]
+    fn test_square_preset_quads_stay_square() {
+        let mut sim = EmitterSim::new(&fire_spec());
+        assert_eq!(sim.resolved.size, sim.resolved.size_y, "fire é quadrado");
+        sim.step(1.0);
+        assert!(!sim.particles.is_empty());
+        for particle in &sim.particles {
+            assert!(
+                (particle.size - particle.size_y).abs() < 1e-6,
+                "quad {}×{} não é quadrado",
+                particle.size,
+                particle.size_y
+            );
+        }
+    }
+
     #[test]
     fn test_write_billboards_writes_four_verts_per_particle() {
         let mut sim = EmitterSim::new(&fire_spec());
@@ -2015,6 +2094,34 @@ mod tests {
             preset("rain").size_y,
             "gota esticada mantém a proporção do preset"
         );
+    }
+
+    /// Valores FINITOS mas absurdos no XML (`1e30`) não podem chegar aos
+    /// vértices: o quad de 1e30 m cobre o ecrã e a velocidade idem atira as
+    /// partículas para fora do mundo no primeiro frame.
+    #[test]
+    fn test_resolve_clamps_absurd_sizes_speeds_and_radius() {
+        let mut spec = fire_spec();
+        spec.size = Some((1e30, 1e30));
+        spec.speed = Some((-1e30, 1e30));
+        spec.shape_radius = Some(1e30);
+        let resolved = resolve(&spec);
+        for value in [resolved.size.0, resolved.size.1, resolved.size_y.0, resolved.size_y.1] {
+            assert!(
+                (0.0..=MAX_PARTICLE_SIZE_M).contains(&value),
+                "tamanho absurdo: {value}"
+            );
+        }
+        assert_eq!(resolved.size, resolved.size_y, "o quadrado mantém-se");
+        assert!(resolved.speed.0 >= -MAX_PARTICLE_SPEED);
+        assert!(resolved.speed.1 <= MAX_PARTICLE_SPEED);
+        assert_eq!(resolved.radius, MAX_PARTICLE_RADIUS_M);
+        // Args trocados continuam a produzir um intervalo válido.
+        let mut spec = fire_spec();
+        spec.size = Some((3.0, 0.5));
+        let resolved = resolve(&spec);
+        assert_eq!(resolved.size, (0.5, 3.0));
+        assert_eq!(resolved.size_y, (0.5, 3.0));
     }
 
     /// O asset store NÃO cresce com os bursts: a malha volta ao pool no

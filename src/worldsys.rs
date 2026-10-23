@@ -660,6 +660,7 @@ pub fn seat_statics_once(
             &seated,
             &unit,
             &mut transforms,
+            &parents,
         );
     }
     *done = true;
@@ -674,6 +675,7 @@ const SEAT_CENTER_MAX_EXTENT_M: f32 = 60.0;
 
 /// Senta `entity` (grupo com `SeatOnTerrain`) pelo seu conteúdo, ver
 /// [`seat_statics_once`].
+#[allow(clippy::too_many_arguments)]
 fn seat_group(
     entity: Entity,
     runtime: &crate::terrain::runtime::TerrainRuntime,
@@ -681,6 +683,7 @@ fn seat_group(
     seated: &Query<(), With<SeatOnTerrain>>,
     unit: &Query<(), With<SeatAsUnit>>,
     transforms: &mut Query<(Entity, &mut Transform)>,
+    parents: &Query<(Entity, &ChildOf)>,
 ) {
     let Ok((_, group_transform)) = transforms.get(entity) else {
         return;
@@ -703,6 +706,7 @@ fn seat_group(
             group_translation.z,
             runtime,
             transforms,
+            parents,
         );
         return;
     };
@@ -721,6 +725,7 @@ fn seat_group(
             group_translation.z + center.y,
             runtime,
             transforms,
+            parents,
         );
         return;
     }
@@ -728,7 +733,7 @@ fn seat_group(
     // filho fica à cota do seu próprio sítio.
     for (kid, xz) in kid_xz {
         if seated.contains(kid) {
-            seat_group(kid, runtime, children_of, seated, unit, transforms);
+            seat_group(kid, runtime, children_of, seated, unit, transforms, parents);
         } else {
             seat_at(
                 kid,
@@ -736,9 +741,33 @@ fn seat_group(
                 group_translation.z + xz.y,
                 runtime,
                 transforms,
+                parents,
             );
         }
     }
+}
+
+/// Soma dos Y locais dos ancestrais de `entity` (sem contar a própria). O
+/// seat escreve a cota do chão como Y LOCAL; dentro de um grupo elevado ou de
+/// um `<Include translation>`, escrever o Y mundo somava o offset do pai (a
+/// cena subia uma segunda vez).
+fn ancestor_world_y(
+    entity: Entity,
+    parents: &Query<(Entity, &ChildOf)>,
+    transforms: &Query<(Entity, &mut Transform)>,
+) -> f32 {
+    let mut y = 0.0;
+    let mut current = entity;
+    for _ in 0..64 {
+        let Ok((_, parent)) = parents.get(current) else {
+            break;
+        };
+        current = parent.parent();
+        if let Ok((_, transform)) = transforms.get(current) {
+            y += transform.translation.y;
+        }
+    }
+    y
 }
 
 /// Levanta `entity` até ao solo amostrado em (`x`, `z`) — só para cima:
@@ -749,7 +778,12 @@ fn seat_at(
     z: f32,
     runtime: &crate::terrain::runtime::TerrainRuntime,
     transforms: &mut Query<(Entity, &mut Transform)>,
+    parents: &Query<(Entity, &ChildOf)>,
 ) {
+    // O Transform é LOCAL: a cota do chão é mundo, por isso desconta-se o Y
+    // acumulado dos ancestrais (um grupo sob um `<Include translation>` ou
+    // outro grupo elevado subia a segunda vez).
+    let parent_y = ancestor_world_y(entity, parents, transforms);
     let Ok((_, mut transform)) = transforms.get_mut(entity) else {
         return;
     };
@@ -763,7 +797,7 @@ fn seat_at(
     // static correctamente pousado sob um overhang não é puxado através da
     // rocha (o topo do mundo ali é teto), e um static enterrado sobe até à
     // primeira superfície acima de si. Spans chegam top-down.
-    let y = transform.translation.y;
+    let y = parent_y + transform.translation.y;
     let spans = runtime.column(x, z);
     let ground = spans
         .iter()
@@ -780,7 +814,7 @@ fn seat_at(
                 .unwrap_or(f32::NEG_INFINITY)
         });
     if y < ground - 0.25 {
-        transform.translation.y = ground;
+        transform.translation.y = ground - parent_y;
     }
 }
 
@@ -2010,6 +2044,72 @@ mod tests {
             local_y(&app, inner_prop),
             0.0,
             "the nested group's prop keeps its authored local offset"
+        );
+    }
+
+    /// O seat escreve Y LOCAL: um grupo sob um pai elevado (um `<Include
+    /// translation>` vira um Group com pose) tem de descontar o Y do pai. Sem
+    /// isto a cena subia o offset do include MAIS a cota do chão.
+    #[test]
+    fn test_seat_statics_discounts_the_parent_y_offset() {
+        use crate::terrain::brush::BrushGrid;
+        use crate::terrain::heightmap::HeightMapU16;
+        use crate::terrain::runtime::TerrainRuntime;
+        use crate::terrain::spec::TerrainSpec;
+
+        let spec = TerrainSpec {
+            world_size: 64.0,
+            max_height: 100.0,
+            ..TerrainSpec::default()
+        };
+        let map = HeightMapU16 {
+            width: 33,
+            depth: 33,
+            data: vec![u16::MAX / 2; 33 * 33],
+        };
+        let grid = BrushGrid::from_height_map(&map, spec.world_size, spec.max_height, 0.0)
+            .expect("grid builds");
+        let ground = grid.sample(0.0, 0.0);
+        assert!(ground > 40.0, "fixture ground well above zero: {ground}");
+
+        let mut app = bevy::app::App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.insert_resource(TerrainRuntime {
+            spec,
+            grid: Arc::new(grid),
+            water: Vec::new(),
+            roads: Vec::new(),
+            pads: Vec::new(),
+            voxel: Arc::new(crate::terrain::voxel::VoxelField::default()),
+            deltas: std::sync::Arc::new(crate::terrain::delta::DeltaGrid::default()),
+            paint: std::sync::Arc::new(crate::terrain::paint::PaintGrid::default()),
+            splat_tuning: Default::default(),
+        });
+        app.add_systems(bevy::app::Update, seat_statics_once);
+
+        // Pai NÃO seatável com o offset de um `<Include translation="0 30 0">`.
+        let wrapper = app
+            .world_mut()
+            .spawn(Transform::from_xyz(0.0, 30.0, 0.0))
+            .id();
+        let group = app
+            .world_mut()
+            .spawn((Transform::default(), SeatOnTerrain, ChildOf(wrapper)))
+            .id();
+        app.world_mut()
+            .spawn((Transform::from_xyz(1.0, 0.0, 1.0), ChildOf(group)));
+
+        app.update();
+
+        let world_y = |app: &bevy::app::App, e| {
+            let local = app.world().get::<Transform>(e).unwrap().translation.y;
+            let parent = 30.0; // wrapper
+            local + parent
+        };
+        assert!(
+            (world_y(&app, group) - ground).abs() < 0.5,
+            "grupo na cota do chão em mundo (get {}, esperado {ground})",
+            world_y(&app, group)
         );
     }
 
