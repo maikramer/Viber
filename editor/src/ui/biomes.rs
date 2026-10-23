@@ -254,26 +254,22 @@ fn render_biomes(
     selection: Res<Selection>,
     bodies: Query<Entity, With<BiomesBody>>,
 ) {
-    let Some(node) = selection.primary().cloned() else {
-        return;
-    };
-    let Some(xml) = doc.node(&node) else {
-        return;
-    };
-    if !xml.tag.eq_ignore_ascii_case("terrain") {
-        if state.built_for.is_some() {
-            state.built_for = None;
-        }
-        return;
-    }
-    let Some(field) = doc
-        .terrain
-        .as_ref()
-        .map(|terrain| terrain.meta.biomes.clone())
-    else {
-        return;
-    };
     let Ok(body) = bodies.single() else {
+        return;
+    };
+    // O painel é do `<Terrain>` SELECIONADO. Sem seleção, com outro nó, ou sem
+    // terreno no doc, tem de sair: antes os dropdowns/preview do terreno
+    // anterior ficavam lá e editavam um terreno que já não estava selecionado.
+    let field = selection
+        .primary()
+        .and_then(|node| doc.node(node))
+        .filter(|xml| xml.tag.eq_ignore_ascii_case("terrain"))
+        .and_then(|_| doc.terrain.as_ref())
+        .map(|terrain| terrain.meta.biomes.clone());
+    let Some(field) = field else {
+        if state.built_for.take().is_some() {
+            commands.entity(body).despawn_related::<Children>();
+        }
         return;
     };
     let signature = field_signature(&field);

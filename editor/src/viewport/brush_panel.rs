@@ -248,6 +248,7 @@ pub struct BrushScatters(pub Vec<String>);
 pub fn refresh_scatters(
     doc: Res<viber::scene::doc::SceneDoc>,
     mut scatters: ResMut<BrushScatters>,
+    mut target: ResMut<BrushTarget>,
 ) {
     if !doc.is_changed() {
         return;
@@ -262,6 +263,14 @@ pub fn refresh_scatters(
         }
     });
     scatters.0 = out;
+    // O alvo é um seletor do doc: apagado/renomeado o `<Scatter>`, cada dab
+    // falhava com "selector não encontrado" até se voltar a escolher
+    // "material" à mão. Limpa-o quando deixa de existir.
+    if let Some(selected) = target.0.as_deref()
+        && !scatters.0.iter().any(|selector| selector == selected)
+    {
+        target.0 = None;
+    }
 }
 
 /// Mostra o painel apenas com o pincel ativo.

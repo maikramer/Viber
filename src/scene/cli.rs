@@ -531,8 +531,11 @@ pub fn scene_template(interior: Option<&str>) -> Result<crate::project::SceneTem
     let [width, depth] = nums[..] else {
         bail!("--interior: `{text}` não é \"largura profundidade\"");
     };
-    if width <= 0.0 || depth <= 0.0 {
-        bail!("--interior: dimensões têm de ser positivas");
+    // `NaN`/`inf` passam o `parse::<f32>` e o `<= 0.0` era FALSO para NaN:
+    // a cena nascia com `half-size` NaN (câmara/física em NaN) e o XML
+    // escrevia literalmente "NaN". "Positivas" exclui não-finitas.
+    if !(width.is_finite() && depth.is_finite() && width > 0.0 && depth > 0.0) {
+        bail!("--interior: dimensões têm de ser positivas e finitas");
     }
     Ok(crate::project::SceneTemplate::Interior { width, depth })
 }
@@ -711,7 +714,9 @@ pub fn transaction_json(doc: &SceneDoc, tx: &Transaction, files: &[String], save
                 json!({ "kind": "attrs", "node": doc.selector(node), "keys": keys })
             }
             Change::Inserted { node } => json!({ "kind": "inserted", "node": doc.selector(node) }),
-            Change::Removed { node } => json!({ "kind": "removed", "node": doc.selector(node) }),
+            Change::Removed { node, .. } => {
+                json!({ "kind": "removed", "node": doc.selector(node) })
+            }
             Change::Terrain { rect } => json!({ "kind": "terrain", "cells": rect }),
             Change::Paint { rect } => json!({ "kind": "paint", "cells": rect }),
             Change::Biomes => json!({ "kind": "biomes" }),
@@ -724,4 +729,19 @@ pub fn transaction_json(doc: &SceneDoc, tx: &Transaction, files: &[String], save
         "saved": saved,
         "inverse": tx.inverse,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `NaN`/`inf` passam o `parse::<f32>`; sem o `is_finite` a cena nascia
+    /// com dimensões não-finitas (half-size NaN no XML).
+    #[test]
+    fn interior_rejects_non_finite_dimensions() {
+        assert!(scene_template(Some("NaN 16")).is_err());
+        assert!(scene_template(Some("inf 16")).is_err());
+        assert!(scene_template(Some("20 16")).is_ok());
+        assert!(scene_template(Some("0 16")).is_err());
+    }
 }

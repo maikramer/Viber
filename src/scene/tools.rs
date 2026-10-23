@@ -120,17 +120,21 @@ pub fn scatter(world: &mut World, selector: &str) -> Result<ToolOutput> {
     }
 
     // O grupo gerado fica onde o antigo estava (ou logo a seguir à receita).
+    // A raiz de um ficheiro (`fragmento.xml#`) não tem pai onde inserir: erro,
+    // não `expect` (a receita pode ser a raiz de um include).
     let (parent, index, replace) = match &existing {
-        Some(old) => (
-            old.parent().expect("não-raiz"),
-            *old.path.last().expect("não-raiz"),
-            true,
-        ),
-        None => (
-            node.parent().expect("não-raiz"),
-            node.path.last().expect("não-raiz") + 1,
-            false,
-        ),
+        Some(old) => {
+            let (Some(parent), Some(index)) = (old.parent(), old.path.last().copied()) else {
+                bail!("scatter `{id}`: o grupo gerado é a raiz do ficheiro — envolve-o num <Group>");
+            };
+            (parent, index, true)
+        }
+        None => {
+            let (Some(parent), Some(index)) = (node.parent(), node.path.last().copied()) else {
+                bail!("scatter `{id}`: a receita é a raiz do ficheiro — envolve-a num <Group>");
+            };
+            (parent, index + 1, false)
+        }
     };
     let parent_world = node_frame(doc, &parent, &frames);
     let output = crate::bake::generated_group(
@@ -231,11 +235,17 @@ pub fn scatter_in_region(
     if instances.is_empty() {
         warnings.push(format!("scatter_brush `{id}`: 0 colocadas ({stats:?})"));
     }
-    // APPEND no grupo gerado (ou cria-o a seguir à receita)
+    // APPEND no grupo gerado (ou cria-o a seguir à receita). Nó raiz: sem pai
+    // onde inserir — erro claro em vez de panic (vem de seletor de agente).
     let doc = world.resource::<SceneDoc>().clone();
     let parent = match &existing {
+        Some(group) if group.is_root() => bail!(
+            "scatter_brush `{id}`: o grupo gerado é a raiz do ficheiro — envolve-o num <Group>"
+        ),
         Some(group) => group.clone(),
-        None => node.parent().expect("não-raiz"),
+        None => node.parent().ok_or_else(|| {
+            anyhow!("scatter_brush `{id}`: a receita é a raiz do ficheiro — envolve-a num <Group>")
+        })?,
     };
     let parent_world = node_frame(&doc, &parent, &frames);
     let name_start = existing
@@ -265,7 +275,9 @@ pub fn scatter_in_region(
         // Sem grupo, o dab tem de criar o `<Group generated-by>`. Inserir só
         // os filhos deixava a receita sem grupo e o dab seguinte repetia
         // `inst-…-0000`.
-        let scatter_parent = node.parent().expect("não-raiz");
+        let scatter_parent = node.parent().ok_or_else(|| {
+            anyhow!("scatter_brush `{id}`: a receita é a raiz do ficheiro — envolve-a num <Group>")
+        })?;
         let index = node.path.last().copied().unwrap_or(0) + 1;
         ops.push(EditOp::Insert {
             parent: doc.selector(&scatter_parent),

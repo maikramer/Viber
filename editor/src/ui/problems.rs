@@ -152,7 +152,11 @@ fn poll_problems(world: &mut World) {
 fn run_lint(world: &mut World) {
     run_plugin_lint(world);
     if world.resource::<ProblemsTask>().0.is_some() {
-        return; // já há um lint em voo
+        // Já há um lint em voo (lê o disco do momento em que arrancou). Um
+        // pedido novo — o botão Revalidar depois de gravar — era deitado fora
+        // e o painel ficava com o relatório ANTERIOR; pede outro no fim.
+        world.resource_mut::<ProblemsState>().lint_again = true;
+        return;
     }
     // O lint lê o DISCO e não grava nada: gravar aqui escrevia as edições do
     // utilizador sem ele pedir (e no arranque deixava "guardar: nada para
@@ -412,6 +416,10 @@ fn finding_clicked(
     mut scripts: ResMut<crate::ui::mode_strip::ScriptState>,
     doc: Res<SceneDoc>,
 ) {
+    // Só o botão esquerdo navega para o script (o direito também saltava).
+    if click.button != bevy::picking::pointer::PointerButton::Primary {
+        return;
+    }
     let Ok(row) = rows.get(click.event_target()) else {
         return;
     };

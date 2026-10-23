@@ -485,7 +485,11 @@ fn render_script_panel(
     // mudou de facto ANTES do harvest (senão o editor era reconstruído a
     // cada frame e o input perdia o cursor).
     let stale = state.is_changed() || files.is_changed();
-    harvest_script_buffers(&mut state, &editors);
+    // O harvest espelha o estado VIVO dos editores: escrever os buffers não
+    // pode marcar o recurso como mudado — senão `stale` ficava verdadeiro em
+    // todos os frames seguintes e o painel (com o `EditableText`) era
+    // destruído e re-lido do disco a cada frame.
+    harvest_script_buffers(state.bypass_change_detection(), &editors);
     if !stale {
         return;
     }

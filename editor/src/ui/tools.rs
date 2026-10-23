@@ -10,7 +10,7 @@ use super::icons::{self, fa, icon};
 use super::strings::{Lang, LangTooltip, StrKey, t};
 use super::theme;
 use super::tooltip::Tooltip;
-use crate::viewport::gizmo::{GizmoTool, Mode, SelectedEntity};
+use crate::viewport::gizmo::{GizmoTool, Mode};
 
 /// A gizmo-mode button; `0` is the mode.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,19 +138,19 @@ fn space_clicked(
 fn frame_clicked(
     activate: On<Activate>,
     buttons: Query<(), With<FrameButton>>,
-    selected: Res<SelectedEntity>,
-    globals: Query<&GlobalTransform>,
-    mut camera: Option<ResMut<viber::editor_camera::EditorCamState>>,
+    selection: Res<crate::scene::Selection>,
+    mut commands: Commands,
 ) {
     if !buttons.contains(activate.event_target()) {
         return;
     }
-    if let (Some(entity), Some(camera)) = (selected.0, camera.as_deref_mut())
-        && let Ok(global) = globals.get(entity)
-    {
-        let _ = viber::editor_camera::look_at(camera, global.translation());
-        camera.distance = camera.distance.min(60.0);
-    }
+    // O botão promete o MESMO "Enquadrar a seleção (F)": usa o enquadramento
+    // pelos limites (o `look_at` + distância ≤ 60 m não cabia um objeto grande
+    // nem aproximava um pequeno).
+    let nodes = crate::scene::selection_roots(&selection.0);
+    commands.queue(move |world: &mut World| {
+        crate::viewport::gizmo::frame_nodes(world, &nodes);
+    });
 }
 
 /// Highlights the active tool and flips the axes toggle's icon (cube = local, globe = global).

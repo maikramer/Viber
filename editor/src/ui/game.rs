@@ -403,6 +403,30 @@ fn poll_game(world: &mut World) {
         world.resource::<ViberBridge>().status,
         EngineStatus::Connected { .. }
     ) {
+        // Sem jogo não há leituras: limpar o último readout/runtime — ficavam a
+        // fingir que o jogo ainda corria depois de Stop / de o processo sair.
+        let idle = {
+            let state = world.resource::<GameState>();
+            state.readout.is_empty()
+                && state.runtime.is_empty()
+                && state.task.is_none()
+                && state.cmd_task.is_none()
+                && state.pending_cmd.is_none()
+                && state.info_task.is_none()
+                && state.dragging.is_none()
+        };
+        if idle {
+            return;
+        }
+        let mut state = world.resource_mut::<GameState>();
+        state.readout.clear();
+        state.runtime.clear();
+        state.task = None;
+        state.cmd_task = None;
+        state.pending_cmd = None;
+        state.info_task = None;
+        state.dragging = None;
+        state.dirty = true;
         return;
     }
     // 0. drena o slot de COMANDOS (resultado ignorado, só erros interessam)

@@ -369,11 +369,27 @@ impl PluginHost {
             return false;
         };
         let paths = scan_plugin_paths(&self.dir);
-        let mut present = HashSet::new();
+        let present: HashSet<PathBuf> = paths.iter().cloned().collect();
         let mut changed = false;
+        // Ficheiros apagados/movidos saem PRIMEIRO. Um plugin renomeado
+        // (foo.lua → bar.lua, mesmo `id`) era carregado com o antigo ainda na
+        // lista, recusado como "id duplicado", e o antigo era removido a
+        // seguir: o plugin desaparecia até ao próximo toque no ficheiro.
+        let old = std::mem::take(&mut self.plugins);
+        let (kept, removed): (Vec<_>, Vec<_>) = old
+            .into_iter()
+            .partition(|plugin| present.contains(&plugin.path));
+        self.plugins = kept;
+        for plugin in removed {
+            let _ = lua.remove_registry_value(plugin.table);
+            self.sources.remove(&plugin.path);
+            changed = true;
+        }
+        // Uma assinatura de um ficheiro que já não existe não serve para nada
+        // (e impedia recarregar um ficheiro recriado com o mesmo conteúdo).
+        self.sources.retain(|path, _| present.contains(path));
         for path in paths {
             let signature = file_signature(&path);
-            present.insert(path.clone());
             if self.sources.get(&path) == Some(&signature) {
                 continue;
             }
@@ -410,17 +426,6 @@ impl PluginHost {
                     }
                 }
             }
-        }
-        // Unloaded/deleted files: drop their registry tables.
-        let old = std::mem::take(&mut self.plugins);
-        let (kept, removed): (Vec<_>, Vec<_>) = old
-            .into_iter()
-            .partition(|plugin| present.contains(&plugin.path));
-        self.plugins = kept;
-        for plugin in removed {
-            let _ = lua.remove_registry_value(plugin.table);
-            self.sources.remove(&plugin.path);
-            changed = true;
         }
         if changed {
             self.rendered.clear();

@@ -517,7 +517,14 @@ fn commit(world: &mut World, node: &NodeRef, start: Rect, delta: Vec2, corner: O
 /// Applies the chips' state preview to the node's UI entities (the engine's
 /// cascade honors `UiPreviewState`; a `Normal` chip removes it).
 fn canvas_state_preview(mut had_preview: Local<Vec<Entity>>, world: &mut World) {
-    let preview = world.resource::<CanvasPreview>().0;
+    // O preview só vale no modo UI (os chips vivem no canvas de UI). Fora dele
+    // o último Hover/Pressed ficava colado às entidades do nó selecionado — o
+    // HUD do jogo aparecia "hover" sem o rato lá estar.
+    let preview = if world.resource::<EditorModeState>().0 == EditorMode::Ui {
+        world.resource::<CanvasPreview>().0
+    } else {
+        UiStatePreview::Normal
+    };
     let selected = selected_ui_entities(world);
     // limpa o preview das entidades que SAÍRAM da seleção: trocar de nó com
     // um chip ativo deixava o Hover/Pressed preso no nó antigo
@@ -551,20 +558,20 @@ fn canvas_state_preview(mut had_preview: Local<Vec<Entity>>, world: &mut World) 
 fn canvas_menu_info(world: &mut World) {
     let mode = world.resource::<EditorModeState>().0;
     let Some(node) = world.resource::<Selection>().primary().cloned() else {
-        clear_info(world, mode);
+        clear_info(world);
         return;
     };
     let Some(xml) = world.resource::<SceneDoc>().node(&node).cloned() else {
-        clear_info(world, mode);
+        clear_info(world);
         return;
     };
     if mode != EditorMode::Ui {
-        clear_info(world, mode);
+        clear_info(world);
         return;
     }
     let lang = *world.resource::<Lang>();
     let Some(rect) = selected_ui_rect(world) else {
-        clear_info(world, mode);
+        clear_info(world);
         return;
     };
     let mut parts = vec![format!(
@@ -608,14 +615,15 @@ fn canvas_menu_info(world: &mut World) {
     }
 }
 
-fn clear_info(world: &mut World, mode: EditorMode) {
-    if mode != EditorMode::Ui {
-        let mut infos = world.query_filtered::<&mut Text, With<CanvasInfo>>();
-        if let Ok(mut info) = infos.single_mut(world)
-            && !info.0.is_empty()
-        {
-            info.0.clear();
-        }
+fn clear_info(world: &mut World) {
+    // O texto tem de sair em TODOS os modos: com a guarda ao contrário
+    // (`mode != Ui`) o painel ficava com as dimensões do nó ANTERIOR quando a
+    // seleção desaparecia em modo UI.
+    let mut infos = world.query_filtered::<&mut Text, With<CanvasInfo>>();
+    if let Ok(mut info) = infos.single_mut(world)
+        && !info.0.is_empty()
+    {
+        info.0.clear();
     }
 }
 

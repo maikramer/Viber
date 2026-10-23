@@ -72,6 +72,7 @@ fn render_toasts(
     toasts: Res<Toasts>,
     mut roots: Query<(Entity, &mut Node), With<ToastRoot>>,
     mut built: Local<bool>,
+    mut drawn: Local<Vec<(String, ToastKind)>>,
 ) {
     let Ok((root, mut node)) = roots.single_mut() else {
         return;
@@ -84,10 +85,24 @@ fn render_toasts(
     if node.display != display {
         node.display = display;
     }
-    if !toasts.is_changed() && *built {
+    // `expire_toasts` mexe nas idades a cada frame (change detection sempre
+    // ligada), mas o painel só muda quando a LISTA muda — sem esta assinatura
+    // as linhas eram destruídas e re-criadas a 60 Hz.
+    let same = *built
+        && drawn.len() == toasts.items.len()
+        && drawn
+            .iter()
+            .zip(toasts.items.iter())
+            .all(|((text, kind), toast)| *kind == toast.kind && text == &toast.text);
+    if same {
         return;
     }
     *built = true;
+    *drawn = toasts
+        .items
+        .iter()
+        .map(|toast| (toast.text.clone(), toast.kind))
+        .collect();
     commands.entity(root).despawn_related::<Children>();
     if toasts.items.is_empty() {
         return;
@@ -106,6 +121,9 @@ fn render_toasts(
                     max_width: px(440),
                     ..default()
                 },
+                // Notificação não intercepta cliques: sem isto a faixa tapava o
+                // que está por baixo (status bar/dock) durante os 4 s.
+                Pickable::IGNORE,
                 BackgroundColor(theme::BG_POPOVER),
                 BorderColor::all(color),
                 ChildOf(root),
@@ -157,6 +175,7 @@ pub fn toast_root() -> impl Scene {
             row_gap: px(6),
             display: Display::None,
         }
+        Pickable::IGNORE
         Children []
     }
 }

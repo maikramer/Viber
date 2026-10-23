@@ -105,6 +105,11 @@ pub fn scan_files(doc: Res<SceneDoc>, mut state: ResMut<FilesState>) {
     if state.built && !doc.is_added() {
         return;
     }
+    rescan(&doc, &mut state);
+}
+
+/// Lê a pasta do projeto e larga a seleção que deixou de existir.
+fn rescan(doc: &SceneDoc, state: &mut FilesState) {
     state.built = true;
     // Relativo à raiz do PROJETO (a pasta do config.yaml), a mesma base de
     // `open_world` / `glb_drop` / `scene_instance`. A pasta do XML aberto
@@ -114,6 +119,23 @@ pub fn scan_files(doc: Res<SceneDoc>, mut state: ResMut<FilesState>) {
         && !entry_tree_has(&state.entries, "", path)
     {
         state.selected = None;
+    }
+}
+
+/// Botão "Atualizar": relê a pasta. Sem ele, um `.glb`/`.lua` criado fora do
+/// editor (gameassets, git, outro processo) só aparecia depois de trocar de
+/// cena — o scan corre uma vez por documento.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RefreshFiles;
+
+fn refresh_files(
+    activate: On<Activate>,
+    buttons: Query<(), With<RefreshFiles>>,
+    doc: Res<SceneDoc>,
+    mut state: ResMut<FilesState>,
+) {
+    if buttons.contains(activate.event_target()) {
+        rescan(&doc, &mut state);
     }
 }
 
@@ -220,6 +242,26 @@ pub fn render_file_header(
         return;
     }
     commands.entity(header).despawn_related::<Children>();
+    commands
+        .spawn_scene(bsn! {
+            @FeathersToolButton {
+                @variant: ButtonVariant::Plain,
+                @caption: bsn! {
+                    @icon_caption(
+                        fa::ROTATE_RIGHT,
+                        pick(*lang, "Atualizar", "Refresh"),
+                        icons::ICON_DIM
+                    )
+                },
+            }
+            Tooltip(pick(
+                *lang,
+                "Relê a pasta do projeto (ficheiros criados fora do editor)",
+                "Rescan the project folder (files created outside the editor)"
+            ))
+        })
+        .insert((RefreshFiles, ChildOf(header)))
+        .observe(refresh_files);
     let dirty = doc.dirty_paths();
     if !dirty.is_empty() {
         commands.spawn((
@@ -399,14 +441,28 @@ fn instance_scene(activate: On<Activate>, buttons: Query<&InstanceScene>, mut co
     });
 }
 
-/// Where a dropped/inserted GLB lands: the terrain under the last viewport ray.
+/// Where a dropped/inserted GLB lands: the terrain under the last viewport ray,
+/// or the editor camera's target when there is no ray.
+///
+/// Clicar em "Inserir" no dock Ficheiros põe o cursor FORA do viewport (o
+/// `ViewportCursor` só tem raio com o rato por cima dele): sem o fallback o
+/// GLB caía sempre na origem do mundo, não onde a câmara olha.
 pub fn drop_point(world: &mut World) -> Option<Vec3> {
     let cursor = *world.resource::<crate::viewport::gizmo::ViewportCursor>();
-    let ray = cursor.ray?;
-    let runtime = world.get_resource::<viber::terrain::runtime::TerrainRuntime>()?;
-    viber::scene::terrain::ray_ground(ray.origin, *ray.direction, 4000.0, |x, z| {
-        runtime.sample(x, z)
-    })
+    if let Some(ray) = cursor.ray
+        && let Some(runtime) = world.get_resource::<viber::terrain::runtime::TerrainRuntime>()
+        && let Some(at) = viber::scene::terrain::ray_ground(
+            ray.origin,
+            *ray.direction,
+            4000.0,
+            |x, z| runtime.sample(x, z),
+        )
+    {
+        return Some(at);
+    }
+    world
+        .get_resource::<viber::editor_camera::EditorCamState>()
+        .map(|camera| camera.target)
 }
 
 /// "Carimbar": ativa o stamp tool com este GLB.
@@ -572,6 +628,22 @@ mod tests {
         assert!(is_dirty_path(&dirty, "world/room.xml"));
         assert!(!is_dirty_path(&dirty, "room.xml"));
         assert!(!is_dirty_path(&dirty, "world/house.xml"));
+    }
+
+    #[test]
+    fn drop_without_a_viewport_ray_falls_back_to_the_camera_target() {
+        let mut world = World::new();
+        world.insert_resource(crate::viewport::gizmo::ViewportCursor::default());
+        world.insert_resource(viber::editor_camera::EditorCamState {
+            active: true,
+            target: Vec3::new(10.0, 2.0, -3.0),
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+            distance: 20.0,
+        });
+        // O cursor está sobre o dock (sem raio): o GLB vai para onde a câmara
+        // olha, não para a origem do mundo.
+        assert_eq!(drop_point(&mut world), Some(Vec3::new(10.0, 2.0, -3.0)));
     }
 
     #[test]

@@ -88,11 +88,15 @@ fn physics_hit(world: &mut World, origin: Vec3, dir: Vec3, max_distance: f32) ->
     let simulation = world.get::<RapierContextSimulation>(context)?;
     let colliders = world.get::<RapierContextColliders>(context)?;
     let bodies = world.get::<RapierRigidBodySet>(context)?;
+    // Sensores (volumes de interação/triggers) não são geometria visível: se
+    // contassem como oclusor, um prop atrás de um trigger não era selecionável
+    // e o `limit` descia para a distância do sensor.
+    let filter = QueryFilter::default().exclude_sensors();
     RapierQueryPipeline::new_scoped(
         &simulation.broad_phase,
         colliders,
         bodies,
-        &QueryFilter::default(),
+        &filter,
         &DefaultQueryDispatcher,
         |pipeline| pipeline.cast_ray(origin, dir, max_distance, true),
     )

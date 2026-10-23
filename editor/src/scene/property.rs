@@ -201,6 +201,9 @@ const COLLIDER_SHAPES: &[&str] = &[
     "capsule",
     "mesh",
     "precompute",
+    // `parse_collider` da engine aceita "convex" (hull do `mesh-url`): sem a
+    // opção, um collider convex abria o dropdown VAZIO no inspetor.
+    "convex",
 ];
 const BODY_KINDS: &[&str] = &["none", "fixed", "dynamic", "kinematic"];
 

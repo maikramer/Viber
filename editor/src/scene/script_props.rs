@@ -381,6 +381,10 @@ fn reset_prop(
     lang: Res<crate::ui::strings::Lang>,
     mut edits: ResMut<PendingEdits>,
 ) {
+    // Só o botão esquerdo remove; o direito apagava o `prop-*` sem intenção.
+    if click.button != bevy::picking::pointer::PointerButton::Primary {
+        return;
+    }
     let Ok(button) = buttons.get(click.event_target()) else {
         return;
     };

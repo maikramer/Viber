@@ -773,9 +773,21 @@ fn scalar(value: Value) -> mlua::Result<Option<String>> {
     })
 }
 
+/// Caminho relativo normalizado para comparar com os ficheiros da cena:
+/// `world/./x.xml`, `world//x.xml` e `world/x.xml` são o MESMO ficheiro no
+/// disco; sem colapsar `.`/separadores repetidos o gate deixava passar uma
+/// escrita direta à cena (fora do undo/sync).
+fn normalize_rel(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn denied_path(path: &str, denied: &[String]) -> Option<String> {
-    let path = path.trim_start_matches("./");
-    if denied.iter().any(|entry| entry == path) {
+    let path = normalize_rel(path);
+    if denied.iter().any(|entry| normalize_rel(entry) == path) {
         return Some(format!(
             "plugin não escreve `{path}`: usa as operações de cena/editor"
         ));

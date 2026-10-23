@@ -17,6 +17,11 @@ const LIGHT: [f32; 3] = [-0.55, 0.62, -0.55];
 /// Fallbacks when the `.ahgt` metadata does not declare the world extents.
 const FALLBACK_WORLD_SIZE: f32 = 4000.0;
 const FALLBACK_MAX_HEIGHT: f32 = 200.0;
+/// Teto de passos por primitiva. Um `bake.json` corrompido (raio ou
+/// coordenada de 1e30, `NaN`…) fazia `steps` chegar a `usize::MAX` e a thread
+/// da UI ficava num loop sem fim já no arranque.
+const MAX_CIRCLE_STEPS: usize = 4096;
+const MAX_SEGMENT_STEPS: usize = 4096;
 
 /// An RGBA8 image buffer, row-major, ready for feature overlays and bevy conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +67,21 @@ impl Minimap {
         x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height
     }
 
+    /// Whether an axis-aligned box (pixel coordinates) touches the canvas.
+    /// Non-finite boxes never do.
+    fn touches_canvas(&self, min: [f32; 2], max: [f32; 2]) -> bool {
+        self.width > 0
+            && self.height > 0
+            && min[0].is_finite()
+            && min[1].is_finite()
+            && max[0].is_finite()
+            && max[1].is_finite()
+            && max[0] >= 0.0
+            && max[1] >= 0.0
+            && min[0] < self.width as f32
+            && min[1] < self.height as f32
+    }
+
     /// Draws an axis-aligned rectangle outline (pads).
     pub fn draw_rect_outline(
         &mut self,
@@ -72,7 +92,13 @@ impl Minimap {
     ) {
         let (cx, cy) = (center[0], center[1]);
         let (hx, hy) = (half_size[0], half_size[1]);
-        self.draw_rect_filled([cx - hx, cy - hy], [cx + hx, cy - hy], color);
+        // A aresta de cima usava `[.., cy - hy]` (uma linha) enquanto as
+        // outras três tinham `thickness`: o retângulo saía com o topo de 1 px.
+        self.draw_rect_filled(
+            [cx - hx, cy - hy],
+            [cx + hx, cy - hy + thickness],
+            color,
+        );
         self.draw_rect_filled([cx - hx, cy + hy - thickness], [cx + hx, cy + hy], color);
         self.draw_rect_filled([cx - hx, cy - hy], [cx - hx + thickness, cy + hy], color);
         self.draw_rect_filled([cx + hx - thickness, cy - hy], [cx + hx, cy + hy], color);
@@ -80,6 +106,9 @@ impl Minimap {
 
     /// Fills an axis-aligned rectangle between two corners (pixel coordinates).
     fn draw_rect_filled(&mut self, a: [f32; 2], b: [f32; 2], color: [u8; 4]) {
+        if !a[0].is_finite() || !a[1].is_finite() || !b[0].is_finite() || !b[1].is_finite() {
+            return;
+        }
         let x0 = a[0].floor().max(0.0) as i32;
         let y0 = a[1].floor().max(0.0) as i32;
         let x1 = (b[0].ceil() as i32).min(self.width as i32 - 1);
@@ -99,7 +128,18 @@ impl Minimap {
         thickness: f32,
         color: [u8; 4],
     ) {
-        let steps = (radius.max(2.0) * 8.0).ceil() as usize;
+        if !radius.is_finite()
+            || radius <= 0.0
+            || !self.touches_canvas(
+                [center[0] - radius, center[1] - radius],
+                [center[0] + radius, center[1] + radius],
+            )
+        {
+            return;
+        }
+        let steps = (radius.max(2.0) * 8.0)
+            .ceil()
+            .clamp(8.0, MAX_CIRCLE_STEPS as f32) as usize;
         for step in 0..steps {
             let angle = step as f32 / steps as f32 * std::f32::consts::TAU;
             let point = [
@@ -112,13 +152,30 @@ impl Minimap {
 
     /// Draws a filled disc (point markers: cliffs, arches, caves, waypoints).
     pub fn draw_disc(&mut self, center: [f32; 2], radius: f32, color: [u8; 4]) {
-        let r = radius.ceil() as i32;
-        let cx = center[0].round() as i32;
-        let cy = center[1].round() as i32;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx * dx + dy * dy <= r * r {
-                    self.set_pixel(cx + dx, cy + dy, color);
+        if !radius.is_finite() || radius <= 0.0 {
+            return;
+        }
+        let r = radius.ceil();
+        if !self.touches_canvas(
+            [center[0] - r, center[1] - r],
+            [center[0] + r, center[1] + r],
+        ) {
+            return;
+        }
+        // Itera só o retângulo visível: um raio gigante (bake corrompido)
+        // percorria um quadrado saturando `i32` — biliões de píxeis.
+        let x0 = ((center[0] - r).floor() as i64).clamp(0, self.width as i64 - 1);
+        let x1 = ((center[0] + r).ceil() as i64).clamp(0, self.width as i64 - 1);
+        let y0 = ((center[1] - r).floor() as i64).clamp(0, self.height as i64 - 1);
+        let y1 = ((center[1] + r).ceil() as i64).clamp(0, self.height as i64 - 1);
+        let (cx, cy) = (center[0], center[1]);
+        let rr = r * r;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                if dx * dx + dy * dy <= rr {
+                    self.set_pixel(x as i32, y as i32, color);
                 }
             }
         }
@@ -133,9 +190,22 @@ impl Minimap {
 
     /// Draws one line segment by stamping squares along it.
     fn draw_segment(&mut self, a: [f32; 2], b: [f32; 2], thickness: f32, color: [u8; 4]) {
+        if !a[0].is_finite()
+            || !a[1].is_finite()
+            || !b[0].is_finite()
+            || !b[1].is_finite()
+        {
+            return;
+        }
+        if !self.touches_canvas(
+            [a[0].min(b[0]), a[1].min(b[1])],
+            [a[0].max(b[0]), a[1].max(b[1])],
+        ) {
+            return;
+        }
         let dx = b[0] - a[0];
         let dy = b[1] - a[1];
-        let steps = (dx.hypot(dy).ceil() as usize).max(1);
+        let steps = (dx.hypot(dy).ceil() as usize).clamp(1, MAX_SEGMENT_STEPS);
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
             self.stamp([a[0] + dx * t, a[1] + dy * t], thickness, color);
@@ -144,13 +214,31 @@ impl Minimap {
 
     /// Stamps a `thickness`-sized square centered on a point.
     fn stamp(&mut self, point: [f32; 2], thickness: f32, color: [u8; 4]) {
+        if !point[0].is_finite() || !point[1].is_finite() {
+            return;
+        }
         let half = (thickness / 2.0).ceil().max(0.5);
-        let x0 = (point[0] - half).floor() as i32;
-        let y0 = (point[1] - half).floor() as i32;
-        let span = (half * 2.0).ceil() as i32;
+        if !self.touches_canvas(
+            [point[0] - half, point[1] - half],
+            [point[0] + half, point[1] + half],
+        ) {
+            return;
+        }
+        // i64: uma coordenada enorme (bake corrompido) saturada em `i32::MAX`
+        // transbordava em `x0 + dx` num build debug.
+        let x0 = (point[0] - half).floor() as i64;
+        let y0 = (point[1] - half).floor() as i64;
+        let span = (half * 2.0).ceil().clamp(1.0, 64.0) as i64;
         for dy in 0..span {
             for dx in 0..span {
-                self.set_pixel(x0 + dx, y0 + dy, color);
+                let (x, y) = (x0 + dx, y0 + dy);
+                if x >= i32::MIN as i64
+                    && x <= i32::MAX as i64
+                    && y >= i32::MIN as i64
+                    && y <= i32::MAX as i64
+                {
+                    self.set_pixel(x as i32, y as i32, color);
+                }
             }
         }
     }
@@ -355,6 +443,36 @@ mod tests {
             "polyline must be drawn"
         );
         assert_eq!(map.pixel(0, 0)[3], 255);
+    }
+
+    #[test]
+    fn corrupt_geometry_returns_instead_of_looping_forever() {
+        let mut map = Minimap::filled(16, 16, [0, 0, 0, 255]);
+        // Um bake.json corrompido pode declarar estes valores; antes do teto de
+        // passos/recorte este teste ficava preso (usize::MAX / i32::MAX voltas).
+        map.draw_circle_outline([0.0, 0.0], f32::MAX, 2.0, [255, 0, 0, 255]);
+        map.draw_circle_outline([f32::INFINITY, 0.0], 4.0, 2.0, [255, 0, 0, 255]);
+        map.draw_disc([f32::MAX, f32::MAX], f32::MAX, [255, 0, 0, 255]);
+        map.draw_disc([f32::NAN, 0.0], 3.0, [255, 0, 0, 255]);
+        map.draw_polyline(
+            &[[0.0, 0.0], [f32::MAX, f32::MAX]],
+            2.0,
+            [255, 255, 0, 255],
+        );
+        assert_eq!(map.width, 16);
+        assert_eq!(map.pixels.len(), 16 * 16 * 4);
+    }
+
+    #[test]
+    fn rect_outline_top_edge_uses_the_requested_thickness() {
+        let mut map = Minimap::filled(40, 40, [0, 0, 0, 255]);
+        let red = [255, 0, 0, 255];
+        map.draw_rect_outline([20.0, 20.0], [10.0, 10.0], 3.0, red);
+        // A coluna central só atravessa as arestas de topo e fundo.
+        let top = (9..14).filter(|y| map.pixel(20, *y) == red).count();
+        let bottom = (26..31).filter(|y| map.pixel(20, *y) == red).count();
+        assert!(top >= 3, "top edge has only {top} px");
+        assert_eq!(top, bottom, "top and bottom edges must match");
     }
 
     #[test]

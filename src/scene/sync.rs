@@ -144,8 +144,23 @@ pub fn sync_scene(world: &mut World) {
             Change::Terrain { rect } => plan.terrain.push(*rect),
             Change::Biomes => plan.biomes = true,
             Change::Paint { rect } => plan.paint.push(*rect),
-            Change::Removed { node } => {
-                despawn_subtree(world, node);
+            Change::Removed { node, sweep } => {
+                match sweep {
+                    // Plano capturado com o documento intacto: cobre o nó e
+                    // os ficheiros carregados pelos `<Include>` da subárvore.
+                    Some(plan) => despawn_entities(world, plan),
+                    None => {
+                        // Ficheiro partilhado: despawna só o que o caminho no
+                        // próprio ficheiro alcança e pede reload (sem tocar
+                        // nas cópias do outro `<Include>`).
+                        let plan = [(node.file, node.path.clone())];
+                        despawn_entities(world, &plan);
+                        failures.push(format!(
+                            "{}: ficheiro incluído por mais de um <Include> — recarrega o mundo",
+                            world.resource::<SceneDoc>().selector(node)
+                        ));
+                    }
+                }
                 for list in [
                     &mut plan.spawn,
                     &mut plan.respawn,
@@ -162,7 +177,12 @@ pub fn sync_scene(world: &mut World) {
         if plan.spawn.contains(&node) {
             continue;
         }
-        despawn_subtree(world, &node);
+        // Sem um despawn completo (include partilhado) o spawn duplicava o
+        // conteúdo: fica o reload pendente e NÃO se acrescenta uma cópia.
+        if let Err(failure) = despawn_subtree(world, &node) {
+            failures.push(failure);
+            continue;
+        }
         if let Err(error) = spawn_node(world, &node) {
             failures.push(error);
         }
@@ -262,13 +282,50 @@ fn entities_of(world: &mut World, node: &NodeRef) -> Vec<Entity> {
 }
 
 /// Despawna as entidades do nó e de todos os descendentes (o despawn é recursivo).
-fn despawn_subtree(world: &mut World, node: &NodeRef) {
-    let file = world.resource::<SceneDoc>().files[node.file].path.clone();
-    let prefix: Vec<u32> = node.path.iter().map(|&i| i as u32).collect();
+///
+/// Um `<Include>` (ou uma subárvore que contenha um) leva também TODAS as
+/// entidades do ficheiro incluído: sem pose o conteúdo nasce na raiz da cena,
+/// com a origem do ficheiro dele, e o despawn recursivo do wrapper não o
+/// alcança — remover/renomear o include deixava a cena antiga viva e o
+/// respawn duplicava-a.
+///
+/// Um ficheiro cujo `<Include>` que o carrega não está nesta subárvore tem
+/// cópias que não se distinguem (as origens são as mesmas): devolve `Err`
+/// para o chamador pedir um reload em vez de apagar as outras instâncias.
+fn despawn_subtree(world: &mut World, node: &NodeRef) -> Result<(), String> {
+    let plan = {
+        let doc = world.resource::<SceneDoc>();
+        doc.despawn_plan(node).ok_or_else(|| {
+            format!(
+                "{}: ficheiro incluído por mais de um <Include> — recarrega o mundo",
+                doc.selector(node)
+            )
+        })?
+    };
+    despawn_entities(world, &plan);
+    Ok(())
+}
+
+/// Despawna as entidades que caem em `(ficheiro, prefixo de caminho)`.
+fn despawn_entities(world: &mut World, plan: &[(usize, Vec<usize>)]) {
+    let matchers: Vec<(Arc<std::path::Path>, Vec<u32>)> = {
+        let doc = world.resource::<SceneDoc>();
+        plan.iter()
+            .map(|(file, prefix)| {
+                let path: Arc<std::path::Path> = Arc::from(doc.files[*file].path.as_path());
+                let prefix = prefix.iter().map(|&i| i as u32).collect();
+                (path, prefix)
+            })
+            .collect()
+    };
     let mut query = world.query::<(Entity, &SceneSource)>();
     let doomed: Vec<Entity> = query
         .iter(world)
-        .filter(|(_, source)| *source.0.file == *file && source.0.path.starts_with(&prefix))
+        .filter(|(_, source)| {
+            matchers.iter().any(|(file, prefix)| {
+                source.0.file.as_ref() == file.as_ref() && source.0.path.starts_with(prefix)
+            })
+        })
         .map(|(entity, _)| entity)
         .collect();
     for entity in doomed {
@@ -542,18 +599,30 @@ fn patch_props(world: &mut World, node: &NodeRef) -> usize {
     let Some(xml) = world.resource::<SceneDoc>().node(node).cloned() else {
         return 0;
     };
+    // O `ScriptProps` do spawn leva TAMBÉM os dados de colheita
+    // (`destructible`/`resource-kind`/`resource-yield`), que não são `prop-*`
+    // exportados. Repor só os `prop-*` ao editar um deles (patch, sem
+    // respawn) apagava esses dados e a árvore deixava de ser colhível.
     let props: Vec<(String, String)> = xml
         .attrs
         .iter()
         .filter_map(|(key, value)| {
-            crate::luau::exports::prop_name(key).map(|name| (name.to_owned(), value.clone()))
+            if let Some(name) = crate::luau::exports::prop_name(key) {
+                return Some((name.to_owned(), value.clone()));
+            }
+            matches!(
+                key.as_str(),
+                "destructible" | "resource-kind" | "resource-yield"
+            )
+            .then(|| (key.clone(), value.clone()))
         })
         .collect();
     let mut count = 0;
     for entity in entities_of(world, node) {
-        if world.get::<crate::luau::LuaScriptRef>(entity).is_none() {
-            continue;
-        }
+        // O spawn põe `ScriptProps` em QUALQUER entidade com props autorais
+        // (os dados de colheita são lidos por `viber.props` mesmo sem
+        // `script=`); o patch tem de espelhar o XML na mesma, sem exigir
+        // script.
         let mut entity = world.entity_mut(entity);
         if props.is_empty() {
             entity.remove::<crate::luau::ScriptProps>();
@@ -801,6 +870,44 @@ mod tests {
         );
     }
 
+    /// Editar um `prop-*` faz patch (sem respawn): os dados de colheita que
+    /// o spawn põe no MESMO `ScriptProps` têm de sobreviver, senão a árvore
+    /// deixa de ser colhível por ter sido afinado um prop do script.
+    #[test]
+    fn prop_patch_keeps_the_harvest_data_props() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        edit(
+            &mut app,
+            &[EditOp::Insert {
+                parent: "#".into(),
+                index: None,
+                xml: r#"<Entity name="tree" script="tree.lua" destructible="hits: 2" resource-kind="wood" resource-yield="3" prop-speed="1" />"#.into(),
+            }],
+        );
+        let tree = named(&mut app, "tree")[0];
+        edit(&mut app, &[set("name=tree", "prop-speed", "2")]);
+        assert_eq!(named(&mut app, "tree"), [tree], "patch sem respawn");
+        let props = app
+            .world()
+            .get::<crate::luau::ScriptProps>(tree)
+            .expect("props patchados")
+            .0
+            .clone();
+        assert!(
+            props.iter().any(|(k, v)| k == "destructible" && v == "hits: 2"),
+            "{props:?}"
+        );
+        assert!(
+            props.iter().any(|(k, v)| k == "resource-kind" && v == "wood"),
+            "{props:?}"
+        );
+        assert!(
+            props.iter().any(|(k, v)| k == "speed" && v == "2"),
+            "{props:?}"
+        );
+    }
+
     #[test]
     fn include_pose_edit_moves_included_content() {
         // <Include translation=…> vira um Group na expansão; editar a pose do include
@@ -964,6 +1071,47 @@ mod tests {
             "{:?}",
             status.needs_reload
         );
+    }
+
+    /// Remover um `<Include>` SEM pose leva o conteúdo do ficheiro incluído.
+    /// As entidades desse ficheiro nascem na raiz da cena (o include não vira
+    /// wrapper), por isso o despawn recursivo da entidade do include não as
+    /// alcançava e o mundo ficava com a cena antiga viva para sempre.
+    #[test]
+    fn removing_a_bare_include_despawns_the_included_scene() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        assert_eq!(named(&mut app, "well").len(), 1);
+        edit(
+            &mut app,
+            &[EditOp::Remove {
+                node: "#2".into(),
+            }],
+        );
+        assert!(
+            named(&mut app, "well").is_empty(),
+            "o include sem pose levou o conteúdo do ficheiro"
+        );
+        assert_eq!(
+            named(&mut app, "crate").len(),
+            1,
+            "só o crate do world.xml sobra"
+        );
+        // O undo repõe a cena (Inserted volta a expandir o include).
+        live::undo(app.world_mut()).unwrap();
+        app.update();
+        assert_eq!(named(&mut app, "well").len(), 1);
+    }
+
+    /// Um atributo não-pose num `<Include>` sem pose força respawn da
+    /// subárvore; sem o despawn do ficheiro incluído o conteúdo antigo ficava
+    /// e o novo era acrescentado — duas vilas.
+    #[test]
+    fn respawning_a_bare_include_does_not_duplicate_the_scene() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        edit(&mut app, &[set("#2", "name", "village")]);
+        assert_eq!(named(&mut app, "well").len(), 1, "sem duplicar a vila");
     }
 
     /// Trocar o `src` de um `<Include>` não pode re-spawnar: o conteúdo do

@@ -108,6 +108,12 @@ pub fn clear_submitted_input(
 /// Collects the pending REPL answer into the history.
 pub fn poll_console(lang: Res<Lang>, bridge: Res<ViberBridge>, mut state: ResMut<ConsoleState>) {
     if !matches!(bridge.status, EngineStatus::Connected { .. }) {
+        // O pedido morreu com o jogo: a resposta (ou o erro) já não pertence a
+        // esta sessão. Guardá-lo bloqueava o Enter (`task.is_some()`) e, no
+        // Play seguinte, escrevia no histórico o resultado da sessão antiga.
+        if state.task.is_some() {
+            state.task = None;
+        }
         return;
     }
     let Some(task) = &mut state.task else {

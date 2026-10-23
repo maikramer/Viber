@@ -654,6 +654,10 @@ pub fn minimap_click(
     runtime: Option<Res<viber::terrain::runtime::TerrainRuntime>>,
     mut camera: ResMut<viber::editor_camera::EditorCamState>,
 ) {
+    // O clique que move a câmara é o esquerdo (o direito também saltava).
+    if click.button != bevy::picking::pointer::PointerButton::Primary {
+        return;
+    }
     let Ok((node, ui_transform)) = maps.get(click.event_target()) else {
         return;
     };

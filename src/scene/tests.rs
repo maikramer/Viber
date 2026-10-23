@@ -221,6 +221,28 @@ fn move_into_own_subtree_is_refused() {
     assert!(format!("{error:#}").contains("dentro de si próprio"));
 }
 
+/// Mover um `<Include>` para o ficheiro que ele carrega fecha um ciclo: o
+/// `load_world` do runtime passa a falhar ("include cycle detected") e o mundo
+/// deixa de abrir. O `move` tem de o recusar antes de tocar no documento.
+#[test]
+fn moving_an_include_into_its_own_target_is_refused() {
+    let (_tmp, mut doc) = load();
+    let error = apply_batch(
+        &mut doc,
+        "bad",
+        &[EditOp::Move {
+            node: "#2".into(),
+            parent: "world/village.xml#".into(),
+            index: None,
+        }],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("ciclo de includes"),
+        "{error:#}"
+    );
+}
+
 #[test]
 fn duplicate_places_copy_after_original() {
     roundtrip(
@@ -755,6 +777,77 @@ fn world_frame_composes_include_pose() {
     assert_eq!(origin, bevy::math::Vec3::new(10.0, 0.0, -5.0));
 }
 
+/// `extract-scene` com um nó e um filho dele selecionados não pode copiar o
+/// filho duas vezes (uma dentro do pai, outra sozinho) nem tentar removê-lo
+/// depois de o pai já ter saído.
+/// `recenter` tem de chegar à translação guardada em
+/// `transform="pos: …; rotation: …"` — é uma forma antiga mas ainda aceite, e
+/// sem isto o ramo extraído ficava nas coordenadas do mundo antigo.
+#[test]
+fn extract_scene_recenters_transform_component_strings() {
+    let (_tmp, mut doc) = load();
+    apply_batch(
+        &mut doc,
+        "add",
+        &[EditOp::Insert {
+            parent: "#".into(),
+            index: None,
+            xml: r#"<Entity name="crate3" transform="pos: 100 0 50; rotation: 0 90 0" />"#
+                .into(),
+        }],
+    )
+    .unwrap();
+    let ops = super::catalog::extract_scene_ops(
+        &doc,
+        &["name=crate3".into()],
+        "sala",
+        [100.0, 0.0, 50.0],
+        None,
+        None,
+    )
+    .unwrap();
+    let xml = ops
+        .iter()
+        .find_map(|op| match op {
+            EditOp::CreateFile { xml, .. } => Some(xml),
+            _ => None,
+        })
+        .expect("create_file");
+    assert!(xml.contains("pos: 0 0 0"), "{xml}");
+    assert!(xml.contains("rotation: 0 90 0"), "rotação intacta: {xml}");
+}
+
+#[test]
+fn extract_scene_drops_descendants_of_selected_nodes() {
+    let (_tmp, doc) = load();
+    let ops = super::catalog::extract_scene_ops(
+        &doc,
+        &["name=props".into(), "#1/0".into()],
+        "sala",
+        [0.0; 3],
+        None,
+        None,
+    )
+    .unwrap();
+    let removes = ops
+        .iter()
+        .filter(|op| matches!(op, EditOp::Remove { .. }))
+        .count();
+    assert_eq!(removes, 1, "só o pai é removido: {ops:#?}");
+    let xml = ops
+        .iter()
+        .find_map(|op| match op {
+            EditOp::CreateFile { xml, .. } => Some(xml),
+            _ => None,
+        })
+        .expect("create_file");
+    assert_eq!(
+        xml.matches("name=\"crate\"").count(),
+        1,
+        "o filho aparece uma vez (dentro do pai): {xml}"
+    );
+}
+
 #[test]
 fn suggest_url_maps_the_public_pool_and_keeps_other_paths() {
     use super::catalog::suggest_url;
@@ -1074,6 +1167,11 @@ fn instance_loads_the_scene_file_and_groups_list_members() {
     let include = doc.node(&NodeRef::new(0, vec![3])).unwrap();
     assert_eq!(include.attr("translation"), Some("5 0 1"));
     assert!(super::catalog::scene_instance(&doc, "#", "scenes/nope.xml", None).is_err());
+    // `..` é recusado MESMO que o caminho resolva para dentro (o `<Include>`
+    // gerado tem de ficar contido na raiz).
+    let err = super::catalog::scene_instance(&doc, "#", "scenes/../scenes/tower.xml", None)
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("sem `..`"), "{err:#}");
     apply_batch(
         &mut doc,
         "g",

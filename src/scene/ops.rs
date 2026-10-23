@@ -141,7 +141,14 @@ pub enum Change {
     /// Uma subárvore nova nasceu neste caminho.
     Inserted { node: NodeRef },
     /// A subárvore neste caminho desapareceu (caminho ANTES da remoção).
-    Removed { node: NodeRef },
+    /// `sweep` é o plano de despawn capturado com o documento ainda intacto
+    /// (`SceneDoc::despawn_plan`): inclui os ficheiros carregados pelos
+    /// `<Include>` da subárvore; `None` = ficheiro partilhado por outro
+    /// `<Include>` (o sync pede reload em vez de apagar as outras cópias).
+    Removed {
+        node: NodeRef,
+        sweep: Option<Vec<(usize, Vec<usize>)>>,
+    },
     /// Células do heightmap mudaram.
     Terrain { rect: super::terrain::CellRect },
     /// Células da camada de material (pintura) mudaram — repintar só os chunks tocados.
@@ -777,6 +784,9 @@ fn remove_node(doc: &mut SceneDoc, node: &NodeRef) -> Result<Applied> {
     let index = *node.path.last().expect("não-raiz");
     let selector = doc.selector(node);
     let parent_selector = doc.selector(&parent);
+    // Com o documento intacto: os `<Include>` da subárvore e os ficheiros que
+    // eles carregam (o sync precisa deles para despachar a cena incluída).
+    let sweep = doc.despawn_plan(node);
     let removed = doc
         .children_mut(&parent)
         .ok_or_else(|| anyhow!("remove: pai inexistente"))?
@@ -790,7 +800,10 @@ fn remove_node(doc: &mut SceneDoc, node: &NodeRef) -> Result<Applied> {
             index: Some(index),
             xml: fragment_xml(std::slice::from_ref(&removed)),
         }],
-        changes: vec![Change::Removed { node: node.clone() }],
+        changes: vec![Change::Removed {
+            node: node.clone(),
+            sweep,
+        }],
     })
 }
 
@@ -806,10 +819,29 @@ fn move_node(
     if parent.file == node.file && parent.path.starts_with(&node.path) {
         bail!("move: um nó não pode ir para dentro de si próprio");
     }
+    // Mover um `<Include>` para dentro do ficheiro que ele carrega (ou de um
+    // que esse inclui) fecha um ciclo de includes: o mundo deixa de abrir no
+    // `load_world` (cycle detected). O container já resolveu o alvo, por isso
+    // `parent.file` é o ficheiro verdadeiro.
+    if doc
+        .node(node)
+        .is_some_and(|xml| xml.tag.eq_ignore_ascii_case("include"))
+        && let Some(target) = doc.include_target(node)
+        && include_reaches(doc, target, parent.file)
+    {
+        bail!(
+            "move: `<Include>` para dentro de um ficheiro que ele inclui — ciclo de includes ({} → {})",
+            doc.relative_path(target),
+            doc.relative_path(parent.file)
+        );
+    }
     let old_index = *node.path.last().expect("não-raiz");
     let original_selector = doc.selector(node);
     // O redo reaplica a partir do estado ANTERIOR: o destino grava-se com o caminho de antes.
     let original_parent = doc.selector(parent);
+    // Plano de despawn da posição ANTIGA (antes de mexer), com os ficheiros
+    // dos `<Include>` da subárvore que o `Move` arrasta.
+    let sweep = doc.despawn_plan(node);
     // Remover desloca os irmãos seguintes — o caminho do destino pode mudar.
     let target = shift_after_removal(parent, node);
     let taken = doc
@@ -836,7 +868,10 @@ fn move_node(
     // O pai antigo, visto DEPOIS da inserção no destino.
     let back_parent = shift_after_insert(&old_parent, &moved);
     let changes = vec![
-        Change::Removed { node: node.clone() },
+        Change::Removed {
+            node: node.clone(),
+            sweep,
+        },
         Change::Inserted {
             node: moved.clone(),
         },
@@ -969,6 +1004,24 @@ fn extract(doc: &mut SceneDoc, node: &NodeRef, to: Option<&str>) -> Result<Appli
         inverse,
         changes,
     })
+}
+
+/// `from` alcança `target` pela cadeia de `<Include>` (inclusive se iguais).
+fn include_reaches(doc: &SceneDoc, from: usize, target: usize) -> bool {
+    let mut stack = vec![from];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(file) = stack.pop() {
+        if file == target {
+            return true;
+        }
+        if !seen.insert(file) {
+            continue;
+        }
+        if let Some(scene) = doc.files.get(file) {
+            stack.extend(scene.includes.iter().map(|(_, target)| *target));
+        }
+    }
+    false
 }
 
 /// Caminho de `target` depois de `removed` sair do mesmo ficheiro.

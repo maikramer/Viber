@@ -16,7 +16,7 @@ use viber::project::{Project, SceneTemplate};
 use viber::scene_loader::{Arrival, ChangeScene, CurrentScene, SceneLoaded};
 
 use super::icons::{self, fa};
-use super::strings::{Lang, StrKey, t};
+use super::strings::{Lang, StrKey, save_failed, t};
 use super::theme;
 use super::tooltip::Tooltip;
 use crate::scene::doc::SceneDoc;
@@ -45,10 +45,16 @@ pub struct TabCamera {
 pub struct SceneTabs {
     pub tabs: Vec<SceneTab>,
     pub active: usize,
+    /// A cena REALMENTE carregada no viewport. `active` não serve: fechar a aba
+    /// ativa desloca-o para a vizinha antes de a troca de cena chegar, e a
+    /// comparação `tabs[active].path == evento` dizia "mesma cena" — a seleção
+    /// e a expansão do mundo antigo sobreviviam para o novo documento.
+    loaded: Option<PathBuf>,
     /// Re-render request (titles, dirty marker, language).
     rev: u64,
     rendered_rev: Option<u64>,
-    rendered_dirty: bool,
+    /// Marcador "por gravar" de cada aba (o ficheiro da aba está sujo).
+    rendered_dirty: Vec<bool>,
 }
 
 impl SceneTabs {
@@ -206,6 +212,7 @@ fn seed_first_tab(
         .and_then(|c| c.title.clone())
         .unwrap_or_else(|| scene_title(&path));
     tabs.open(&path, title);
+    tabs.loaded = tabs.tabs.get(tabs.active).map(|tab| tab.path.clone());
     // The first scene never goes through `on_scene_loaded`'s "leaving" branch,
     // so restore its camera here.
     let active_path = tabs.tabs[tabs.active].path.clone();
@@ -238,33 +245,32 @@ fn on_scene_loaded(
     let Some(event) = loaded.read().last().cloned() else {
         return;
     };
-    // A câmara (que a troca não mexe) ainda é a da aba que se deixa: fica guardada nela,
-    // venha a troca de uma aba, do dock Ficheiros ou de um agente (`viber.scene.change`).
-    let leaving = tabs.active;
-    let same_scene = tabs
-        .tabs
-        .get(leaving)
-        .is_some_and(|tab| tab.path == canonical(&event.path));
-    if let Some(cam) = camera.as_deref()
-        && let Some(tab) = tabs.tabs.get_mut(leaving)
-        && !same_scene
+    // A câmara (que a troca não mexe) ainda é a da cena que se deixa: fica
+    // guardada nessa cena, venha a troca de uma aba, do dock Ficheiros ou de um
+    // agente (`viber.scene.change`). O caminho CARREGADO é a referência — a aba
+    // ativa pode já ser outra (aba ativa fechada) ou nem existir.
+    let event_path = canonical(&event.path);
+    let same_scene = tabs.loaded.as_deref() == Some(event_path.as_path());
+    if !same_scene
+        && let Some(loaded) = tabs.loaded.clone()
+        && let Some(cam) = camera.as_deref()
     {
-        tab.camera = Some(TabCamera {
+        let pose = TabCamera {
             target: cam.target,
             yaw_deg: cam.yaw_deg,
             pitch_deg: cam.pitch_deg,
             distance: cam.distance,
-        });
+        };
+        if let Some(tab) = tabs.tabs.iter_mut().find(|tab| tab.path == loaded) {
+            tab.camera = Some(pose);
+        }
+        if let Some(prefs) = prefs.as_mut() {
+            prefs.remember_camera(&loaded, pose);
+        }
     }
-    if !same_scene
-        && let Some(prefs) = prefs.as_mut()
-        && let Some(tab) = tabs.tabs.get(leaving)
-        && let Some(pose) = tab.camera
-    {
-        prefs.remember_camera(&tab.path, pose);
-    }
-    let title = scene_title(&event.path);
-    let index = tabs.open(&event.path, title.clone());
+    let title = scene_title(&event_path);
+    let index = tabs.open(&event_path, title.clone());
+    tabs.loaded = Some(event_path);
     // Reload da cena actual (Ctrl+R): a câmara ainda é esta. A aba só guarda a pose
     // ao SAIR, por isso `tab.camera` é None e o ramo "cena nunca vista" saltava para
     // a origem e largava a seleção.
@@ -338,6 +344,16 @@ fn on_scene_loaded(
     status.0 = format!("{}: {title}", t(*lang, StrKey::SceneOpened));
 }
 
+/// O caminho de uma aba na forma de [`SceneDoc::dirty_paths`] (relativo à raiz, com `/`).
+fn dirty_key(doc: &SceneDoc, path: &Path) -> String {
+    path.strip_prefix(&doc.root_dir)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Rebuilds the tab buttons when the tabs, the language or the dirty state change.
 #[allow(clippy::too_many_arguments)]
 fn render_tabs(
@@ -350,19 +366,42 @@ fn render_tabs(
     let Ok(bar) = bars.single() else {
         return;
     };
-    let dirty = doc
+    // O marcador é POR aba: o ficheiro sujo pode ser o de uma aba em segundo
+    // plano, e um ficheiro sujo que não é de nenhuma aba (o heightmap do
+    // terreno) fica no marcador da ativa.
+    let dirty_paths = doc
         .as_ref()
-        .is_some_and(|doc| !doc.dirty_paths().is_empty());
-    if tabs.rendered_rev == Some(tabs.rev) && tabs.rendered_dirty == dirty && !lang.is_changed() {
+        .map(|doc| doc.dirty_paths())
+        .unwrap_or_default();
+    let mut per_tab_dirty: Vec<bool> = tabs
+        .tabs
+        .iter()
+        .map(|tab| {
+            doc.as_ref().is_some_and(|doc| {
+                let key = dirty_key(doc, &tab.path);
+                dirty_paths.iter().any(|dirty| *dirty == key)
+            })
+        })
+        .collect();
+    if (!dirty_paths.is_empty() && !per_tab_dirty.iter().any(|dirty| *dirty))
+        && let Some(active) = per_tab_dirty.get_mut(tabs.active)
+    {
+        *active = true;
+    }
+    if tabs.rendered_rev == Some(tabs.rev)
+        && tabs.rendered_dirty == per_tab_dirty
+        && !lang.is_changed()
+    {
         return;
     }
     tabs.rendered_rev = Some(tabs.rev);
-    tabs.rendered_dirty = dirty;
+    tabs.rendered_dirty = per_tab_dirty.clone();
     commands.entity(bar).despawn_related::<Children>();
     let closable = tabs.tabs.len() > 1;
     for (index, tab) in tabs.tabs.iter().enumerate() {
         let active = index == tabs.active;
-        let label = if active && dirty {
+        let dirty = per_tab_dirty.get(index).copied().unwrap_or(false);
+        let label = if dirty {
             format!("{}  •", tab.title)
         } else {
             tab.title.clone()
@@ -469,27 +508,67 @@ fn close_clicked(
     mut click: On<PointerClick>,
     buttons: Query<&TabClose>,
     mut tabs: ResMut<SceneTabs>,
-    mut requests: ResMut<OpenSceneRequest>,
+    mut commands: Commands,
 ) {
+    // Só o botão esquerdo fecha (o direito abria o mesmo caminho e fechava a aba).
+    if click.button != PointerButton::Primary {
+        return;
+    }
     click.propagate(false);
     let Ok(TabClose(index)) = buttons.get(click.event_target()) else {
         return;
     };
-    let was_active = *index == tabs.active;
-    if tabs.close(*index) && was_active {
-        // The neighbour becomes the scene in the viewport.
-        let next = tabs.tabs[tabs.active].path.clone();
-        requests.0 = Some(next);
+    let index = *index;
+    if index != tabs.active {
+        // Uma aba de fundo não muda a cena do viewport.
+        tabs.close(index);
+        return;
+    }
+    // A aba ATIVA só fecha depois de gravar. O swap de cena é pedido depois e,
+    // se a gravação falhasse no `process_open_requests`, a barra já tinha
+    // perdido a aba da cena que continua aberta no viewport.
+    let Some(path) = tabs.tabs.get(index).map(|tab| tab.path.clone()) else {
+        return;
+    };
+    commands.queue(move |world: &mut World| close_active_tab(world, path));
+}
+
+/// Grava a cena ativa e só então fecha a aba e pede a vizinha.
+fn close_active_tab(world: &mut World, path: PathBuf) {
+    let lang = *world.resource::<Lang>();
+    if let Err(error) = crate::scene::try_save_world(world) {
+        let status = save_failed(lang, &error);
+        crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+        world.resource_mut::<EditStatus>().0 = status;
+        return;
+    }
+    let next = {
+        let mut tabs = world.resource_mut::<SceneTabs>();
+        let Some(index) = tabs.tabs.iter().position(|tab| tab.path == path) else {
+            return;
+        };
+        if tabs.close(index) {
+            Some(tabs.tabs[tabs.active].path.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(next) = next {
+        world.resource_mut::<OpenSceneRequest>().0 = Some(next);
     }
 }
 
 fn new_scene_clicked(
-    _click: On<PointerClick>,
+    click: On<PointerClick>,
     doc: Res<SceneDoc>,
     mut requests: ResMut<OpenSceneRequest>,
     mut status: ResMut<EditStatus>,
     lang: Res<Lang>,
 ) {
+    // Um clique direito no "+" criava um ficheiro de cena e trocava de cena.
+    if click.button != PointerButton::Primary {
+        return;
+    }
     let project = Project::discover(doc.world_path());
     let mut n = 1;
     let path = loop {

@@ -11,6 +11,7 @@
 //!
 //! [`SceneDoc::selector`] devolve sempre a forma canónica por caminho.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -95,9 +96,20 @@ pub struct SceneDoc {
 /// Escrita atómica com backup: escreve num `.tmp` ao lado, roda o `.bak`
 /// anterior e faz rename — um crash nunca deixa um ficheiro a meio.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // Sufixo no NOME COMPLETO, não `with_extension`: `world.xml` e
+    // `world.json` na mesma pasta partilhavam `world.tmp`/`world.bak` e uma
+    // escrita podia pisar a outra.
+    let with_suffix = |suffix: &str| {
+        let mut name = path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_default();
+        name.push(suffix);
+        path.with_file_name(name)
+    };
+    let tmp = with_suffix(".tmp");
     std::fs::write(&tmp, bytes)?;
-    let bak = path.with_extension("bak");
+    let bak = with_suffix(".bak");
     if path.exists() {
         let _ = std::fs::rename(path, &bak);
     }
@@ -346,6 +358,118 @@ impl SceneDoc {
             .iter()
             .find(|(path, _)| *path == node.path)
             .map(|(_, file)| *file)
+    }
+
+    /// Ficheiros cujo conteúdo pertence à subárvore de `node`: o do próprio nó
+    /// (primeiro) e, para cada `<Include>` dentro dela, o ficheiro incluído e os
+    /// que esse inclui, recursivamente.
+    ///
+    /// O spawn NÃO põe os filhos de um `<Include>` sem pose debaixo de um
+    /// wrapper: nascem na raiz da cena com a origem do ficheiro incluído. Sem
+    /// esta travessia, despawn/respawn de um include (remover, mover, mudar um
+    /// atributo) só via a entidade do wrapper e deixava a cena antiga viva.
+    pub fn subtree_files(&self, node: &NodeRef) -> Vec<FileId> {
+        let mut files = vec![node.file];
+        let mut seen: HashSet<FileId> = HashSet::from([node.file]);
+        let mut includes = Vec::new();
+        self.collect_includes_under(node, &mut includes);
+        let mut stack: Vec<FileId> = Vec::new();
+        for include in includes {
+            if let Some(target) = self.include_target(&include)
+                && seen.insert(target)
+            {
+                files.push(target);
+                stack.push(target);
+            }
+        }
+        while let Some(file) = stack.pop() {
+            for (_, target) in &self.files[file].includes {
+                if seen.insert(*target) {
+                    files.push(*target);
+                    stack.push(*target);
+                }
+            }
+        }
+        files
+    }
+
+    /// Plano de despawn de uma subárvore, com o documento AINDA intacto:
+    /// `(ficheiro, prefixo de caminho)` por ficheiro — prefixo vazio = ficheiro
+    /// inteiro (carregado por um `<Include>` da subárvore).
+    ///
+    /// `None` quando um ficheiro incluído também é carregado por um
+    /// `<Include>` FORA da subárvore: as entidades têm a mesma origem e não há
+    /// como distinguir as cópias. O chamador pede um reload em vez de apagar
+    /// as outras instâncias. Tem de ser calculado antes da edição: o nó
+    /// removido já não existe no documento quando o sync corre.
+    pub fn despawn_plan(&self, node: &NodeRef) -> Option<Vec<(FileId, Vec<usize>)>> {
+        let files = self.subtree_files(node);
+        let swept: HashSet<FileId> = files.iter().copied().collect();
+        let inside = |file: FileId, path: &[usize]| -> bool {
+            if file == node.file {
+                path.starts_with(&node.path)
+            } else {
+                // Ficheiro inteiro dentro da subárvore: qualquer `<Include>`
+                // dele também está.
+                swept.contains(&file)
+            }
+        };
+        for &target in files.iter().skip(1) {
+            let outside = (0..self.files.len()).any(|file| {
+                !self.files[file].detached
+                    && self.files[file]
+                        .includes
+                        .iter()
+                        .any(|(path, included)| *included == target && !inside(file, path))
+            });
+            if outside {
+                return None;
+            }
+        }
+        Some(
+            files
+                .into_iter()
+                .map(|file| {
+                    let prefix = if file == node.file {
+                        node.path.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    (file, prefix)
+                })
+                .collect(),
+        )
+    }
+
+    /// `<Include>` dentro da subárvore de `node` (caminhos no ficheiro do nó).
+    fn collect_includes_under(&self, node: &NodeRef, out: &mut Vec<NodeRef>) {
+        fn rec(file: FileId, node: &XmlNode, path: &mut Vec<usize>, out: &mut Vec<NodeRef>) {
+            if node.tag.eq_ignore_ascii_case("include") {
+                out.push(NodeRef::new(file, path.clone()));
+            }
+            for (index, child) in node.children.iter().enumerate() {
+                path.push(index);
+                rec(file, child, path, out);
+                path.pop();
+            }
+        }
+        if node.is_root() {
+            let Some(children) = self.children(node) else {
+                return;
+            };
+            let mut path = Vec::new();
+            for (index, child) in children.iter().enumerate() {
+                path.push(index);
+                rec(node.file, child, &mut path, out);
+                path.pop();
+            }
+            return;
+        }
+        let Some(xml) = self.node(node) else {
+            return;
+        };
+        let mut path = node.path.clone();
+        rec(node.file, xml, &mut path, out);
     }
 
     /// Marca o ficheiro como alterado e sobe a revisão.

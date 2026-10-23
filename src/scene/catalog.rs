@@ -382,6 +382,19 @@ pub fn scene_instance(
     if !rel.ends_with(".xml") {
         anyhow::bail!("instance: `{scene}` não é um .xml");
     }
+    // `..`/raízes escapavam da pasta do mundo (o `SceneDoc` carrega o
+    // ficheiro directamente; só o `load_world` recusava no arranque). O
+    // `<Include src="/…">` gerado tem de ficar dentro do projecto.
+    let rel_path = std::path::Path::new(rel);
+    let inside = rel_path.components().all(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if rel.is_empty() || !inside {
+        anyhow::bail!("instance: `{scene}` tem de ser relativo à pasta do mundo (sem `..`)");
+    }
     if doc.file_by_path(rel).is_none() && !doc.root_dir.join(rel).is_file() {
         anyhow::bail!("instance: `{rel}` não existe na pasta do mundo");
     }
@@ -467,27 +480,73 @@ pub fn extract_scene_ops(
     }
     // Pela ordem do documento (a ordem dos nós na cena nova).
     nodes.sort_by(|a, b| (a.file, &a.path).cmp(&(b.file, &b.path)));
+    // Um nó DENTRO de outro selecionado viaja com ele (mesmo ficheiro, ou
+    // ficheiro carregado por um `<Include>` da subárvore). Copiá-lo também à
+    // parte duplicava o conteúdo na cena nova — o pai já o leva.
+    let mut redundant = vec![false; nodes.len()];
+    for (index, ancestor) in nodes.iter().enumerate() {
+        let files = doc.subtree_files(ancestor);
+        for (other, node) in nodes.iter().enumerate() {
+            if index == other {
+                continue;
+            }
+            let inside = if ancestor.file == node.file {
+                node.path.len() > ancestor.path.len() && node.path.starts_with(&ancestor.path)
+            } else {
+                files.contains(&node.file)
+            };
+            if inside {
+                redundant[other] = true;
+            }
+        }
+    }
+    let nodes: Vec<super::doc::NodeRef> = nodes
+        .into_iter()
+        .zip(redundant)
+        .filter_map(|(node, skip)| (!skip).then_some(node))
+        .collect();
     let mut moved = Vec::new();
     for node in &nodes {
         let mut xml = doc.node(node).expect("resolvido").clone();
         if recenter != [0.0; 3] {
+            let recentered = |value: &str, ctx: &str| -> anyhow::Result<String> {
+                // Em f64: `2603.4 - 2600` em f32 dava `3.3999`.
+                // `translation="100"` é broadcast para os três eixos.
+                // Subtrair só os tokens escritos deixava um número só,
+                // que voltava a fazer broadcast no reload.
+                let parsed = crate::xml::values::parse_vec3(value, ctx)?;
+                Ok(parsed
+                    .iter()
+                    .zip(recenter)
+                    .map(|(v, r)| {
+                        let x = ((f64::from(*v) - f64::from(r)) * 1000.0).round() / 1000.0;
+                        let x = if x == 0.0 { 0.0 } else { x };
+                        format!("{x}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "))
+            };
             for key in ["translation", "pos"] {
                 if let Some((_, value)) = xml.attrs.iter_mut().find(|(k, _)| k == key) {
-                    // Em f64: `2603.4 - 2600` em f32 dava `3.3999`.
-                    // `translation="100"` é broadcast para os três eixos.
-                    // Subtrair só os tokens escritos deixava um número só,
-                    // que voltava a fazer broadcast no reload.
-                    let parsed = crate::xml::values::parse_vec3(value, key)?;
-                    *value = parsed
-                        .iter()
-                        .zip(recenter)
-                        .map(|(v, r)| {
-                            let x = ((f64::from(*v) - f64::from(r)) * 1000.0).round() / 1000.0;
-                            let x = if x == 0.0 { 0.0 } else { x };
-                            format!("{x}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    *value = recentered(value, key)?;
+                }
+            }
+            // `transform="pos: …; rotation: …"` guarda a translação noutro
+            // sítio: sem este braço o nó extraído ficava com as coordenadas do
+            // mundo antigo (a cena nova nasce na origem).
+            if let Some((_, value)) = xml.attrs.iter_mut().find(|(k, _)| k == "transform") {
+                let parts = crate::recipes::parse_component_string(value);
+                if parts.iter().any(|(k, _)| k == "pos" || k == "position") {
+                    let mut rebuilt = Vec::with_capacity(parts.len());
+                    for (key, part) in &parts {
+                        let part = if key == "pos" || key == "position" {
+                            recentered(part, "transform pos")?
+                        } else {
+                            part.clone()
+                        };
+                        rebuilt.push(format!("{key}: {part}"));
+                    }
+                    *value = rebuilt.join("; ");
                 }
             }
         }

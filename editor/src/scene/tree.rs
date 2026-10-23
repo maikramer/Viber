@@ -484,6 +484,11 @@ pub fn apply_tree_search(world: &mut World) {
     } else if escape {
         world.resource_mut::<TreeView>().filter.clear();
         world.resource_mut::<TreeView>().filter_rev += 1;
+        // Limpa também o CAMPO: só o filtro ficava vazio e a caixa continuava
+        // a mostrar a pesquisa antiga (que voltava a filtrar no próximo foco).
+        if let Some(mut text) = world.get_mut::<bevy::text::EditableText>(input) {
+            text.clear();
+        }
         if let Some(mut focus) = world.get_resource_mut::<bevy::input_focus::InputFocus>() {
             focus.clear();
         }

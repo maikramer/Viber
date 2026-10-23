@@ -50,6 +50,13 @@ fn poll_profiler(
     mut state: ResMut<ProfilerState>,
 ) {
     if !matches!(bridge.status, EngineStatus::Connected { .. }) {
+        // Sem jogo não há leituras: o último snapshot ficava a fingir que o
+        // jogo ainda corria (fps e sistemas de há minutos) depois de Stop.
+        if !state.lines.is_empty() || state.task.is_some() {
+            state.lines.clear();
+            state.task = None;
+            state.dirty = true;
+        }
         return;
     }
     if let Some(task) = &mut state.task

@@ -21,7 +21,7 @@ use serde_json::Value;
 use super::icons::{self, fa, icon};
 use super::strings::{
     Lang, LangButton, LangTooltip, StrKey, game_running, game_starting, needs_reload,
-    paused_suffix, t,
+    paused_suffix, save_failed, saved, t,
 };
 use super::theme;
 use super::tooltip::Tooltip;
@@ -492,7 +492,13 @@ fn redo_clicked(
 /// Dims the arrows and names the next transaction in the tooltips.
 pub fn update_history_buttons(
     history: Option<Res<viber::scene::ops::History>>,
-    mut icons: Query<(&mut TextColor, Option<&UndoIcon>, Option<&RedoIcon>)>,
+    // Só os glifos do Undo/Redo: sem o filtro a query apanhava TODO o `TextColor`
+    // da UI e pintava de cinzento o texto inteiro (árvore, inspetor, status…)
+    // sempre que o histórico mudava.
+    mut icons: Query<
+        (&mut TextColor, Option<&UndoIcon>, Option<&RedoIcon>),
+        Or<(With<UndoIcon>, With<RedoIcon>)>,
+    >,
 ) {
     let Some(history) = history else {
         return;
@@ -646,10 +652,16 @@ pub fn poll_pause(
     mut icons: Query<&mut Text, With<PauseIcon>>,
 ) {
     // A new run (or a dead one) always starts unpaused.
-    if pause.paused && !matches!(bridge.status, EngineStatus::Connected { .. }) {
-        pause.paused = false;
-    }
-    if let Some(task) = &mut pause.task
+    if !matches!(bridge.status, EngineStatus::Connected { .. }) {
+        if pause.paused {
+            pause.paused = false;
+        }
+        // O pedido em voo morreu com o jogo: drená-lo depois de um novo Play
+        // lia o erro da sessão antiga e voltava a marcar "pausado".
+        if pause.task.is_some() {
+            pause.task = None;
+        }
+    } else if let Some(task) = &mut pause.task
         && let Some(result) = block_on(poll_once(task))
     {
         pause.task = None;
@@ -699,7 +711,26 @@ pub(crate) fn play(world: &mut World) {
 }
 
 fn play_path(world: &mut World, path: std::path::PathBuf) {
-    crate::scene::save_world(world);
+    // F5 grava antes de lançar. Se a gravação falhar (disco cheio, ficheiro
+    // só de leitura), o jogo corria o mundo ANTIGO enquanto o editor mostrava
+    // as edições por gravar; aborta e diz porquê.
+    let lang = *world.resource::<Lang>();
+    match crate::scene::try_save_world(world) {
+        Ok(files) if !files.is_empty() => {
+            let status = saved(lang, &files);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Success, status.clone());
+            world.resource_mut::<crate::scene::EditStatus>().0 = status;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let status = save_failed(lang, &error);
+            crate::ui::toast::push(world, crate::ui::toast::ToastKind::Error, status.clone());
+            world.resource_mut::<crate::scene::EditStatus>().0 = status;
+            error!("play: gravação falhou — {error:#}");
+            world.resource_mut::<PendingPlayFrom>().0 = None;
+            return;
+        }
+    }
     let explicit = world.resource::<EditorConfig>().viber_bin.clone();
     let binary = match launch::viber_binary(explicit.as_deref()) {
         Ok(binary) => binary,

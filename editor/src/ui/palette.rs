@@ -409,8 +409,18 @@ fn apply_palette_input(world: &mut World) {
 fn execute(world: &mut World, action: Action) {
     match action {
         Action::OpenTab { index, .. } => {
-            if let Some(tab) = world.resource::<SceneTabs>().tabs.get(index) {
-                world.resource_mut::<OpenSceneRequest>().0 = Some(tab.path.clone());
+            // A aba ativa já está no viewport: pedi-la de novo fazia um save +
+            // troca/reload da MESMA cena (o caminho leva o `scene_loader` a
+            // recarregar). Escolher a aba atual é um no-op.
+            let path = {
+                let tabs = world.resource::<SceneTabs>();
+                if index == tabs.active {
+                    return;
+                }
+                tabs.tabs.get(index).map(|tab| tab.path.clone())
+            };
+            if let Some(path) = path {
+                world.resource_mut::<OpenSceneRequest>().0 = Some(path);
             }
         }
         Action::Command(command) => match command {

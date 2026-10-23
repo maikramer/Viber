@@ -352,6 +352,10 @@ fn hit_clicked(
     mut scripts: ResMut<super::mode_strip::ScriptState>,
     mut commands: Commands,
 ) {
+    // Só o botão esquerdo abre o resultado (o direito mudava de modo/xdg-open).
+    if click.button != bevy::picking::pointer::PointerButton::Primary {
+        return;
+    }
     let Ok(row) = rows.get(click.event_target()) else {
         return;
     };
@@ -361,20 +365,27 @@ fn hit_clicked(
         mode.0 = super::mode_strip::EditorMode::Script;
         return;
     }
-    // XML: procura name=/id= na linha e seleciona o nó (1.º que case)
+    // XML: procura name=/id= na linha e seleciona o nó (1.º que case).
     if let Some(value) = attr_value(&hit.text, "name").or_else(|| attr_value(&hit.text, "id")) {
+        // O hit traz o FICHEIRO: procurar no mundo inteiro selecionava o
+        // primeiro homónimo, que costuma estar noutra cidade/ficheiro (e um
+        // `name="guard"` repete-se de propósito). Se o ficheiro não faz parte
+        // do documento aberto, não se adivinha — abre-se externamente.
+        let file = doc.file_by_path(&hit.path);
         let mut found = None;
-        doc.walk(|node, xml| {
-            if found.is_some() {
-                return;
-            }
-            if ["name", "id"]
-                .iter()
-                .any(|key| xml.attr(key) == Some(value.as_str()))
-            {
-                found = Some(node.clone());
-            }
-        });
+        if let Some(file) = file {
+            doc.walk(|node, xml| {
+                if found.is_some() || node.file != file {
+                    return;
+                }
+                if ["name", "id"]
+                    .iter()
+                    .any(|key| xml.attr(key) == Some(value.as_str()))
+                {
+                    found = Some(node.clone());
+                }
+            });
+        }
         if let Some(node) = found {
             crate::scene::reveal(&doc, &node, &mut expansion);
             selection.set_one(node);
