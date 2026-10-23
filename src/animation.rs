@@ -1268,6 +1268,18 @@ pub fn drive_player_animation(
     }
 }
 
+/// Distância ao herói MAIS PRÓXIMO; `None` quando não há herói no mundo.
+///
+/// `single()` devolvia `Err` com 2+ players (co-op) e desligava o gate de
+/// ativação e o freeze em todo o mundo. A regra do resto da engine (câmara,
+/// interação, projéteis) é: com vários heróis, conta o mais próximo.
+pub(crate) fn nearest_hero_distance(pos: Vec3, heroes: &[Vec3]) -> Option<f32> {
+    heroes
+        .iter()
+        .map(|hero| pos.distance(*hero))
+        .reduce(f32::min)
+}
+
 /// Drives every other animated character (NPCs, scripted creatures, the Rust
 /// FSM enemies) from its own displacement.
 ///
@@ -1293,14 +1305,17 @@ pub fn drive_character_animation(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().max(1e-4);
-    let hero_pos = hero.single().ok().map(|g| g.translation());
+    let hero_positions: Vec<Vec3> = hero.iter().map(GlobalTransform::translation).collect();
     for (transform, mut animator, activation, profile) in &mut characters {
         if animator.locked {
             continue; // dead: the terminal clip holds the pose
         }
         let position = transform.translation();
-        if let (Some(hero_pos), Some(activation)) = (hero_pos, activation)
-            && position.distance(hero_pos) > activation.radius
+        // Longe de TODOS os heróis: congela o driver. Um único herói a menos
+        // de `radius` mantém a criatura animada (co-op).
+        if let Some(activation) = activation
+            && nearest_hero_distance(position, &hero_positions)
+                .is_some_and(|distance| distance > activation.radius)
         {
             // Drop the baseline so the first tick back in range measures a
             // frame, not the whole trip.
@@ -1413,10 +1428,13 @@ pub fn freeze_distant_animation(
         Option<&InheritedVisibility>,
     )>,
 ) {
-    let Ok(hero) = hero.single() else {
+    // Todos os heróis: com 2+ players o `single()` falhava e NENHUM rig era
+    // congelado (a otimização inteira morria em co-op). A distância é à mais
+    // próxima — um NPC entre os dois heróis continua a animar.
+    let hero_positions: Vec<Vec3> = hero.iter().map(GlobalTransform::translation).collect();
+    if hero_positions.is_empty() {
         return;
-    };
-    let hero_pos = hero.translation();
+    }
     for (transform, animator, activation, ragdoll) in &characters {
         if ragdoll.is_some() {
             continue;
@@ -1425,7 +1443,9 @@ pub fn freeze_distant_animation(
             continue;
         };
         let visible = visibility.is_none_or(|v| v.get());
-        let distance = transform.translation().distance(hero_pos);
+        let Some(distance) = nearest_hero_distance(transform.translation(), &hero_positions) else {
+            continue;
+        };
         let freeze = should_freeze(
             frozen.is_some(),
             distance,
@@ -1569,6 +1589,29 @@ mod tests {
         assert_eq!(freeze_distance(Some(&near)), ANIM_FREEZE_MIN_DISTANCE);
         let far = crate::luau::ScriptActivation { radius: 120.0 };
         assert_eq!(freeze_distance(Some(&far)), 120.0);
+    }
+
+    /// Co-op: a distância que conta é a do herói MAIS PRÓXIMO. Com um único
+    /// herói o `single()` funcionava; com dois, falhava e o LOD de animação
+    /// (driver + freeze) desligava-se no mundo inteiro.
+    #[test]
+    fn test_nearest_hero_distance_uses_the_closest_co_op_player() {
+        let heroes = [Vec3::new(100.0, 0.0, 0.0), Vec3::ZERO];
+        assert_eq!(
+            nearest_hero_distance(Vec3::new(2.0, 0.0, 0.0), &heroes),
+            Some(2.0),
+            "o segundo herói está a 2 m — a criatura não pode contar como longe"
+        );
+        assert_eq!(
+            nearest_hero_distance(Vec3::new(60.0, 0.0, 0.0), &heroes),
+            Some(40.0),
+            "mais perto do segundo herói do que do primeiro"
+        );
+        assert_eq!(
+            nearest_hero_distance(Vec3::ZERO, &[]),
+            None,
+            "sem heróis não há gate"
+        );
     }
 
     #[test]

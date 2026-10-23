@@ -298,6 +298,7 @@ pub struct AiLocomotionSystems;
 pub fn apply_ai_locomotion(
     time: Res<Time>,
     runtime: Option<Res<TerrainRuntime>>,
+    interior: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     mut movers: Query<
         (
             &mut Transform,
@@ -339,7 +340,15 @@ pub fn apply_ai_locomotion(
             let world = transform.translation + offset;
             let mut x = world.x + step.x;
             let mut z = world.z + step.y;
-            if let Some(limit) = world_limit {
+            // A bolsa de interior vive DECLARADAMENTE fora do disco do mundo
+            // (ver `InteriorSceneConfig`): clampar ali teleportava os NPCs da
+            // sala para a borda do vale — a mesma exceção (pela posição ATUAL)
+            // que o knockback já faz. `limit > 0` cobre um `world-size`
+            // degenerado, que colapsava todo o movimento na origem.
+            let in_interior = interior
+                .as_deref()
+                .is_some_and(|scene| scene.contains(world.x, world.z));
+            if let Some(limit) = world_limit.filter(|limit| !in_interior && *limit > 0.0) {
                 let clamped = clamp_to_world(Vec3::new(x, world.y, z), limit);
                 x = clamped.x;
                 z = clamped.z;

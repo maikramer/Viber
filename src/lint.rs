@@ -638,6 +638,12 @@ fn check_signals(scripts_dir: &Path, entities: &[EntitySpec]) -> Vec<Finding> {
         if let EntityKind::StaticSpawner { spec: spawner }
         | EntityKind::DynamicSpawner { spec: spawner } = &spec.kind
         {
+            // O script do TEMPLATE também emite sinais (`viber.emit` nos
+            // callbacks das instâncias); sem esta entrada os literais dele
+            // nunca eram comparados com os `--@signal` declarados.
+            if let Some(script) = &spawner.template_script {
+                scripts.insert(script.clone());
+            }
             for group in &spawner.template_links.groups {
                 groups
                     .entry(group.clone())
@@ -1191,6 +1197,34 @@ mod tests {
                 .findings
                 .iter()
                 .any(|f| f.message.starts_with("door:")),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    /// `viber.emit("x")` num script de TEMPLATE de spawner (as instâncias
+    /// correm esse script) tem de ser comparado com os `--@signal` — antes só
+    /// os `script=` de entidades entravam no scan.
+    #[test]
+    fn spawner_template_script_emit_literals_are_checked() {
+        let dir = fixture(
+            r#"<world>
+  <DynamicSpawner count="1" region-min="0 0 0" region-max="1 0 1">
+    <GameObject script="mob.lua"><GLTFLoader url="/assets/meshes/mob.glb" /></GameObject>
+  </DynamicSpawner>
+</world>"#,
+            &[(
+                "mob.lua",
+                "function on_update(dt) viber.emit('porrada') end\n",
+            )],
+            &[],
+        );
+        let report = lint_world(&dir.path().join("world.xml")).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == "script-emit" && f.message.contains("porrada")),
             "{:?}",
             report.findings
         );

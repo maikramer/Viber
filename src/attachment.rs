@@ -56,8 +56,19 @@ pub fn apply_attachments(
     players: Query<Entity, With<crate::player::Player>>,
     names: Query<&Name>,
     children: Query<&Children>,
+    entities: Query<Entity>,
 ) {
     let queued = std::mem::take(&mut requests.0);
+    if queued.is_empty() {
+        return;
+    }
+    // Donos (ou props) despawnados deixavam a entrada `(dono, slot) → entidade`
+    // no mapa PARA SEMPRE — um clone por criatura equipada numa horda. A poda
+    // corre só quando há pedidos (nunca por frame) e o `Query<Entity>` só
+    // responde a `contains`, sem varrer o mundo.
+    slots
+        .0
+        .retain(|(owner, _), child| entities.contains(*owner) && entities.contains(*child));
     for request in queued {
         // `iter().next()` e não `single()`: com 2+ players (co-op) o
         // `single()` falhava e TODOS os pedidos sem `id` caíam em silêncio

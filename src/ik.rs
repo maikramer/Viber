@@ -97,23 +97,67 @@ pub fn is_right_foot(name: &str) -> bool {
         && !bone_matches(name, &["rightfootik", "ik"])
 }
 
+/// Nomes de perna dos rigs da pipeline: `LeftUpLeg`/`LeftLeg` (Mixamo) e
+/// `thigh_l`/`calf_l`/`upperleg_l` (sufixo de lado, a convenção do herói e de
+/// TODOS os personagens do Vael). Sem as variantes com o lado no FIM, o
+/// `plant_pair` não encontrava a coxa/canela do herói e o IK dos pés não
+/// corria — o pé só era encontrado (`foot_l` → `footl`), a cadeia não.
 pub fn is_left_knee(name: &str) -> bool {
-    bone_matches(name, &["leftleg", "leftcalf", "leftshin", "leftlowerleg"])
+    bone_matches(
+        name,
+        &[
+            "leftleg",
+            "leftcalf",
+            "leftshin",
+            "leftlowerleg",
+            "calfl",
+            "shinl",
+            "lowerlegl",
+        ],
+    )
 }
 
 pub fn is_right_knee(name: &str) -> bool {
     bone_matches(
         name,
-        &["rightleg", "rightcalf", "rightshin", "rightlowerleg"],
+        &[
+            "rightleg",
+            "rightcalf",
+            "rightshin",
+            "rightlowerleg",
+            "calfr",
+            "shinr",
+            "lowerlegr",
+        ],
     )
 }
 
 pub fn is_left_hip(name: &str) -> bool {
-    bone_matches(name, &["leftupleg", "leftthigh", "leftupperleg"])
+    bone_matches(
+        name,
+        &[
+            "leftupleg",
+            "leftthigh",
+            "leftupperleg",
+            "thighl",
+            "upperlegl",
+            "uplegl",
+        ],
+    )
 }
 
 pub fn is_right_hip(name: &str) -> bool {
-    bone_matches(name, &["rightupleg", "rightthigh", "rightupperleg"])
+    bone_matches(
+        name,
+        &[
+            "rightupleg",
+            "rightthigh",
+            "rightupperleg",
+            "thighr",
+            "upperlegr",
+            "uplegr",
+        ],
+    )
 }
 
 pub fn is_head(name: &str) -> bool {
@@ -515,6 +559,25 @@ mod tests {
         assert!(is_head("mixamorig:Head"));
         assert!(is_jaw("Jaw"));
         assert!(!is_left_foot("RightFoot"));
+    }
+
+    /// O rig da pipeline (`hero_lod0.glb`, lobos, NPCs) usa o lado no FIM:
+    /// `thigh_l` / `calf_l` / `foot_l`. As variantes Mixamo continuam válidas.
+    #[test]
+    fn bone_names_match_the_pipeline_side_suffix_rigs() {
+        assert!(is_left_hip("thigh_l"));
+        assert!(is_right_hip("thigh_r"));
+        assert!(is_left_knee("calf_l"));
+        assert!(is_right_knee("calf_r"));
+        assert!(is_left_foot("foot_l"));
+        assert!(is_right_foot("foot_r"));
+        // Lado não se cruza (a coxa esquerda não é a direita nem o pé).
+        assert!(!is_left_hip("thigh_r"));
+        assert!(!is_right_knee("calf_l"));
+        assert!(!is_left_hip("foot_l"));
+        // Variantes com o lado no início continuam a casar.
+        assert!(is_left_hip("mixamorig:LeftUpLeg"));
+        assert!(is_right_knee("RightLeg"));
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod tile;
 
 use bevy::prelude::*;
 use bevy_landmass::prelude::*;
+use bevy_landmass::{Agent3d, Character};
 use bevy_rerecast::prelude::*;
 
 pub use agent::{NavArchipelago, NavProfile};
@@ -277,6 +278,24 @@ pub fn reset_for_scene(world: &mut World) {
             }
         }
     }
+    // Os autoloads PERSISTENTES (o herói, o HUD) sobrevivem à troca de cena e
+    // mantêm `ArchipelagoRef3d` a apontar para o arquipélago que acabou de ser
+    // despawnado: o landmass ignora refs mortas, o herói deixa de ser um
+    // obstáculo para os agentes e os NPCs persistentes ficam sem path. Remover
+    // o marcador faz o `attach_nav_agents` remontar o bundle contra o
+    // arquipélago novo no Update seguinte (o mesmo frame de arranque da cena).
+    let mut stale = world
+        .query_filtered::<Entity, Or<(With<Agent3d>, With<Character<ThreeD>>)>>();
+    let stale: Vec<Entity> = stale.iter(world).collect();
+    for entity in stale {
+        if let Ok(mut entity) = world.get_entity_mut(entity) {
+            // O `Agent3d`/`Character` são os marcadores que o attach procura
+            // (`Without<Agent3d>` / `Without<Character<ThreeD>>`); o resto do
+            // bundle é substituído por inteiro quando ele corre.
+            entity.remove::<Agent3d>();
+            entity.remove::<Character<ThreeD>>();
+        }
+    }
     if world.contains_resource::<NavTile>() {
         world.insert_resource(NavTile::default());
     }
@@ -385,4 +404,42 @@ fn apply_navmesh_tag(
         "nav: <NavMesh> aplicada — raio {:.2} m, tile {:.0} m, custo fora-de-estrada {:.2}×",
         config.agent_radius, config.tile_size, config.offroad_cost
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Troca de cena: o herói (autoload persistente) mantinha o
+    /// `ArchipelagoRef3d` a apontar para o arquipélago despawnado e deixava de
+    /// ser um obstáculo para o landmass. O reset tem de o devolver ao estado
+    /// "por montar" para o `attach_nav_agents` o religar ao novo.
+    #[test]
+    fn reset_for_scene_drops_stale_nav_bindings() {
+        let mut world = World::new();
+        let archipelago = world.spawn_empty().id();
+        let island = world.spawn_empty().id();
+        world.insert_resource(NavArchipelago {
+            archipelago,
+            island,
+        });
+        world.insert_resource(NavTile {
+            generations: 3,
+            ..NavTile::default()
+        });
+        let hero = world.spawn(Character::<ThreeD>::default()).id();
+        let agent = world.spawn(Agent3d::default()).id();
+        let plain = world.spawn_empty().id();
+
+        reset_for_scene(&mut world);
+
+        assert!(world.get::<Character<ThreeD>>(hero).is_none());
+        assert!(world.get::<Agent3d>(agent).is_none());
+        assert!(world.get_entity(plain).is_ok(), "entidades alheias ficam");
+        assert!(world.get_resource::<NavArchipelago>().is_none());
+        assert_eq!(
+            world.resource::<NavTile>().generations, 0,
+            "o tile da cena antiga é reposto"
+        );
+    }
 }

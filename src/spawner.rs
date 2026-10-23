@@ -311,11 +311,15 @@ fn resolved_count(spec: &StaticSpawnerSpec) -> u32 {
     if spec.density_per_km2 > 0.0 && spec.count == 0 {
         let dx = (spec.region_max[0] - spec.region_min[0]).abs();
         let dz = (spec.region_max[2] - spec.region_min[2]).abs();
+        // Região de ÁREA ZERO (region-min == region-max, o default de quem
+        // esquece a região): densidade × 0 é 0 instâncias. O `.clamp(1.0, …)`
+        // punha uma instância na origem mesmo sem área nenhuma.
+        let area = dx * dz;
         // Mesmo teto do attr `count`: regiões enormes não explodem o
         // with_capacity nem as tentativas por instância.
-        let n = (spec.density_per_km2 * dx * dz / 1.0e6)
+        let n = (spec.density_per_km2 * area / 1.0e6)
             .round()
-            .clamp(1.0, 100_000.0);
+            .clamp(if area > 0.0 { 1.0 } else { 0.0 }, 100_000.0);
         let capped = if spec.max_instances > 0 {
             n.min(spec.max_instances as f32)
         } else {
@@ -1809,6 +1813,21 @@ mod tests {
         s.count = 7;
         let out = place(&s, &mut SpawnOccupancy::new(), &mut flat);
         assert_eq!(out.len(), 7);
+    }
+
+    /// Densidade numa região de ÁREA ZERO (default de quem esquece
+    /// `region-min`/`region-max`) não inventa uma instância na origem: 0 m² ×
+    /// densidade = 0 instâncias.
+    #[test]
+    fn test_density_zero_area_places_nothing() {
+        let mut s = spec();
+        s.count = 0;
+        s.region_min = [0.0; 3];
+        s.region_max = [0.0; 3];
+        s.density_per_km2 = 50_000.0;
+        assert_eq!(resolved_count(&s), 0);
+        let out = place(&s, &mut SpawnOccupancy::new(), &mut flat);
+        assert!(out.is_empty(), "sem área não há instâncias: {out:?}");
     }
 
     /// Região impossível: cada instância queima as suas tentativas e é

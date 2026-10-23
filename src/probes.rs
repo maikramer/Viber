@@ -71,7 +71,14 @@ impl Plugin for RegionalProbesPlugin {
         if !probes_requested() {
             return;
         }
-        app.add_systems(Update, update_regional_probes);
+        // A paleta é publicada por `atmosphere_drive` NESTE frame: sem a
+        // aresta, o scheduler podia repintar os cubemaps primeiro na
+        // fronteira de fase e gravar o `last_phase` com a paleta anterior —
+        // os probes passavam a fase inteira com a luz errada.
+        app.add_systems(
+            Update,
+            update_regional_probes.after(crate::worldsys::atmosphere_drive),
+        );
     }
 }
 
@@ -155,6 +162,11 @@ fn update_regional_probes(
     mut last_phase: Local<Option<Option<u32>>>,
 ) {
     let phase = day_phase(clock.as_deref());
+    // Uma edição viva do `<Sky model>` troca o `SkyModelState` sem mexer no
+    // minuto: força o repaint (o tint de cada probe mantém-se).
+    let model_changed = model_state
+        .as_ref()
+        .is_some_and(|state| state.is_changed());
     // Os probes não são Persistent: um unload de cena despacha-os, mas o
     // `Local` ficava true e nunca voltavam a nascer. Só repõe `spawned` se
     // HAVIA probes — com `probes.is_empty()` puro, um mundo sem pads com tint
@@ -164,7 +176,7 @@ fn update_regional_probes(
         *spawned = false;
         *spawned_count = 0;
     }
-    if *spawned && last_phase.is_some_and(|last| last == phase) {
+    if *spawned && !model_changed && last_phase.is_some_and(|last| last == phase) {
         return;
     }
     let (Some(runtime), Some(regions)) = (runtime.as_deref(), regions.as_deref()) else {
@@ -175,6 +187,13 @@ fn update_regional_probes(
         .as_deref()
         .cloned()
         .unwrap_or_else(AtmosphereState::default);
+    // Sem `<DayCycle>` o `AtmosphereState` vivo fica a 45°/zénite; o domo
+    // desenha o sol ESTÁTICO do `<Sky>`. Os probes pintam a mesma paleta do
+    // IBL mundial (ver `SkyModelState::ibl_palette`).
+    let atmosphere = model_state
+        .as_deref()
+        .map(|state| state.ibl_palette(&atmosphere))
+        .unwrap_or(atmosphere);
     let nishita = model_state
         .as_deref()
         .filter(|s| s.model == crate::sky::SkyModel::Nishita)

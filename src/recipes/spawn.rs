@@ -1667,7 +1667,21 @@ fn spawn_entity(
                 // sítio partilham material, que é o que alinha o padrão com
                 // as ribbons das estradas).
                 let mut primitive = primitive_mesh(shape);
-                scale_primitive_uvs(&mut primitive, shape, tile, spec.transform.translation);
+                // UVs em coordenadas de MUNDO: o `translation` da spec é
+                // LOCAL. Debaixo de um grupo transladado (ou de um
+                // `<Include translation>`) o padrão começava na origem do
+                // pai e deixava de casar com as ribbons/decals vizinhos.
+                let ancestor = ancestor_xz(entity.world(), parent);
+                scale_primitive_uvs(
+                    &mut primitive,
+                    shape,
+                    tile,
+                    [
+                        spec.transform.translation[0] + ancestor.x,
+                        spec.transform.translation[1],
+                        spec.transform.translation[2] + ancestor.y,
+                    ],
+                );
                 let mesh = ctx.meshes.add(primitive);
                 let mat = material_handle(ctx, material, world_tiled_uv);
                 entity.insert((Mesh3d(mesh), MeshMaterial3d(mat), Visibility::Inherited));
@@ -2755,6 +2769,28 @@ mod terrain_collect_tests {
             Vec2::new(13.0, 24.0),
             "via offset applied"
         );
+    }
+
+    /// UVs world-space de um decal usam a posição MUNDO: o `translation` da
+    /// spec é local, por isso o XZ dos ancestrais tem de entrar na conta
+    /// (senão o padrão não casa com as ribbons no mesmo grupo transladado).
+    #[test]
+    fn scale_primitive_uvs_offsets_by_the_world_translation() {
+        use bevy::mesh::VertexAttributeValues;
+        let shape = Shape::Plane {
+            half_size: [1.0, 1.0],
+        };
+        let mut mesh = primitive_mesh(&shape);
+        scale_primitive_uvs(&mut mesh, &shape, 2.0, [10.0, 0.0, 20.0]);
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("Plane tem UVs");
+        };
+        // Extensões 2×2 em (10,20) → x ∈ [9, 11], z ∈ [19, 21]; /tile 2.
+        let min_u = uvs.iter().map(|uv| uv[0]).fold(f32::INFINITY, f32::min);
+        let min_v = uvs.iter().map(|uv| uv[1]).fold(f32::INFINITY, f32::min);
+        assert!((min_u - 4.5).abs() < 1e-4, "min_u={min_u}");
+        assert!((min_v - 9.5).abs() < 1e-4, "min_v={min_v}");
     }
 
     /// `place.at` é XZ mundo: o spawn soma o XZ dos ancestrais (o parse só vê

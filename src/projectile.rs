@@ -370,8 +370,12 @@ fn push_hit(out: &mut ImpactOut, entity: Entity, amount: f32, faction: &str, at:
     });
 }
 
-fn impact_burst(commands: &mut Commands, at: Vec3) {
-    commands.spawn(crate::senses::NoisePing(at));
+fn impact_burst(commands: &mut Commands, at: Vec3, hearing: bool) {
+    // Sem `SensesPlugin` (um preset `gameplay: none` com projéteis) ninguém
+    // consome/despawna o `NoisePing`: ficavam entidades órfãs para sempre.
+    if hearing {
+        commands.spawn(crate::senses::NoisePing(at));
+    }
     crate::particles::spawn_burst(commands, &crate::fx_specs::hit_sparks_spec(), at, 8);
 }
 
@@ -380,6 +384,7 @@ fn step_projectiles(
     mut commands: Commands,
     time: Res<Time>,
     runtime: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
+    senses: Option<Res<crate::senses::SenseInbox>>,
     mut out: ImpactOut,
     mut projectiles: Query<(Entity, &mut Transform, &mut Projectile)>,
     players: Query<(Entity, &GlobalTransform), With<Player>>,
@@ -392,10 +397,6 @@ fn step_projectiles(
     if dt <= 0.0 {
         return;
     }
-    let hero = players
-        .iter()
-        .next()
-        .map(|(entity, transform)| (entity, transform.translation()));
     for (entity, mut transform, mut shot) in &mut projectiles {
         // O último instante ainda viaja e ainda pode acertar. Descartá-lo
         // quando `life < dt` fazia a seta desaparecer no ar, a um passo do alvo.
@@ -425,15 +426,23 @@ fn step_projectiles(
         let reach = shot.sensor_radius + BODY_RADIUS;
         match shot.faction {
             Faction::Enemy => {
-                if let Some((hero_entity, feet)) = hero.filter(|(e, _)| shot.shooter != Some(*e)) {
-                    let (gap, along) = swept_body_distance(prev, pos, feet);
-                    if gap <= reach {
-                        let at = prev.lerp(pos, along);
-                        push_hit(&mut out, hero_entity, shot.damage, "enemy", at);
-                        impact_burst(&mut commands, at);
-                        commands.entity(entity).try_despawn();
-                        continue;
-                    }
+                // TODOS os heróis, e o primeiro corpo ao longo do passo (não
+                // o primeiro da query): com 2 players em co-op só o primeiro
+                // recebia setas — o segundo era atravessado.
+                let hit = players
+                    .iter()
+                    .filter(|(e, _)| shot.shooter != Some(*e))
+                    .filter_map(|(e, transform)| {
+                        let (gap, along) = swept_body_distance(prev, pos, transform.translation());
+                        (gap <= reach).then_some((e, along))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((target, along)) = hit {
+                    let at = prev.lerp(pos, along);
+                    push_hit(&mut out, target, shot.damage, "enemy", at);
+                    impact_burst(&mut commands, at, senses.is_some());
+                    commands.entity(entity).try_despawn();
+                    continue;
                 }
             }
             Faction::Player => {
@@ -451,7 +460,7 @@ fn step_projectiles(
                     if let Ok((target, _, _)) = creatures.get(target) {
                         push_hit(&mut out, target, shot.damage, "player", at);
                     }
-                    impact_burst(&mut commands, at);
+                    impact_burst(&mut commands, at, senses.is_some());
                     commands.entity(entity).try_despawn();
                     continue;
                 }
@@ -473,7 +482,7 @@ fn step_projectiles(
                         .is_some_and(|ground| pos.y <= ground))
         });
         if hit_terrain {
-            impact_burst(&mut commands, pos);
+            impact_burst(&mut commands, pos, senses.is_some());
             commands.entity(entity).try_despawn();
         } else if expired {
             commands.entity(entity).try_despawn();
@@ -681,6 +690,45 @@ mod tests {
             0,
             "o projétil morre no impacto"
         );
+    }
+
+    /// Co-op: a seta `faction="enemy"` tem de acertar QUALQUER herói no
+    /// caminho, não só o primeiro da query (o segundo era atravessado).
+    #[test]
+    fn test_enemy_projectile_hits_any_player_not_just_the_first() {
+        let mut app = app_with(template(Faction::Enemy));
+        // Player 1 longe do trajeto; player 2 em cima dele (z = 10).
+        app.world_mut().spawn((
+            Player::default(),
+            Transform::from_xyz(30.0, 0.0, 0.0),
+            GlobalTransform::from_xyz(30.0, 0.0, 0.0),
+        ));
+        let second = app
+            .world_mut()
+            .spawn((
+                Player::default(),
+                Transform::from_xyz(0.0, 0.0, 10.0),
+                GlobalTransform::from_xyz(0.0, 0.0, 10.0),
+            ))
+            .id();
+        fire(
+            &mut app,
+            Vec3::new(0.0, 1.2, 0.0),
+            Vec3::new(0.0, 1.1, 10.0),
+        );
+        for _ in 0..60 {
+            run_frames(&mut app, 1);
+        }
+        assert_eq!(hits(&app), 1, "a seta acerta o player no caminho");
+        match &app.world().resource::<crate::luau::ScriptEventQueue>().0[0] {
+            crate::luau::ScriptGameEvent::Hit {
+                entity, faction, ..
+            } => {
+                assert_eq!(faction, "enemy");
+                assert_eq!(*entity, second.to_bits() as i64, "é o player 2");
+            }
+            other => panic!("evento inesperado {other:?}"),
+        }
     }
 
     #[test]

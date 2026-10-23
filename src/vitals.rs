@@ -30,7 +30,13 @@ impl Default for Health {
 /// Alvo hostil genérico. O mundo autora `hostile="true"`; o spawner de
 /// criaturas (`<Creature role="enemy">`) também a insere. A engine NÃO infere
 /// hostilidade pelo path do script.
+///
+/// `require(Health)`: um hostil autorado SEM `health="…"` ficava sem pool e
+/// era imune a `entity_damage`/dano radial (o `ensure_creature_vitals` que o
+/// devia cobrir nunca foi registado num schedule). O default só entra quando
+/// não há `Health` no bundle; quem autora o HP continua a mandar.
 #[derive(Debug, Clone, Copy, Default, Component)]
+#[require(Health)]
 pub struct Hostile;
 
 /// Garante `Health` no herói (o dano dos scripts e o HUD dependem disto).
@@ -148,6 +154,38 @@ mod tests {
         assert_eq!(radial_damage(6.0, 5.0, 10.0), None);
         assert!(approx(radial_damage(0.0, 5.0, 10.0).unwrap(), 10.0));
         assert!(approx(radial_damage(5.0, 5.0, 10.0).unwrap(), 5.0));
+    }
+
+    /// Um hostil SEM `health="…"` tem de receber o pool default (o
+    /// `ensure_creature_vitals` nunca correu num schedule) — antes ficava
+    /// imune a `viber.entity_damage`/dano radial. O HP autoral no bundle
+    /// continua a ganhar.
+    #[test]
+    fn test_hostile_without_authored_hp_gets_the_default_pool() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let bare = app.world_mut().spawn(Hostile).id();
+        let hp = app
+            .world()
+            .get::<Health>(bare)
+            .expect("Hostile requires Health");
+        assert_eq!((hp.current, hp.max), (DEFAULT_HEALTH, DEFAULT_HEALTH));
+        let authored = app
+            .world_mut()
+            .spawn((
+                Hostile,
+                Health {
+                    current: 30.0,
+                    max: 40.0,
+                },
+            ))
+            .id();
+        let hp = app.world().get::<Health>(authored).unwrap();
+        assert_eq!(
+            (hp.current, hp.max),
+            (30.0, 40.0),
+            "o HP autoral não é substituído pelo default"
+        );
     }
 
     /// Raio zero/negativo não tem área: `0/0` dava `NaN` e o `NaN` seguia

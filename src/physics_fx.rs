@@ -57,6 +57,27 @@ pub fn knockback_after(direction: Vec3, strength: f32) -> Knockback {
     }
 }
 
+/// Fração da velocidade que sobrevive a um passo `dt` do decaimento
+/// exponencial: `e^(−k·dt)`.
+pub fn knockback_decay_factor(dt: f32) -> f32 {
+    if KNOCKBACK_DECAY > 0.0 {
+        (-KNOCKBACK_DECAY * dt).exp()
+    } else {
+        1.0
+    }
+}
+
+/// Fator de deslocamento (s) da integral EXATA do decaimento num passo `dt`:
+/// `(1 − e^(−k·dt)) / k`. Multiplicado pela velocidade, dá os metros andados
+/// nesse passo — independente da divisão do tempo.
+pub fn knockback_travel_factor(dt: f32) -> f32 {
+    if KNOCKBACK_DECAY > 0.0 {
+        (1.0 - knockback_decay_factor(dt)) / KNOCKBACK_DECAY
+    } else {
+        dt
+    }
+}
+
 /// Velocidade inicial de knockback que percorre `displacement` (XZ) até
 /// parar: com o decaimento linear `v *= 1 − k·dt`, a distância total é
 /// ≈ v₀/k — o dash pede metros, não m/s.
@@ -98,10 +119,10 @@ pub fn radial_strength(distance: f32, radius: f32, strength: f32) -> Option<f32>
 ///
 /// - Cadáveres (`Corpse`) ficam de fora: mortos por strike/bomba no MESMO
 ///   frame tinham o `Knockback` inserido por cima da animação de morte.
-/// - O HERÓI só tem o knockback DECAÍDO aqui: o deslocamento entra no
-///   pedido do character controller em [`crate::player::player_movement`]
-///   (escrito no Transform atravessava paredes; um Y-slam a meio de um salto
-///   sentava-o no chão). Criaturas assentam na superfície sob elas.
+/// - O HERÓI é saltado por completo: o `player_movement` aplica o empurrão no
+///   pedido do character controller E o decai (integral exata no mesmo passo).
+///   Aqui só se move quem não tem controller próprio; criaturas assentam na
+///   superfície sob elas.
 /// - XZ clampado ao disco do [`crate::worldsys::WorldBorderConfig`] (a mesma
 ///   matemática de `worldsys::world_border_clamp`): o empurrão não pode
 ///   expulsar ninguém do mundo — excepto dentro da bolsa de interior, que
@@ -126,16 +147,28 @@ fn knockback_system(
     let dt = time.delta_secs();
     let limit = border.as_deref().map(|b| b.radius - b.margin);
     for (entity, mut transform, mut knockback, player) in &mut knocked {
-        let step = knockback.velocity * dt;
+        // O HERÓI é dono do próprio empurrão: o `player_movement` aplica-o no
+        // pedido do character controller e decai-o no MESMO passo (integral
+        // exata). Decair aqui também deixava a distância dependente da ORDEM
+        // dos sistemas e do framerate: num frame longo o herói andava
+        // `v·e^(−k·dt)·dt`, uma fração ínfima dos `v/k` pedidos.
+        if player.is_some() {
+            continue;
+        }
+        // Integral EXATA do decaimento (`v·(1−e^{−k·dt})/k`) em vez de Euler
+        // explícito (`v·dt` e depois `v *= 1−k·dt`): num frame longo
+        // (`dt > 1/k` — soluço, carregamento) o Euler já tinha andado `v·dt`
+        // quando zerava a velocidade, ou seja 3× a distância pedida. Assim a
+        // distância total é `v₀/k` qualquer que seja o dt.
+        let decay = knockback_decay_factor(dt);
+        let travel = knockback_travel_factor(dt);
+        let step = knockback.velocity * travel;
         let mut x = transform.translation.x + step.x;
         let mut z = transform.translation.z + step.z;
-        knockback.velocity *= (1.0 - KNOCKBACK_DECAY * dt).max(0.0);
+        knockback.velocity *= decay;
         if knockback.velocity.length() < KNOCKBACK_EPSILON {
             knockback.velocity = Vec3::ZERO;
             commands.entity(entity).remove::<Knockback>();
-        }
-        if player.is_some() {
-            continue;
         }
         let in_interior = interior
             .as_deref()
@@ -297,9 +330,9 @@ mod tests {
         assert_eq!(dead_x, 0.0, "cadáver fica no lugar: {dead_x}");
     }
 
-    /// R2-G5a: o HERÓI não leva Y-slam — com terreno REAL na app (o caminho
-    /// do slam ativo), o Transform dele fica intacto (o deslocamento entra
-    /// pelo character controller no `player_movement`) e o knockback decai.
+    /// R2-G5a: o HERÓI é SALTADO por este sistema — o Transform fica intacto
+    /// e o `Knockback` não é decaído aqui (o `player_movement` aplica-o no
+    /// pedido do character controller e decai-o no mesmo passo).
     #[test]
     fn test_knockback_keeps_player_y_headless() {
         use std::sync::Arc;
@@ -370,9 +403,10 @@ mod tests {
             "Transform do herói intocado"
         );
         let hero_kb = app.world().get::<Knockback>(hero).unwrap().velocity;
-        assert!(
-            hero_kb.x < 2.0 && hero_kb.x > 0.0,
-            "knockback do herói decai: {hero_kb:?}"
+        assert_eq!(
+            hero_kb,
+            Vec3::X * 2.0,
+            "o herói aplica/decai no player_movement — este sistema não toca"
         );
         let prop_t = app.world().get::<Transform>(prop).unwrap().translation;
         let ground = app
@@ -466,5 +500,72 @@ mod tests {
             t.x > 30.0,
             "sem disco interior o empurrão não é clampado nem espelhado: {t:?}"
         );
+    }
+
+    /// A distância percorrida não depende da divisão do tempo: um frame de
+    /// 1 s (soluço) tem de dar o mesmo que 100 frames de 10 ms. No Euler
+    /// explícito antigo o frame de 1 s andava `v₀·1 s` = 3 m (6× o pedido).
+    #[test]
+    fn test_knockback_distance_is_frame_rate_independent() {
+        fn travel(millis: &[u64]) -> f32 {
+            let mut app = fx_app();
+            let id = app
+                .world_mut()
+                .spawn((
+                    Transform::default(),
+                    Knockback {
+                        velocity: Vec3::X * 3.0,
+                    },
+                ))
+                .id();
+            for step in millis {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_millis(*step));
+                app.update();
+            }
+            app.world().get::<Transform>(id).unwrap().translation.x
+        }
+        let one_long = travel(&[500]);
+        let many_short = travel(&[10u64; 50]);
+        assert!(
+            (one_long - many_short).abs() < 1e-3,
+            "1 frame de 500 ms → {one_long:.4} m; 50 de 10 ms → {many_short:.4} m"
+        );
+        // v₀·(1−e^{−k·0,5})/k = 0,475 m; o Euler antigo dava v₀·0,5 = 1,5 m.
+        assert!(
+            one_long < 0.6,
+            "o frame longo passou dos ~0,475 m: {one_long:.4} m"
+        );
+    }
+
+    /// A MESMA integral que move os corpos daqui é a que o `player_movement`
+    /// usa para o herói: somar os fatores parciais tem de dar a distância
+    /// total `v₀·(1−e^{−kT})/k`, qualquer que seja a divisão do tempo.
+    #[test]
+    fn test_travel_factor_telescopes_to_the_exact_distance() {
+        fn travelled(steps: &[f32]) -> f32 {
+            let mut velocity = 3.0_f32;
+            let mut distance = 0.0_f32;
+            for dt in steps {
+                distance += velocity * knockback_travel_factor(*dt);
+                velocity *= knockback_decay_factor(*dt);
+            }
+            distance
+        }
+        let total = 3.0 * (1.0 - (-KNOCKBACK_DECAY * 0.5).exp()) / KNOCKBACK_DECAY;
+        for steps in [
+            vec![0.5],
+            vec![1.0 / 60.0; 30],
+            vec![0.01; 50],
+            vec![0.1; 5],
+        ] {
+            let d = travelled(&steps);
+            assert!(
+                (d - total).abs() < 1e-3,
+                "{} passos deram {d:.4} m, total exato {total:.4}",
+                steps.len()
+            );
+        }
     }
 }

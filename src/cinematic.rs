@@ -835,8 +835,13 @@ fn tick_cinematic(
     let skip_pressed = keys
         .as_deref()
         .is_some_and(|k| k.any_just_pressed([KeyCode::Escape, KeyCode::Space, KeyCode::Enter]));
+    // Durante a espera em negro o RELÓGIO não anda (`t` fica a 0), portanto
+    // o guarda de 0,4 s do skip tem de ler também o tempo da espera: sem
+    // isto, carregar em Esc/Espaço enquanto o streaming/pipelines arrancam
+    // (até 7 s no arranque) não fazia NADA — o jogador ficava preso no preto.
+    let skip_elapsed = active.t.max(active.hold.as_ref().map_or(0.0, |h| h.elapsed));
     if !active.outro
-        && (stop_requested || (active.spec.skippable && active.t > 0.4 && skip_pressed))
+        && (stop_requested || (active.spec.skippable && skip_elapsed > 0.4 && skip_pressed))
     {
         active.skipped = true;
         active.t = active.spec.duration;
@@ -1484,6 +1489,71 @@ mod tests {
             spec(r#"<Cinematic id="x"><Camera /></Cinematic>"#)
                 .unwrap_err()
                 .contains("desconhecido")
+        );
+    }
+
+    /// O skip (Esc/Espaço/Enter) tem de funcionar durante a espera em negro
+    /// INICIAL: aí o relógio da cena está parado em `t = 0` e o guarda de
+    /// 0,4 s antigo bloqueava a tecla durante os até 7 s de streaming/
+    /// pipelines — o jogador ficava preso no preto.
+    #[test]
+    fn skip_works_during_the_initial_black_hold() {
+        let mut app = App::new();
+        app.init_resource::<Time<Real>>()
+            .init_resource::<CinematicPlayback>()
+            .init_resource::<StreamingBoost>()
+            .add_message::<StopCinematic>()
+            .add_message::<CinematicEnded>()
+            .add_message::<crate::ambient::SfxEvent>()
+            .add_systems(Update, tick_cinematic);
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        let spec = spec(
+            r#"<Cinematic id="hold">
+                <Shot duration="2" from="0 0 0" look="0 0 1" />
+            </Cinematic>"#,
+        )
+        .unwrap();
+        app.world_mut().resource_mut::<CinematicPlayback>().active = Some(Active {
+            spec,
+            t: 0.0,
+            self_anchor: None,
+            named: HashMap::new(),
+            sounds_fired: 0,
+            player_at_start: Vec3::ZERO,
+            hidden: Vec::new(),
+            // O streaming já demorava > 0,4 s: a tecla tem de valer.
+            hold: Some(Hold {
+                elapsed: 1.0,
+                frames: 30,
+                fading: None,
+            }),
+            cuts: None,
+            reset_taa: false,
+            reset_exposure: false,
+            last_eye: None,
+            last_look: None,
+            player_now: Vec3::ZERO,
+            outro: false,
+            outro_snapped: false,
+            skipped: false,
+        });
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        assert!(
+            app.world()
+                .resource::<CinematicPlayback>()
+                .active
+                .is_none(),
+            "Esc durante o hold inicial tem de saltar a cena"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Messages<CinematicEnded>>()
+                .len(),
+            1,
+            "o skip emite `CinematicEnded`"
         );
     }
 

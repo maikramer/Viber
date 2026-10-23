@@ -4083,6 +4083,9 @@ fn finish_cave(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "open-ends" => spec.open_ends = values::parse_bool(&value, &kctx)?,
             "mouth-flare" => spec.mouth_flare = values::parse_f32(&value, &kctx)?,
             "mouth-fraction" => spec.mouth_fraction = values::parse_f32(&value, &kctx)?,
+            "mound-height" => spec.mound_height = values::parse_f32(&value, &kctx)?,
+            "mound-radius" => spec.mound_radius = values::parse_f32(&value, &kctx)?,
+            "mouth-lift" => spec.mouth_lift = values::parse_bool(&value, &kctx)?,
             other => ctx
                 .warnings
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
@@ -4120,6 +4123,24 @@ fn finish_cave(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "{ctx_tag}: mouth-fraction must be in (0, 0.5] (got {f})",
             f = spec.mouth_fraction
         );
+    }
+    if !spec.mound_height.is_finite() || spec.mound_height < 0.0 {
+        bail!(
+            "{ctx_tag}: mound-height must be >= 0 (got {f})",
+            f = spec.mound_height
+        );
+    }
+    if !spec.mound_radius.is_finite() || spec.mound_radius < 0.0 {
+        bail!(
+            "{ctx_tag}: mound-radius must be >= 0 (got {f})",
+            f = spec.mound_radius
+        );
+    }
+    if spec.mouth_lift && spec.mound_height <= 0.0 {
+        ctx.warnings.push(format!(
+            "{ctx_tag}: mouth-lift lifts the tube above the ground at the mouth — without \
+             `mound-height` the mouth floats in the air"
+        ));
     }
     // A tunnel shallower than its own radius is a trench, not a cave: it would
     // breach the surface along its whole length and leave no roof.

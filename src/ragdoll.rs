@@ -58,16 +58,21 @@ fn kind_of(name: &str) -> Option<&'static str> {
     if n.ends_with("hips") || n == "hips" {
         return Some("pelvis");
     }
-    if n.ends_with("chest") || n.ends_with("spine1") || n == "spine" {
+    // A pipeline autora a coluna como `spine_01`/`spine_02`/`Spine2`
+    // (normalizados `spine01`…); o `ends_with("spine1")` antigo só casava
+    // `spine1` exato. Sem esta coluna a cadeia do Vael nunca chegava aos 3
+    // ossos e o ragdoll dos bosses (`ragdoll="true"`) não abria.
+    if n.contains("spine") || n.ends_with("chest") {
         return Some("spine");
     }
     if crate::ik::is_head(name) {
         return Some("head");
     }
-    if n.ends_with("leftarm") || n.ends_with("leftupperarm") {
+    // `upperarm_l`/`upperarm_r` são os braços da pipeline (lado no FIM).
+    if n.ends_with("leftarm") || n.ends_with("leftupperarm") || n.ends_with("upperarml") {
         return Some("leftarm");
     }
-    if n.ends_with("rightarm") || n.ends_with("rightupperarm") {
+    if n.ends_with("rightarm") || n.ends_with("rightupperarm") || n.ends_with("upperarmr") {
         return Some("rightarm");
     }
     if crate::ik::is_left_hip(name) {
@@ -138,6 +143,12 @@ pub fn start_ragdolls(
                     GravityScale(1.0),
                     Velocity::default(),
                     Transform::from_translation(*pos),
+                    // O `drive_ragdolls` corre no MESMO frame, dentro da
+                    // cadeia, antes de qualquer propagação: sem semear o
+                    // `GlobalTransform`, o primeiro tick lia a identidade e
+                    // colava todos os ossos à origem do rig (um frame de
+                    // boneco amassado no início de cada ragdoll).
+                    GlobalTransform::from_translation(*pos),
                     Visibility::Hidden,
                 ))
                 .id();
@@ -184,6 +195,29 @@ pub fn start_ragdolls(
     }
 }
 
+/// Soma dos deslocamentos já aplicados aos ascendentes de `node` neste frame.
+///
+/// A cadeia conduzida salta ossos intermédios (pescoço entre `spine` e
+/// `head`, ombro entre `spine` e `leftarm`), que não estão em `moved`. Olhar
+/// só para o pai imediato perdia o delta desses ascendentes e a cabeça/braço
+/// ficava deslocado pelo passo do tronco a cada frame.
+fn ancestor_delta(
+    moved: &std::collections::HashMap<Entity, Vec3>,
+    parents: &Query<&ChildOf>,
+    mut node: Entity,
+) -> Vec3 {
+    let mut delta = Vec3::ZERO;
+    loop {
+        if let Some(step) = moved.get(&node) {
+            delta += *step;
+        }
+        match parents.get(node) {
+            Ok(parent) => node = parent.parent(),
+            Err(_) => return delta,
+        }
+    }
+}
+
 pub fn drive_ragdolls(
     mut commands: Commands,
     time: Res<Time>,
@@ -209,8 +243,9 @@ pub fn drive_ragdolls(
         // contra a posição ANTIGA do pai (que este loop acabou de mover)
         // deslocava a cadeia inteira pelo passo do pai — a pélvis andava e o
         // tronco/cabeça/membros ficavam para trás. Os ossos chegam por ordem
-        // pai→filho (depth-first do `start_ragdolls`), por isso o delta do pai
-        // já está no map.
+        // pai→filho (depth-first do `start_ragdolls`) e `ancestor_delta` sobe
+        // a hierarquia: entre dois ossos da cadeia pode haver um osso
+        // intermédio (pescoço, ombro) que também "andou" com o pai.
         let mut moved: std::collections::HashMap<Entity, Vec3> = std::collections::HashMap::new();
         for (body, bone) in active.bodies.iter().zip(active.bones.iter()) {
             let Ok(body_xf) = bodies.get(*body) else {
@@ -224,7 +259,7 @@ pub fn drive_ragdolls(
                 continue;
             };
             let world = body_xf.translation();
-            let parent_delta = moved.get(&parent).copied().unwrap_or(Vec3::ZERO);
+            let parent_delta = ancestor_delta(&moved, &parents, parent);
             let local = parent_g
                 .affine()
                 .inverse()
@@ -310,6 +345,28 @@ mod tests {
         assert!(ragdoll_expired(2.5, 2.5));
     }
 
+    /// Os rigs do Vael (bosses incluídos) usam `spine_01`, `upperarm_l`,
+    /// `thigh_l`. Sem estes sinónimos a cadeia nem chegava aos 3 ossos e o
+    /// `ragdoll="true"` dos bosses não fazia nada.
+    #[test]
+    fn kind_of_matches_the_pipeline_rigs() {
+        for (name, kind) in [
+            ("pelvis", "pelvis"),
+            ("Hips", "pelvis"),
+            ("spine_01", "spine"),
+            ("spine_03", "spine"),
+            ("Spine2", "spine"),
+            ("Head", "head"),
+            ("upperarm_l", "leftarm"),
+            ("upperarm_r", "rightarm"),
+            ("thigh_l", "leftupleg"),
+            ("thigh_r", "rightupleg"),
+        ] {
+            assert_eq!(kind_of(name), Some(kind), "{name}");
+        }
+        assert_eq!(kind_of("Mesh"), None);
+    }
+
     #[test]
     fn marked_corpse_with_bones_spawns_bodies() {
         let mut app = App::new();
@@ -360,5 +417,80 @@ mod tests {
         let active = app.world().get::<RagdollActive>(creature);
         assert!(active.is_some(), "ossos suficientes abrem o ragdoll");
         assert!(active.unwrap().bodies.len() >= 3);
+    }
+
+    /// O `drive_ragdolls` corre no MESMO frame do `start_ragdolls`, antes da
+    /// propagação de transforms: os corpos nascem com `GlobalTransform`
+    /// semeado, senão o 1.º tick lia a identidade e colava a cadeia à origem
+    /// do rig (um frame de boneco amassado no início de cada ragdoll).
+    #[test]
+    fn the_first_drive_frame_keeps_the_bones_in_place() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::transform::TransformPlugin);
+        app.add_systems(
+            bevy::app::PostUpdate,
+            (start_ragdolls, drive_ragdolls).chain(),
+        );
+
+        let armature = app
+            .world_mut()
+            .spawn((
+                Name::new("Armature"),
+                Transform::from_xyz(100.0, 5.0, 0.0),
+                GlobalTransform::from_xyz(100.0, 5.0, 0.0),
+            ))
+            .id();
+        let pelvis = app
+            .world_mut()
+            .spawn((
+                Name::new("Pelvis"),
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                GlobalTransform::from_xyz(100.0, 6.0, 0.0),
+                ChildOf(armature),
+            ))
+            .id();
+        let spine = app
+            .world_mut()
+            .spawn((
+                Name::new("Spine"),
+                Transform::from_xyz(0.0, 0.4, 0.0),
+                GlobalTransform::from_xyz(100.0, 6.4, 0.0),
+                ChildOf(pelvis),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Name::new("Head"),
+            Transform::from_xyz(0.0, 0.4, 0.0),
+            GlobalTransform::from_xyz(100.0, 6.8, 0.0),
+            ChildOf(spine),
+        ));
+        app.world_mut().spawn((
+            RagdollDeath,
+            Corpse { timer: 8.0 },
+            Transform::default(),
+            GlobalTransform::default(),
+            crate::animation::test_animator(armature),
+        ));
+
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .query::<&RagdollActive>()
+                .iter(app.world())
+                .next()
+                .is_some(),
+            "o ragdoll tem de abrir e ser conduzido no MESMO frame"
+        );
+        let local = app
+            .world()
+            .get::<Transform>(pelvis)
+            .expect("pélvis viva")
+            .translation;
+        assert!(
+            (local - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-3,
+            "a pélvis saltou para {local:?} — o corpo leu um GlobalTransform identidade"
+        );
     }
 }

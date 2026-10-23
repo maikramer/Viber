@@ -181,18 +181,12 @@ pub fn parse_collider(value: &str) -> (ColliderShape, Option<String>) {
             (ColliderShape::Mesh { url, anchor }, None)
         }
         "sphere" | "ball" => {
-            let radius = get("radius")
-                .and_then(|r| r.parse::<f32>().ok())
-                .unwrap_or(0.5);
+            let radius = finite_or_default(get("radius"), 0.5);
             (ColliderShape::Sphere { radius }, None)
         }
         "cylinder" => {
-            let radius = get("radius")
-                .and_then(|r| r.parse::<f32>().ok())
-                .unwrap_or(0.5);
-            let half_height = get("half-height")
-                .and_then(|h| h.parse::<f32>().ok())
-                .unwrap_or(0.5);
+            let radius = finite_or_default(get("radius"), 0.5);
+            let half_height = finite_or_default(get("half-height"), 0.5);
             (
                 ColliderShape::Cylinder {
                     radius,
@@ -202,12 +196,8 @@ pub fn parse_collider(value: &str) -> (ColliderShape, Option<String>) {
             )
         }
         "capsule" => {
-            let radius = get("radius")
-                .and_then(|r| r.parse::<f32>().ok())
-                .unwrap_or(0.5);
-            let half_height = get("half-height")
-                .and_then(|h| h.parse::<f32>().ok())
-                .unwrap_or(0.5);
+            let radius = finite_or_default(get("radius"), 0.5);
+            let half_height = finite_or_default(get("half-height"), 0.5);
             (
                 ColliderShape::Capsule {
                     radius,
@@ -352,15 +342,31 @@ fn bare_body_kind(value: &str) -> Option<BodyKind> {
 fn parse_vec3(value: &str) -> Option<Vec3> {
     // Um token inválido era DESCARTADO: `size: 2 foo bar` virava [2] e era
     // aceite como cubo uniforme 2×2×2. Qualquer token inválido rejeita.
+    // `NaN`/`inf` parseiam como f32 mas produziam um collider degenerado
+    // (infinito) — o mesmo tratamento de qualquer outro lixo.
     let mut parts = Vec::new();
     for token in value.split([' ', ',']).filter(|p| !p.trim().is_empty()) {
-        parts.push(token.trim().parse::<f32>().ok()?);
+        let part = token.trim().parse::<f32>().ok()?;
+        if !part.is_finite() {
+            return None;
+        }
+        parts.push(part);
     }
     match parts.len() {
         1 => Some(Vec3::splat(parts[0])),
         3 => Some(Vec3::new(parts[0], parts[1], parts[2])),
         _ => None,
     }
+}
+
+/// Número positivo finito do component-string, ou o default. `NaN`/`inf`
+/// passavam pelo `parse` e viravam um `Collider::ball(inf)` (AABB infinito,
+/// física NaN); um valor inválido cai no default como os restantes.
+fn finite_or_default(value: Option<String>, default: f32) -> f32 {
+    value
+        .and_then(|raw| raw.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
 }
 
 // ------------------------------------------------------------------ runtime
@@ -506,7 +512,12 @@ pub fn body_bundle(
         BodyKind::Dynamic => RigidBody::Dynamic,
         BodyKind::Kinematic => RigidBody::KinematicPositionBased,
     };
-    Some((body, GravityScale(gravity_scale.unwrap_or(1.0))))
+    // `gravity-scale: inf/NaN` (parse de f32 aceita-os) fazia o corpo
+    // dinâmico ganhar velocidade infinita/NaN no 1.º passo. Não finito = 1.
+    let gravity = gravity_scale
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0);
+    Some((body, GravityScale(gravity)))
 }
 
 /// Builds the collider for a shape that needs no asset (explicit box,
@@ -1235,6 +1246,13 @@ mod tests {
         let (shape, warning) = parse_collider("shape: box; size: 1 2");
         assert_eq!(shape, ColliderShape::None);
         assert!(warning.is_some(), "2-value box size is reported");
+        // `inf`/`NaN` parseiam como f32 mas degeneravam o collider (caixa
+        // infinita, física NaN): tratados como qualquer valor inválido.
+        for bad in ["shape: box; size: 1 inf 1", "shape: box; size: NaN"] {
+            let (shape, warning) = parse_collider(bad);
+            assert_eq!(shape, ColliderShape::None, "{bad}");
+            assert!(warning.is_some(), "{bad} tem de avisar");
+        }
         // `size` absent keeps the unit-box default (documented shorthand).
         let (shape, _) = parse_collider("shape: box");
         assert_eq!(
@@ -1327,6 +1345,11 @@ mod tests {
         let (body, gravity) = body_bundle(BodyKind::Dynamic, None).expect("dynamic body");
         assert!(matches!(body, RigidBody::Dynamic));
         assert_eq!(gravity.0, 1.0, "gravity scale defaults to 1");
+        // `gravity-scale: inf`/`NaN` no XML: 1.0 em vez de velocidade infinita.
+        for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let (_, gravity) = body_bundle(BodyKind::Dynamic, Some(bad)).expect("dynamic body");
+            assert_eq!(gravity.0, 1.0, "gravity scale {bad} cai no default");
+        }
     }
 
     #[test]
@@ -1385,15 +1408,43 @@ pub fn column_xz_distance(p: Vec3, coords: UVec2, half: f32, edge: f32) -> f32 {
     ((p.x - cx) * (p.x - cx) + (p.z - cz) * (p.z - cz)).sqrt()
 }
 
-/// Há chão de terreno carregado sob o herói?
+/// Menor distância XZ de QUALQUER âncora (todos os heróis) ao AABB da coluna.
+///
+/// O streaming escolhia só o primeiro player: em co-op o segundo não tinha
+/// collider de terreno debaixo dos pés (caía pelo mundo) e o `ready` global
+/// mentia — dizia "há chão" porque o primeiro estava numa coluna assada.
+/// `INFINITY` quando não há âncoras.
+pub fn nearest_column_distance(points: &[Vec3], coords: UVec2, half: f32, edge: f32) -> f32 {
+    points
+        .iter()
+        .map(|point| column_xz_distance(*point, coords, half, edge))
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Há chão de terreno carregado sob cada herói?
 ///
 /// Publicado por [`stream_voxel_colliders`] a cada frame. O player só recorre
-/// ao chão analítico (`surface_below`) quando `ready == false` — arranque,
-/// teleporte para coluna ainda por assar. Com chão carregado, o collider é a
-/// autoridade e "não grounded" é airborne legítimo, não desculpa para snap.
+/// ao chão analítico (`surface_below`) quando o SEU estado é `false` —
+/// arranque, teleporte para coluna ainda por assar. Com chão carregado, o
+/// collider é a autoridade e "não grounded" é airborne legítimo, não desculpa
+/// para snap.
+///
+/// `ready_players` é por ENTIDADE (co-op): um `ready` global dizia "há chão"
+/// porque o player 1 estava numa coluna assada e desligava o chão analítico do
+/// player 2, que caía pelo terreno ainda por assar. `ready` continua a ser o
+/// agregado (algum herói com chão) para quem não tem a entidade à mão.
 #[derive(Debug, Resource, Default)]
 pub struct TerrainCollisionStatus {
     pub ready: bool,
+    /// Heróis cuja coluna (a que os contém) já tem collider.
+    pub ready_players: std::collections::HashSet<Entity>,
+}
+
+impl TerrainCollisionStatus {
+    /// O herói `entity` tem collider de terreno debaixo dos pés?
+    pub fn is_ready(&self, entity: Entity) -> bool {
+        self.ready_players.contains(&entity)
+    }
 }
 
 /// Triângulos acumulados das caixas de UMA coluna voxel, prontos para assar.
@@ -1491,7 +1542,7 @@ pub fn stream_voxel_colliders(
     mut commands: Commands,
     mut status: ResMut<TerrainCollisionStatus>,
     runtime: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
-    players: Query<&GlobalTransform, With<crate::player::Player>>,
+    players: Query<(Entity, &GlobalTransform), With<crate::player::Player>>,
     cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::player::Player>)>,
     columns: Query<(
         Entity,
@@ -1504,14 +1555,24 @@ pub fn stream_voxel_colliders(
     mut repairs: Local<u32>,
 ) {
     status.ready = false;
+    status.ready_players.clear();
     let Some(runtime) = runtime else { return };
-    let Some(anchor) = players.iter().next().or_else(|| cameras.iter().next()) else {
+    // TODOS os heróis: cada um precisa da coluna debaixo dos pés. Sem
+    // âncora de jogador (menu/editor) a câmara decide onde assar.
+    let player_anchors: Vec<(Entity, Vec3)> = players
+        .iter()
+        .map(|(entity, global)| (entity, global.translation()))
+        .collect();
+    let mut anchors: Vec<Vec3> = player_anchors.iter().map(|(_, pos)| *pos).collect();
+    if anchors.is_empty() {
+        anchors.extend(cameras.iter().take(1).map(GlobalTransform::translation));
+    }
+    if anchors.is_empty() {
         return;
-    };
+    }
     if runtime.spec.collision_resolution == 0 {
         return;
     }
-    let cam = anchor.translation();
     let keep_within = collision_keep_within(&runtime.spec);
     let drop_beyond = keep_within * 1.25;
     let half = runtime.spec.world_size * 0.5;
@@ -1519,12 +1580,12 @@ pub fn stream_voxel_colliders(
     *repairs = 0;
 
     for (entity, column, has_collider, children) in &columns {
-        let distance = column_xz_distance(cam, column.coords, half, edge);
+        let distance = nearest_column_distance(&anchors, column.coords, half, edge);
         match (has_collider.is_some(), distance) {
             (true, d) if d <= keep_within => {
                 // `ready` é "há chão SOB os pés", não "há chão algures na
-                // banda": `column_xz_distance` dá 0 só para a coluna que
-                // CONTÉM o herói. Com o teste antigo (`d <= keep_within`,
+                // banda": a distância mínima é 0 só para a coluna que
+                // CONTÉM algum herói. Com o teste antigo (`d <= keep_within`,
                 // ~192 m) qualquer coluna vizinha ainda assada punha
                 // `ready = true` depois de um teleporte, o chão analítico
                 // do `player_movement` desligava-se e o herói atravessava o
@@ -1532,6 +1593,14 @@ pub fn stream_voxel_colliders(
                 // vila e ele caía até y≈2 (repro 2026-09-12).
                 if d <= 0.0 {
                     status.ready = true;
+                    // Marca QUEM está dentro desta coluna assada (co-op): o
+                    // `player_movement` consulta o próprio herói, não o
+                    // agregado.
+                    for (player, pos) in &player_anchors {
+                        if column_xz_distance(*pos, column.coords, half, edge) <= 0.0 {
+                            status.ready_players.insert(*player);
+                        }
+                    }
                 }
             }
             // try_* e não insert/remove: as colunas MORREM sob os pés deste
@@ -1614,6 +1683,20 @@ mod terrain_collider_tests {
         );
     }
 
+    /// Co-op: o "chão pronto" é POR HERÓI. O estado global dizia que havia
+    /// chão (o player 1 estava numa coluna assada) e desligava o chão
+    /// analítico do player 2, que caía pelo terreno ainda por assar.
+    #[test]
+    fn test_terrain_ready_is_tracked_per_player() {
+        let mut status = TerrainCollisionStatus::default();
+        let first = Entity::from_raw_u32(11).expect("id de teste");
+        let second = Entity::from_raw_u32(12).expect("id de teste");
+        status.ready = true;
+        status.ready_players.insert(first);
+        assert!(status.is_ready(first));
+        assert!(!status.is_ready(second), "o 2.º herói ainda não tem chão");
+    }
+
     #[test]
     fn test_the_baked_collider_is_a_trimesh_with_pseudo_normals() {
         // FIX_INTERNAL_EDGES povoa pseudo-normais — é o que impede o
@@ -1645,6 +1728,30 @@ mod terrain_collider_tests {
         // Fora: distância euclidiana ao rectângulo, Y ignorado.
         let d = column_xz_distance(Vec3::new(80.0, 0.0, 30.0), coords, half, edge);
         assert!((d - 16.0).abs() < 1e-4, "d={d}");
+    }
+
+    /// Co-op: a coluna mantém-se assada se QUALQUER herói estiver na banda, e
+    /// o `ready` é verdadeiro quando qualquer um está dentro dela. Olhar só o
+    /// primeiro herói deixava o segundo sem collider (queda pelo mundo).
+    #[test]
+    fn test_nearest_column_distance_covers_every_player() {
+        let (half, edge) = (128.0_f32, 64.0_f32);
+        let coords = UVec2::new(2, 2); // XZ [0, 64]²
+        let players = [Vec3::new(500.0, 0.0, 500.0), Vec3::new(10.0, 0.0, 30.0)];
+        assert_eq!(
+            nearest_column_distance(&players, coords, half, edge),
+            0.0,
+            "o segundo herói está dentro da coluna"
+        );
+        // Ambos fora: fica a MENOR distância (16 m para (80,30)).
+        let players = [Vec3::new(500.0, 0.0, 500.0), Vec3::new(80.0, 0.0, 30.0)];
+        let d = nearest_column_distance(&players, coords, half, edge);
+        assert!((d - 16.0).abs() < 1e-4, "d={d}");
+        assert_eq!(
+            nearest_column_distance(&[], coords, half, edge),
+            f32::INFINITY,
+            "sem âncoras nada fica assado"
+        );
     }
 }
 
@@ -1743,6 +1850,19 @@ mod shape_collider_tests {
             ColliderShape::Capsule {
                 radius: 0.5,
                 half_height: 0.5
+            }
+        );
+
+        // Non-finite dimensions fall back to the default instead of building
+        // an infinite collider (the physics/AABB math becomes NaN).
+        let (shape, _) = parse_collider("shape: sphere; radius: inf");
+        assert_eq!(shape, ColliderShape::Sphere { radius: 0.5 });
+        let (shape, _) = parse_collider("shape: cylinder; radius: NaN; half-height: 2");
+        assert_eq!(
+            shape,
+            ColliderShape::Cylinder {
+                radius: 0.5,
+                half_height: 2.0
             }
         );
 

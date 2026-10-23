@@ -77,8 +77,18 @@ impl Default for SenseMemory {
     }
 }
 
+/// Um som é ouvido se a intensidade na distância chegar ao limiar.
+///
+/// Distância zero é o caso MAIS alto, não um caso inválido: a guarda antiga
+/// (`dist > 0.05`) fazia a criatura ignorar um ruído exatamente em cima dela —
+/// o impacto de uma bomba nos próprios pés, ou o `HitReact` dela própria, que
+/// o `hear_combat` publica na posição da vítima. O piso de 5 cm é só para não
+/// dividir por zero; não finito não é audível.
 pub fn hears(loudness: f32, dist: f32) -> bool {
-    dist > 0.05 && loudness / dist >= HEAR_THRESHOLD
+    loudness.is_finite()
+        && dist.is_finite()
+        && dist >= 0.0
+        && loudness / dist.max(0.05) >= HEAR_THRESHOLD
 }
 
 pub fn in_view(forward: Vec3, to_target: Vec3, range: f32) -> bool {
@@ -112,6 +122,10 @@ pub fn sense_step(
         EnemyState::Chase if saw => (EnemyState::Chase, 0.0, 0.0),
         EnemyState::Chase => (EnemyState::Search, 0.0, SEARCH_SECS),
         EnemyState::Search if saw => (EnemyState::Chase, 0.0, 0.0),
+        // Um som NOVO renova a busca: sem isto, um ruído ouvido no frame em
+        // que o timer expirava era ignorado (o `last_known` era atualizado
+        // mas a criatura desistia no frame seguinte).
+        EnemyState::Search if heard => (EnemyState::Search, 0.0, SEARCH_SECS),
         EnemyState::Search if search_left <= dt => (EnemyState::Wander, 0.0, 0.0),
         EnemyState::Search => (EnemyState::Search, 0.0, (search_left - dt).max(0.0)),
         EnemyState::Wander => (EnemyState::Wander, 0.0, 0.0),
@@ -165,6 +179,14 @@ pub struct HeardNoise {
 #[derive(Component)]
 pub struct NoisePing(pub Vec3);
 
+/// Rotação do ponto de partida do orçamento de raios de visão.
+///
+/// Sem isto os primeiros [`SENSE_RAYS_PER_FRAME`] inimigos da query (ordem
+/// estável) consumiam TODOS os raios em todos os frames: os restantes nunca
+/// eram testados e ficavam cegos para sempre, mesmo de frente para o herói.
+#[derive(Resource, Default)]
+pub struct SenseCursor(pub usize);
+
 /// Golpes e impactos entram no barramento como audição.
 pub fn hear_combat(
     mut commands: Commands,
@@ -207,13 +229,18 @@ pub fn sense_ai(world: &mut World) {
         world.init_resource::<SenseBus>();
         world.init_resource::<SenseInbox>();
     }
+    if world.get_resource::<SenseCursor>().is_none() {
+        world.insert_resource(SenseCursor::default());
+    }
     let dt = world.resource::<Time>().delta_secs().max(0.0);
     let events = std::mem::take(&mut world.resource_mut::<SenseBus>().events);
-    let player = world
+    // TODOS os heróis: com co-op, ver só o primeiro deixava o segundo
+    // invisível (os inimigos perseguiam sempre o player 1).
+    let players: Vec<Vec3> = world
         .query_filtered::<&GlobalTransform, With<crate::player::Player>>()
         .iter(world)
-        .next()
-        .map(|g| g.translation());
+        .map(GlobalTransform::translation)
+        .collect();
 
     let mut rays = 0usize;
     let mut pending_loco: Vec<(Entity, Vec2, f32, Vec2)> = Vec::new();
@@ -230,7 +257,17 @@ pub fn sense_ai(world: &mut World) {
         .iter(world)
         .collect();
 
-    for entity in enemies {
+    // A janela de quem recebe raio roda um inimigo por frame; sem isto os
+    // últimos da lista nunca eram testados (ver [`SenseCursor`]).
+    let start = {
+        let mut cursor = world.resource_mut::<SenseCursor>();
+        let start = cursor.0;
+        cursor.0 = cursor.0.wrapping_add(1);
+        start
+    };
+
+    for offset in 0..enemies.len() {
+        let entity = enemies[(start.wrapping_add(offset)) % enemies.len()];
         if world.get::<SenseMemory>(entity).is_none() {
             pending_memory.push(entity);
             continue;
@@ -249,16 +286,30 @@ pub fn sense_ai(world: &mut World) {
         let here = Vec2::new(xf.x, xf.z);
 
         let mut saw = false;
+        let mut seen_pos: Option<Vec3> = None;
         let mut heard_pos: Option<Vec2> = None;
-        if let Some(player) = player {
-            let to = player - xf;
-            if in_view(forward, to, SEE_RANGE) && rays < SENSE_RAYS_PER_FRAME {
-                rays += 1;
-                let origin = xf + Vec3::Y * 1.4;
-                let aim = player + Vec3::Y * 1.0;
-                let dist = origin.distance(aim);
-                let blocked = los_hit(world, origin, aim).is_some_and(|toi| toi + LOS_SLACK < dist);
-                saw = !blocked;
+        // Candidatos no cone/alcance, do mais perto ao mais longe: um segundo
+        // player atrás de uma parede (ou do primeiro) ainda é visto se houver
+        // orçamento de raios.
+        let mut candidates: Vec<(f32, Vec3)> = players
+            .iter()
+            .filter(|player| in_view(forward, **player - xf, SEE_RANGE))
+            .map(|player| (player.distance(xf), *player))
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, target) in candidates {
+            if rays >= SENSE_RAYS_PER_FRAME {
+                break;
+            }
+            rays += 1;
+            let origin = xf + Vec3::Y * 1.4;
+            let aim = target + Vec3::Y * 1.0;
+            let dist = origin.distance(aim);
+            let blocked = los_hit(world, origin, aim).is_some_and(|toi| toi + LOS_SLACK < dist);
+            if !blocked {
+                saw = true;
+                seen_pos = Some(target);
+                break;
             }
         }
         for event in &events {
@@ -282,10 +333,8 @@ pub fn sense_ai(world: &mut World) {
                 memory.search_left,
                 dt,
             );
-            let last = if saw {
-                player
-                    .map(|p| Vec2::new(p.x, p.z))
-                    .unwrap_or(memory.last_known)
+            let last = if let Some(seen) = seen_pos {
+                Vec2::new(seen.x, seen.z)
             } else if let Some(p) = heard_pos {
                 p
             } else {
@@ -319,8 +368,12 @@ pub fn sense_ai(world: &mut World) {
             pulses.push((entity, SenseKind::Hear));
         }
 
+        // Chase implica ter visto NESTE frame (`sense_step`); o fallback ao
+        // primeiro herói só cobre um estado forçado por script/bridge.
         let goal = match state {
-            EnemyState::Chase => player.map(|p| Vec2::new(p.x, p.z)),
+            EnemyState::Chase => seen_pos
+                .map(|p| Vec2::new(p.x, p.z))
+                .or_else(|| players.first().map(|p| Vec2::new(p.x, p.z))),
             EnemyState::Search => Some(last_known),
             EnemyState::Alert => None,
             EnemyState::Wander => home,
@@ -376,6 +429,7 @@ impl Plugin for SensesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SenseBus>()
             .init_resource::<SenseInbox>()
+            .init_resource::<SenseCursor>()
             .add_message::<HeardNoise>()
             .add_systems(Update, hear_combat.before(crate::ai::enemy_ai));
     }
@@ -389,6 +443,19 @@ mod tests {
     fn a_wall_of_distance_blocks_hearing_but_a_blow_at_twenty_metres_does_not() {
         assert!(!hears(HEAR_MELEE, 40.0));
         assert!(hears(HEAR_MELEE, 20.0));
+    }
+
+    /// O ruído EM CIMA do ouvinte (bomba nos pés, o próprio HitReact) tem de
+    /// ser ouvido — era o único ponto que a guarda `dist > 0.05` rejeitava.
+    #[test]
+    fn a_noise_at_the_listeners_feet_is_heard() {
+        assert!(hears(HEAR_SHOT, 0.0));
+        assert!(hears(HEAR_MELEE, 0.01));
+        // Silêncio continua silêncio; lixo numérico não é som.
+        assert!(!hears(0.0, 0.0));
+        assert!(!hears(f32::NAN, 1.0));
+        assert!(!hears(HEAR_SHOT, f32::NAN));
+        assert!(!hears(HEAR_SHOT, -1.0));
     }
 
     #[test]
@@ -415,5 +482,17 @@ mod tests {
         assert!(alert > 0.0);
         let (state, _, _) = sense_step(EnemyState::Alert, true, false, alert, 0.0, 0.016);
         assert_eq!(state, EnemyState::Chase);
+    }
+
+    /// Um som NOVO renova a busca: no frame em que o timer ia expirar, o
+    /// ruído tem de manter a criatura à procura, não mandá-la pastar.
+    #[test]
+    fn a_fresh_noise_extends_the_search() {
+        let (state, _, search) = sense_step(EnemyState::Search, false, true, 0.0, 0.01, 0.1);
+        assert_eq!(state, EnemyState::Search);
+        assert!((search - SEARCH_SECS).abs() < 1e-5, "{search}");
+        // Sem som, o mesmo timer expira.
+        let (state, _, _) = sense_step(EnemyState::Search, false, false, 0.0, 0.01, 0.1);
+        assert_eq!(state, EnemyState::Wander);
     }
 }

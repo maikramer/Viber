@@ -1123,6 +1123,12 @@ fn build_static_scene(
                 continue;
             };
             let target = node_of(&doc, spawner, "vegetation")?;
+            if target.is_root() {
+                anyhow::bail!(
+                    "vegetation na raiz de {}: envolve-a num <Group> (o bake escreve o atributo `instances` no nó)",
+                    doc.relative_path(target.file)
+                );
+            }
             let file = out_dir
                 .join("veg")
                 .join(format!("{vegetation_index:03}.vinst"));
@@ -1167,6 +1173,14 @@ fn build_static_scene(
             .get(spawner_index)
             .ok_or_else(|| anyhow::anyhow!("nó do spawner {spawner_index} fora do documento"))?;
         let target = node_of(&doc, spawner, "spawner")?;
+        // A receita `<Scatter>` e o grupo gerado são IRMÃOS: a raiz de um
+        // ficheiro não tem onde os pôr (e `doc.node_mut` do raiz não existe).
+        if target.is_root() {
+            anyhow::bail!(
+                "spawner na raiz de {}: envolve-o num <Group> (o bake emite o grupo de instâncias ao lado)",
+                doc.relative_path(target.file)
+            );
+        }
         // Grupo que resolveu 0 instâncias NÃO se emite — nem o `<Scatter>` nem
         // o `<Group generated-by>`: não há nada para regenerar nem para
         // mostrar, e o spawner original não existe no lado estático (o

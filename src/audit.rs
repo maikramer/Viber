@@ -427,6 +427,20 @@ fn collect_entities(
                         });
                     }
                 }
+                // O collider do template também é um ficheiro: sem este braço
+                // um `mesh-url` em falta só aparecia no `PendingCollider` do
+                // arranque (fallback de AABB) — o analyze dizia "ok".
+                if let Some(url) = match &spec.template_collider {
+                    Some(ColliderShape::Mesh { url, .. })
+                    | Some(ColliderShape::Precompute { url }) => Some(url),
+                    _ => None,
+                } {
+                    refs.push(AssetRef {
+                        kind: RefKind::Glb,
+                        path: resolve_asset(asset_roots, url),
+                        context: format!("<GLTFLoader collider mesh-url=\"{url}\"> {label}"),
+                    });
+                }
                 // `<Creature script="…">` corre a partir do dir de scripts do
                 // jogo, como qualquer `script=` de entidade.
                 if let Some(script) = &spec.template_script {
@@ -1733,6 +1747,40 @@ mod tests {
                 .iter()
                 .any(|issue| issue.severity == Severity::Missing
                     && issue.message.contains("a_lod1.glb")),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    /// O collider de um template de spawner é uma referência de ficheiro como
+    /// as outras: um `mesh-url` em falta tem de sair no `analyze` (antes só o
+    /// `PendingCollider` do arranque avisava, com fallback de AABB).
+    #[test]
+    fn test_spawner_template_collider_mesh_is_audited() {
+        let (_dir, world_dir, asset_root) = setup();
+        std::fs::write(
+            asset_root.join("assets/meshes/rocha.glb"),
+            glb_bytes(None),
+        )
+        .unwrap();
+        let nodes = crate::xml::parse_fragment(
+            r#"<StaticSpawner count="2">
+                 <GameObject collider="shape: trimesh; mesh-url: /assets/meshes/rocha_collision.glb">
+                   <GLTFLoader url="/assets/meshes/rocha.glb" />
+                 </GameObject>
+               </StaticSpawner>"#,
+        )
+        .unwrap();
+        let world = crate::recipes::parse_world(&[], &nodes).unwrap();
+        let report = audit(
+            &world,
+            &world_dir,
+            &[asset_root.clone()],
+            &crate::config::fixture(),
+        );
+        assert!(
+            report.issues.iter().any(|issue| issue.severity == Severity::Missing
+                && issue.message.contains("rocha_collision.glb")),
             "{:?}",
             report.issues
         );
