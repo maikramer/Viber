@@ -300,6 +300,11 @@ de script.
 | `viber.road_at(s)` | ponto na estrada mais longa ao arco `s` (m), o mesmo formato mais `x`/`z` |
 | `viber.set_pose(x, y, z, yaw [, id])` | pose local; sem `id` = a própria; a escala fica |
 | `viber.own_system("locomotion")` | o `player_movement` cala; o script escreve o corpo |
+| `viber.release_system(nome)` | o inverso de `own_system`: devolve o sistema ao handler nativo (ex.: largar `locomotion` e o herói voltar a andar) |
+| `viber.set_visible(visivel [, id])` | esconde/mostra a entidade e a SUBÁRVORE (`Visibility` propaga aos filhos); sem `id` = a própria. Fica fora do save |
+| `viber.camera_free(ativo)` | a câmara de JOGO passa a ser escrita por script (`camera_pose`). `false` devolve a pose ao rig de terceira pessoa no frame seguinte; post-FX/tone mapping/HUD mantêm-se (é a MESMA `Camera3d`) |
+| `viber.camera_pose(x, y, z, alvo_x, alvo_y, alvo_z)` | pose do modo livre: olho + ponto olhado (look-at). Inerte sem `camera_free(true)` |
+| `viber.camera_state()` | `{x,y,z,yaw,pitch}` da câmara de jogo — **direção de vista** em graus (`forward = (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)`), a convenção do `camera_pose`; `nil` sem câmara. Atualizado no frame anterior |
 | `viber.sound_loop(id, clip [, {pitch, volume, x, y, z}])` | loop no bus de SFX; `clip` = registry ou caminho sob `sfx_dir` |
 | `viber.sound_stop(id)` | pára esse loop |
 | `viber.music.layer(nome)` | força a layer de BGM; `nil` devolve a zona automática |
@@ -394,7 +399,7 @@ com `Health`), `viber.radial_damage` e `viber.fire_projectile`.
 |--------|-------|
 | `viber.fire_projectile(id [, x, y, z])` | dispara um projétil do `<ProjectileTemplate id=…>` do mundo, da boca da entidade (+1.2 m) para o peito do herói (+1.1 m) ou para o ponto dado; devolve `false` sem herói nem alvo. A facção do template decide quem leva o dano (`enemy` → herói; `player` → criaturas com `Health`; `neutral` → só terreno); `gravity > 0` faz arco balístico. O acerto emite o evento `hit` para o Lua. Template desconhecido = warn 1× e o disparo cai |
 | `viber.topple([id])` | tomba a entidade com física genérica (`physics_fx::Falling`) e despawna no fim; a regra de quando tombar é do script |
-| `viber.teleport_player(x, y, z)` | move o herói (teleporte: atravessa tudo — para viagens, não para dash) |
+| `viber.teleport_player(x, y, z [, id])` | move o herói (teleporte: atravessa tudo — para viagens, não para dash). O **Y de aterragem é resolvido pela FÍSICA**: um raio desce de `y+2` e assenta na primeira superfície sólida (props, plataformas, pontes, terreno); sem collider nenhum cai para o terreno analítico. O `x`/`z` pedidos ficam. `id` = entidade a IGNORAR no raio (o próprio marco: um poço/torre não serve de chão por cima de si) |
 | `viber.push_player(dx, dz)` | desloca o herói ~(dx, dz) m pelo character controller (colide com muros — o dash certo). I-frames são regra do jogo (Lua) |
 
 ## Quests

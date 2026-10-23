@@ -89,6 +89,11 @@ pub fn create_world_project(target_dir: &Path) -> Result<PathBuf> {
     let config_path = target_dir.join(crate::config::CONFIG_FILE);
     fs::write(&config_path, CONFIG_YAML_TEMPLATE)
         .with_context(|| format!("writing {}", config_path.display()))?;
+    // O template declara `game.scripts_dir: scripts`; sem a pasta o watcher
+    // do hot-reload falha o `watch()` e cada arranque avisava
+    // "hot-reload desativado (watcher falhou: …)" num projeto acabado de criar.
+    fs::create_dir_all(target_dir.join("scripts"))
+        .with_context(|| format!("creating {}", target_dir.join("scripts").display()))?;
     Ok(world_path)
 }
 
@@ -110,6 +115,14 @@ mod tests {
         assert_eq!(map.width, STARTER_TERRAIN_SAMPLES);
         assert!(map.data.iter().all(|&h| h == 0));
         assert_eq!(meta.world_size, Some(128.0));
+        // O config gerado TEM de ser um config que o runtime aceita (o
+        // template é o contrato do `viber create`), e a pasta que ele declara
+        // (`scripts/`) tem de existir para o hot-reload não avisar.
+        let config = crate::config::load(&tmp.path().join("demo")).unwrap();
+        assert_eq!(config.title, None);
+        let demo = tmp.path().join("demo");
+        assert_eq!(config.scripts_dir_on(&demo), demo.join("scripts"));
+        assert!(demo.join("scripts").is_dir());
         assert!(
             create_world_project(&tmp.path().join("demo")).is_err(),
             "nunca sobrescreve"

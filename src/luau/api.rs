@@ -10,7 +10,7 @@ use super::commands::ScriptCommand;
 use super::ctx::ScriptCtx;
 use super::input::key_code_from_str;
 use super::sfx::{SFX_NAME_REGISTRY, sfx_clip_from_str};
-use super::{entity, events, game, input, props, terrain, timers};
+use super::{decision, entity, events, game, input, nlu, props, terrain, timers};
 
 /// Installs the `viber` API table on the VM globals:
 /// `log(msg)`, `time()`, `position()`, `set_position(x, y, z)`,
@@ -671,6 +671,16 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     let x = opts.raw_get::<Option<f32>>("x")?;
                     let y = opts.raw_get::<Option<f32>>("y")?;
                     let z = opts.raw_get::<Option<f32>>("z")?;
+                    // Um NaN aqui seguia para o evento de SFX: a atenuação
+                    // por distância dava NaN e o volume chegava NaN ao mixer
+                    // (o resto das primitivas com posição rejeita não-finitos).
+                    for (axis, value) in [("x", x), ("y", y), ("z", z)] {
+                        if value.is_some_and(|v| !v.is_finite()) {
+                            return Err(mlua::Error::runtime(format!(
+                                "viber.sound('{name}'): {axis} tem de ser finito (NaN/inf)"
+                            )));
+                        }
+                    }
                     if x.is_none() && y.is_none() && z.is_none() {
                         Some(ctx.origin)
                     } else {
@@ -1059,10 +1069,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             // nomeadas (~79k no Vael) e clonar cada nome para depois o deitar
             // fora custava 3–4 ms por chamada — o `harvest.lua` chama isto
             // em todos os frames.
+            // A PRÓPRIA entidade fica de fora: a distância é 0, era sempre a
+            // primeira da lista, e um script que escolhe "o mais próximo"
+            // interagia consigo (o `nearby` é "à volta", não "incluindo").
+            let own = ctx.entity.map(|entity| entity.to_bits() as i64);
             let mut found: Vec<(f32, i64, &str, Vec3)> = ctx
                 .pos_snapshot
                 .iter()
                 .filter_map(|(bits, (name, pos))| {
+                    if Some(*bits) == own {
+                        return None;
+                    }
                     let d = pos.distance(ctx.origin);
                     (d <= radius).then_some((d, *bits, name.as_str(), *pos))
                 })
@@ -1382,39 +1399,35 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     api.set(
         "damage_number",
         lua.create_function(|lua, (text, opts): (String, Option<Table>)| {
-            let (pos, color) = match opts {
-                Some(t) => {
-                    let x = t.raw_get::<f32>("x").ok();
-                    let y = t.raw_get::<f32>("y").ok();
-                    let z = t.raw_get::<f32>("z").ok();
-                    let hex: Option<String> = t.raw_get("color").ok();
-                    let color = match hex {
-                        Some(hex) => Some(
-                            crate::xml::values::parse_color(&hex, "viber.damage_number").map_err(
-                                |e| {
-                                    mlua::Error::runtime(format!(
-                                        "viber.damage_number: cor inválida ({e})"
-                                    ))
-                                },
-                            )?,
-                        ),
-                        None => None,
-                    };
-                    (Some((x, y, z)), color)
+            // Default: 1,8 m acima da entidade. Cada eixo dado SUBSTITUI o
+            // default (um `{y = 3}` era ignorado por exigir x, y e z).
+            let base = lua
+                .app_data_ref::<ScriptCtx>()
+                .map(|ctx| ctx.origin)
+                .unwrap_or_default()
+                + Vec3::Y * 1.8;
+            let mut pos = base;
+            let mut color = None;
+            if let Some(t) = opts {
+                let axis = |name: &str, fallback: f32| {
+                    t.raw_get::<f32>(name)
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .unwrap_or(fallback)
+                };
+                pos = Vec3::new(axis("x", base.x), axis("y", base.y), axis("z", base.z));
+                if let Ok(Some(hex)) = t.raw_get::<Option<String>>("color") {
+                    color = Some(
+                        crate::xml::values::parse_color(&hex, "viber.damage_number").map_err(
+                            |e| {
+                                mlua::Error::runtime(format!(
+                                    "viber.damage_number: cor inválida ({e})"
+                                ))
+                            },
+                        )?,
+                    );
                 }
-                None => (None, None),
-            };
-            let pos = match pos {
-                Some((Some(x), Some(y), Some(z)))
-                    if x.is_finite() && y.is_finite() && z.is_finite() =>
-                {
-                    Vec3::new(x, y, z)
-                }
-                _ => {
-                    let ctx = lua.app_data_ref::<ScriptCtx>();
-                    ctx.as_ref().map(|c| c.origin).unwrap_or_default() + Vec3::Y * 1.8
-                }
-            };
+            }
             lua.app_data_mut::<ScriptCtx>()
                 .expect("seeded")
                 .commands
@@ -1489,6 +1502,25 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
                 .push(ScriptCommand::OwnSystem(name));
+            Ok(())
+        })?,
+    )?;
+    // viber.release_system(nome) — devolve o sistema ao handler nativo (o
+    // inverso de `own_system`): o script larga o corpo do herói e o
+    // `player_movement` volta a andar com ele.
+    api.set(
+        "release_system",
+        lua.create_function(|lua, name: String| {
+            if !super::ownership::KNOWN_SYSTEMS.contains(&name.as_str()) {
+                return Err(mlua::Error::runtime(format!(
+                    "viber.release_system: sistema desconhecido '{name}' (válidos: {})",
+                    super::ownership::KNOWN_SYSTEMS.join(", ")
+                )));
+            }
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::ReleaseSystem(name));
             Ok(())
         })?,
     )?;
@@ -1749,16 +1781,25 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     api.set(
         "teleport_player",
-        lua.create_function(|lua, (x, y, z): (f32, f32, f32)| {
+        lua.create_function(|lua, (x, y, z, exclude): (f32, f32, f32, Option<i64>)| {
             if !(x.is_finite() && y.is_finite() && z.is_finite()) {
                 return Err(mlua::Error::runtime(
                     "viber.teleport_player: coordenadas não finitas (NaN/inf)",
                 ));
             }
+            // O `id` opcional NÃO entra no raio de aterragem: teleportar para
+            // um poço/torre não pode pousar o herói em cima do próprio prop.
+            let exclude = match exclude {
+                Some(bits) => Some(super::entity::entity_from_id(bits)?),
+                None => None,
+            };
             lua.app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new")
                 .commands
-                .push(ScriptCommand::TeleportPlayer(Vec3::new(x, y, z)));
+                .push(ScriptCommand::TeleportPlayer {
+                    pos: Vec3::new(x, y, z),
+                    exclude,
+                });
             Ok(())
         })?,
     )?;
@@ -1784,6 +1825,88 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.camera_free(ativo) — a câmara de JOGO passa a ser escrita pelo
+    // script (`camera_pose`). `false` devolve a pose ao rig de terceira
+    // pessoa no frame seguinte. O `OrbitCamera` continua a ser o dono da
+    // câmara: post-FX, tone mapping e HUD não mudam.
+    api.set(
+        "camera_free",
+        lua.create_function(|lua, active: bool| {
+            lua.app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                .commands
+                .push(ScriptCommand::CameraFree(active));
+            Ok(())
+        })?,
+    )?;
+    // viber.camera_pose(olho_x, olho_y, olho_z, alvo_x, alvo_y, alvo_z) —
+    // pose do modo livre. Sem `camera_free(true)` é inerte.
+    api.set(
+        "camera_pose",
+        lua.create_function(
+            |lua, (x, y, z, tx, ty, tz): (f32, f32, f32, f32, f32, f32)| {
+                if !(x.is_finite()
+                    && y.is_finite()
+                    && z.is_finite()
+                    && tx.is_finite()
+                    && ty.is_finite()
+                    && tz.is_finite())
+                {
+                    return Err(mlua::Error::runtime(
+                        "viber.camera_pose: coordenadas não finitas (NaN/inf)",
+                    ));
+                }
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::CameraPose {
+                        pos: Vec3::new(x, y, z),
+                        look: Vec3::new(tx, ty, tz),
+                    });
+                Ok(())
+            },
+        )?,
+    )?;
+    // viber.camera_state() -> {x,y,z,yaw,pitch} — pose VIVA da câmara de
+    // jogo. `yaw`/`pitch` são a direção de VISTA em graus (forward =
+    // (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)), a mesma convenção
+    // do `camera_pose`. `nil` sem câmara.
+    api.set(
+        "camera_state",
+        lua.create_function(|lua, ()| {
+            let Some((pos, yaw, pitch)) =
+                lua.app_data_ref::<ScriptCtx>().and_then(|ctx| ctx.camera)
+            else {
+                return Ok(mlua::Value::Nil);
+            };
+            let table = lua.create_table()?;
+            table.raw_set("x", pos.x)?;
+            table.raw_set("y", pos.y)?;
+            table.raw_set("z", pos.z)?;
+            table.raw_set("yaw", yaw)?;
+            table.raw_set("pitch", pitch)?;
+            Ok(mlua::Value::Table(table))
+        })?,
+    )?;
+    // viber.set_visible(visivel [, id]) — esconde/mostra a entidade e a
+    // subárvore (a `Visibility` do Bevy propaga aos filhos com Inherited).
+    api.set(
+        "set_visible",
+        lua.create_function(|lua, (visible, id): (bool, Option<i64>)| {
+            let mut ctx = lua
+                .app_data_mut::<ScriptCtx>()
+                .expect("ScriptCtx app data seeded");
+            let entity = match id {
+                Some(bits) => super::entity::entity_from_id(bits)?,
+                None => ctx.entity.ok_or_else(|| {
+                    mlua::Error::runtime("viber.set_visible fora de on_update (sem id)")
+                })?,
+            };
+            ctx.commands
+                .push(ScriptCommand::SetVisible { entity, visible });
+            Ok(())
+        })?,
+    )?;
     // viber.set_player_speed(mult) — multiplicador da velocidade base.
     api.set(
         "set_player_speed",
@@ -2007,9 +2130,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             // O default é o alcance BASE autorado; a escala global entra
             // no `SetInteraction` (um só sítio).
             let range = range.unwrap_or(crate::interact::BASE_RANGE_M);
-            if !range.is_finite() {
+            // Negativo nunca ganha o foco (e o fallback de alcance do
+            // `viber.interacted` também compara com ele): a interação ficava
+            // morta em silêncio. Fora do intervalo = erro de script.
+            if !range.is_finite() || range < 0.0 {
                 return Err(mlua::Error::runtime(
-                    "viber.set_interaction: range não finito (NaN/inf)",
+                    "viber.set_interaction: range tem de ser finito e >= 0",
                 ));
             }
             let mut ctx = lua
@@ -2106,6 +2232,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(ctx) = ctx.as_ref() else {
                 return Ok(false);
             };
+            if ctx.ui_typing {
+                return Ok(false);
+            }
             if !ctx.just_pressed.contains(&code) {
                 return Ok(false);
             }
@@ -2137,6 +2266,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     entity::install(lua, &api)?;
     game::install(lua, &api)?;
     props::install(lua, &api)?;
+    nlu::install(lua, &api)?;
+    decision::install(lua, &api)?;
     super::signals::install(lua, &api)?;
 
     lua.globals().set("viber", api)?;

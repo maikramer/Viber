@@ -56,6 +56,12 @@ pub struct AppOptions {
     /// Entrada de chegada na cena de arranque (`viber run --entry`); numa cena que não é
     /// a principal, omisso = a primeira entrada.
     pub start_entry: Option<String>,
+    /// Mundo COMO O CLI O RECEBEU (antes de o `start-scene` o trocar pela cena de
+    /// arranque): a identidade do `engine.json`/`viber.ping`. O `session up` regista o
+    /// caminho que lhe foi pedido; sem isto a engine registava a cena de menu e o
+    /// `viber debug --world <mundo>` via a porta servida por outro mundo (registo
+    /// "stale"). Omisso = `path` (editores e apps mínimas).
+    pub world_path: Option<PathBuf>,
 }
 
 /// Run condition: scripts Luau correm (tudo menos o modo Edit; sem o
@@ -68,11 +74,6 @@ fn pause_virtual_time(mut time: ResMut<Time<Virtual>>) {
     time.pause();
 }
 
-/// Tamanho do cube shadow map das PointLight (`VIBER_POINT_SHADOW_SIZE`).
-///
-/// Default 1024 (ver o comentário no recurso); `1536` devolve o valor do
-/// passe visual r1. Tem de ser u32 par e >= 4 — o wgpu recusa tamanhos
-/// ímpares em algumas plataformas.
 /// Tamanho do shadow map da DIRECIONAL (`VIBER_DIR_SHADOW_SIZE`, default
 /// 4096). É UMA textura de 4 camadas (~268 MB a 4096, metade a 2048).
 fn dir_shadow_size() -> usize {
@@ -83,6 +84,11 @@ fn dir_shadow_size() -> usize {
         .unwrap_or_else(crate::graphics::dir_shadow_size)
 }
 
+/// Tamanho do cube shadow map das PointLight (`VIBER_POINT_SHADOW_SIZE`).
+///
+/// Default 1024 (ver o comentário no recurso); `1536` devolve o valor do
+/// passe visual r1. Tem de ser u32 par e >= 4 — o wgpu recusa tamanhos
+/// ímpares em algumas plataformas.
 fn point_shadow_size() -> usize {
     std::env::var("VIBER_POINT_SHADOW_SIZE")
         .ok()
@@ -154,6 +160,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         camera_free,
         window_title,
         start_entry,
+        world_path,
     } = opts;
     // Modo Edit: o editor in-process é dono da navegação, do input e da janela — câmara
     // de editor, simulação congelada. O bridge só existe se o editor o pedir
@@ -162,6 +169,20 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Absolute from here on: the asset root and terrain base_dir must not
     // depend on the CWD (bevy resolves relative asset roots against the exe).
     let path = &std::path::absolute(path)?;
+    // O `start-scene` troca a CENA carregada, não o mundo que a engine serve:
+    // a identidade do bridge/sessão é o caminho que o CLI pediu. Registá-la
+    // como a cena de arranque fazia o `viber.ping` responder "menu.xml" a uma
+    // engine pedida como `world.xml`, e o `viber debug --world world.xml`
+    // recusava-a como registo stale.
+    //
+    // Absolutizado como `path`: o `engine.json`/`viber.ping` tem de valer de
+    // qualquer cwd (`session down` e o `debug --world` comparam-no com paths
+    // canónicos). Um "world.xml" relativo só casava no diretório de onde a
+    // engine foi lançada — o `session down` corria noutro e recusava o pid.
+    let identity = match world_path {
+        Some(world_path) => std::path::absolute(world_path)?,
+        None => path.to_path_buf(),
+    };
     let world = load_world(path)?;
     // O runtime só corre mundos ESTÁTICOS (`<world static="true">`): poses finais, terreno
     // pré-gerado, vegetação em `.vinst`. Um mundo procedural é material para `viber bake`,
@@ -189,6 +210,10 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     info!("graphics preset: {}", graphics.name());
     let title = window_title
         .or_else(|| config.title.clone())
+        // `title: ""` no config.yaml é "omisso" (o template documenta
+        // "vazio = nome do world.xml"), não uma janela sem título.
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty())
         .unwrap_or_else(|| {
             format!(
                 "Viber — {}",
@@ -295,9 +320,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // (textures_dir) e o spawn (bgm_dir) leem-no de lá.
     app.insert_resource(config.clone());
     app.insert_resource(save::SaveDir(Some(config.save_dir().to_path_buf())));
-    // Quests do MUNDO, lidas do DISCO (dir do config, default `quests/` ao
-    // lado do world.xml) — o conteúdo deixou de vir embutido na engine. O
-    // insert é ANTES dos plugins: o `init_resource` do QuestsPlugin não
     // O modelo do céu também viaja como resource — o IBL (`ibl.rs`) pinta o
     // cubemap com a MESMA radiância que o domo desenha e os probes regionais
     // (`probes.rs`) usam os mesmos coeficientes. Sem ele os dois lêem `None` e
@@ -413,13 +435,13 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         // --world` valida-o contra o engine.json (registo stale → erro, não
         // mutação do mundo errado).
         app.insert_resource(bridge::BridgeIdentity {
-            world: path.display().to_string(),
+            world: identity.display().to_string(),
         });
         // Regista a engine no registo de sessões MESMO fora de `session up`:
         // assim qualquer `viber debug …` descobre a porta sozinho. Se já há
         // uma engine viva registada (sessão de outro agente), não mexe — o
         // descobridor encontra-a a ela.
-        let session = crate::session::SessionPaths::for_world(path);
+        let session = crate::session::SessionPaths::for_world(&identity);
         let register = match session.engine_info() {
             Some(existing) if existing.pid != std::process::id() => {
                 !bridge::client::port_alive(existing.port)
@@ -430,7 +452,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
             let _ = session.write_engine(&crate::session::EngineInfo {
                 pid: std::process::id(),
                 port,
-                world: path.display().to_string(),
+                world: identity.display().to_string(),
                 started_at_ms: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
@@ -442,7 +464,7 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         // os seus `viber debug` a ESTA engine (e não à de outro agente).
         eprintln!(
             "viber: debug bridge at http://127.0.0.1:{port} — viber debug --world {} … (ou export VIBER_BRIDGE_PORT={port})",
-            path.display()
+            identity.display()
         );
     }
     // Documento editável do mundo (`crate::scene`): a fonte das edições de agentes
@@ -642,6 +664,11 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.init_resource::<camera::CameraShake>();
     // Solavanco direcional da câmara no impacto (mola; o combate soma impulsos).
     app.init_resource::<camera::CameraKick>();
+    // Câmara de jogo conduzida por script (`viber.camera_free`/`camera_pose`)
+    // + snapshot lido por `viber.camera_state()`. Sem modo livre o sistema só
+    // publica o snapshot — nenhum mundo paga pose.
+    app.init_resource::<camera::ScriptCameraFree>();
+    app.init_resource::<camera::CameraSnapshot>();
     // Quests, marcadores e o guia são do exemplo (`scripts/lib/rules.lua`).
     app.add_plugins(crate::cinematic::CinematicPlugin);
     // IA: o `AiPlugin` regista o `apply_ai_locomotion`, consumidor ÚNICO do
@@ -749,8 +776,17 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
                     .run_if(editor_camera::editor_camera_inactive),
                 timed(Group::Camera, camera::third_person_camera)
                     .run_if(editor_camera::editor_camera_inactive),
+                // `viber.camera_free`: substitui a pose DEPOIS do rig de
+                // terceira pessoa (e publica o snapshot do `camera_state`).
+                timed(Group::Camera, camera::script_camera)
+                    .run_if(editor_camera::editor_camera_inactive),
             )
                 .chain(),
+            // O herói nasce no autoload sem `Health` (o Vael guarda hp/max no
+            // `viber.game()`): sem esta rede, `viber.entity_damage(player)` e o
+            // dano radial avisavam "sem Health" em vez de funcionar. Idempotente
+            // e só insere quando falta.
+            crate::vitals::ensure_player_vitals,
             timed(Group::Camera, spawn::auto_orbit),
             timed(Group::Spawner, spawn::gltf_scene_spawner),
             hud::compass::hud_compass_update,

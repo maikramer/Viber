@@ -77,7 +77,9 @@ fn read_project_block(config: &Path) -> Option<ProjectConfig> {
 
 /// A raiz do projeto de um ficheiro de mundo/cena: a própria pasta se tiver `config.yaml`;
 /// senão o ancestral mais próximo (até 4 níveis) cujo `config.yaml` declara um diretório de
-/// cenas que contém o ficheiro. Sem nenhum, a pasta do ficheiro (comportamento de sempre).
+/// cenas que contém o ficheiro OU cuja `main-scene` é este ficheiro (`main-scene:
+/// maps/game.xml` — sem isto o runtime tratava-o como mundo fora do projeto e procurava o
+/// `config.yaml` ao lado dele). Sem nenhum, a pasta do ficheiro (comportamento de sempre).
 pub fn root_of(path: &Path) -> PathBuf {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let parent = abs
@@ -97,7 +99,9 @@ pub fn root_of(path: &Path) -> PathBuf {
             if let Some(block) = read_project_block(&config) {
                 let scenes = dir.join(block.scenes_dir());
                 let scenes = scenes.canonicalize().unwrap_or(scenes);
-                if abs.starts_with(&scenes) {
+                let main = dir.join(block.main_scene());
+                let main = main.canonicalize().unwrap_or(main);
+                if abs == main || abs.starts_with(&scenes) {
                     return dir.to_path_buf();
                 }
             }
@@ -185,7 +189,18 @@ impl Project {
     /// declarada ou o ficheiro não existe (o `run` cai na principal).
     pub fn start_scene_path(&self) -> Option<PathBuf> {
         let start = self.config.start_scene.as_ref()?;
-        self.resolve_scene(&start.to_string_lossy())
+        let resolved = self.resolve_scene(&start.to_string_lossy());
+        if resolved.is_none() {
+            // Um typo em `start-scene` arrancava o jogo na principal em
+            // SILÊNCIO: o autor via a cena errada e nada dizia porquê.
+            eprintln!(
+                "warning: config.yaml: project.start-scene `{}` não resolve para \
+                 nenhuma cena de {} — a arrancar na principal",
+                start.display(),
+                self.root.display()
+            );
+        }
+        resolved
     }
 
     pub fn scenes_dir(&self) -> PathBuf {
@@ -317,7 +332,10 @@ impl Project {
             std::fs::create_dir_all(dir).with_context(|| format!("criar {}", dir.display()))?;
         }
         let title = id.rsplit('/').next().unwrap_or(id);
-        std::fs::write(&path, template.render(title))
+        // O id vem do CLI e entra num atributo XML: `a&b` (ou aspas) sem
+        // escape gerava um XML que o próprio `viber scene lint` não lia.
+        let title = crate::scene::catalog::escape_attr(title);
+        std::fs::write(&path, template.render(&title))
             .with_context(|| format!("escrever {}", path.display()))?;
         Ok(path)
     }
@@ -496,9 +514,41 @@ mod tests {
         );
     }
 
+    /// `main-scene` pode viver num subdiretório do projeto (`maps/game.xml`):
+    /// o `root_of` tem de reclamá-lo, senão o runtime procurava o
+    /// `config.yaml` ao lado do ficheiro e recusava um projeto válido.
     #[test]
-    fn scene_ids_round_trip() {
-        let dir = project("project:\n  autoload: [world/frag.xml]\n");
+    fn main_scene_in_a_subdirectory_belongs_to_the_project() {
+        let dir = project("project:\n  main-scene: maps/game.xml\n");
+        std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+        std::fs::write(dir.path().join("maps/game.xml"), "<world static=\"true\"/>").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        assert_eq!(root_of(&dir.path().join("maps/game.xml")), root);
+        let p = Project::at(dir.path());
+        assert_eq!(
+            p.scene_id(&dir.path().join("maps/game.xml")).as_deref(),
+            Some(MAIN_SCENE)
+        );
+    }
+
+    /// O id de uma cena nova entra no `title` do XML: `a&b` sem escape
+    /// gerava um documento que o próprio load não conseguia ler.
+    #[test]
+    fn new_scene_escapes_the_id_in_the_xml_title() {
+        let dir = project("");
+        let p = Project::at(dir.path());
+        let path = p.new_scene("a&b", SceneTemplate::Empty).unwrap();
+        let loaded = crate::xml::include::load_world_in(&path, &p.root).unwrap();
+        let title = loaded
+            .root_attrs
+            .iter()
+            .find(|(key, _)| key == "title")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(title, Some("a&b"));
+    }
+
+    #[test]
+    fn scene_ids_round_trip() {        let dir = project("project:\n  autoload: [world/frag.xml]\n");
         let p = Project::discover(&dir.path().join("scenes/house.xml"));
         assert!(p.declared);
         assert_eq!(

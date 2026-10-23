@@ -212,6 +212,11 @@ fn toast_display_system(
     hud: Option<Res<crate::hud::HudAssets>>,
     mut commands: Commands,
 ) {
+    // Pílulas nascidas NESTE frame: os `commands` só aplicam no fim do
+    // sistema, por isso `active` não as vê. Sem contar os pendentes, um burst
+    // de mensagens no mesmo frame (loot, vários pickups) furava o cap e
+    // empilhava muito mais do que TOAST_CAP linhas.
+    let mut pending: Vec<String> = Vec::new();
     for toast in toasts.read() {
         info!(target: "viber::toast", "{}", toast.0);
         spawned.write(ToastSpawned {
@@ -228,6 +233,11 @@ fn toast_display_system(
         });
         // Mesma linha outra vez (colher três bagas seguidas): renova, não
         // empilha — três cópias idênticas não dizem mais do que uma.
+        if pending.iter().any(|text| *text == toast.0) {
+            // Duplicado do mesmo frame: a primeira pílula já nasceu com a
+            // vida cheia — renovar aqui seria empilhar duas iguais.
+            continue;
+        }
         if let Some((_, mut existing)) = active
             .iter_mut()
             .find(|(_, pill)| pill.text == toast.0 && pill.timer > TOAST_FADE_OUT)
@@ -237,7 +247,7 @@ fn toast_display_system(
         }
         // Fila cheia: o mais antigo sai já (fade curto), para o novo caber
         // sem a pilha crescer para fora do enquadramento.
-        if active.iter().count() >= TOAST_CAP
+        if active.iter().count() + pending.len() >= TOAST_CAP
             && let Some((oldest, _)) = active
                 .iter()
                 .min_by(|a, b| {
@@ -293,6 +303,7 @@ fn toast_display_system(
                     ));
                 });
         });
+        pending.push(toast.0.clone());
     }
 }
 
@@ -374,9 +385,24 @@ pub fn options_body(selected: usize, volumes: (f32, f32, f32), controls: &str) -
 /// Ecrã de carregamento: o título vem do `config.yaml` do jogo (antes era o
 /// nome fixo do protótipo e aparecia em qualquer jogo). `...` em ASCII: o
 /// atlas de fontes da engine não tem o glifo `…` e saía um retângulo.
-fn spawn_loading_screen(mut commands: Commands, config: Option<Res<crate::config::GameConfig>>) {
+///
+/// Não nasce no modo Edit: aí o `Time<Virtual>` está em pausa desde o
+/// `Startup`, `loading_hide_system` nunca vê `elapsed > 2 s` e o véu ficava
+/// VISÍVEL para sempre — no ViberEditor tapava o viewport de UI (a
+/// `GameUiCamera` desenha a UI do jogo por cima da imagem).
+fn spawn_loading_screen(
+    mut commands: Commands,
+    config: Option<Res<crate::config::GameConfig>>,
+    mode: Option<Res<crate::app::RunMode>>,
+) {
+    if mode.as_deref() == Some(&crate::app::RunMode::Edit) {
+        return;
+    }
     let title = config
         .and_then(|config| config.title.clone())
+        // `title: ""` é omisso (o template diz "vazio = nome do world.xml").
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty())
         .map(|title| title.to_uppercase())
         .unwrap_or_else(|| "DISCORDIA".to_string());
     commands

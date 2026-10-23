@@ -271,13 +271,17 @@ impl GameConfig {
 /// `run`/`analyze` param aqui com o remédio na mensagem.
 pub fn load(world_dir: &Path) -> Result<GameConfig> {
     let path = world_dir.join(CONFIG_FILE);
-    let text = std::fs::read_to_string(&path).map_err(|_| {
-        anyhow::anyhow!(
+    let text = std::fs::read_to_string(&path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!(
             "{}: todo jogo tem de ter um {} ao lado do world.xml — é ele que \
              declara os paths (docs/ASSETS.md); o `viber create` gera um exemplo",
             path.display(),
             CONFIG_FILE
-        )
+        ),
+        // Um EACCES/ENOTDIR não é "falta o ficheiro": dizer que o jogo tem de
+        // criar um config.yaml que já existe mandava o autor investigar o
+        // sítio errado (e o `viber create` recusava a pasta existente).
+        _ => anyhow::anyhow!("{}: não foi possível ler ({error})", path.display()),
     })?;
     let value: serde_yaml::Value = serde_yaml::from_str(&text)
         .with_context(|| format!("{}: YAML inválido", path.display()))?;
@@ -290,6 +294,19 @@ pub fn load(world_dir: &Path) -> Result<GameConfig> {
         )
     })?;
     config.save.dir = expand_home(&config.save.dir);
+    // `save.dir` é ABSOLUTO por contrato (docs/ASSETS.md). Um caminho relativo
+    // era resolvido contra o cwd de quem lança o jogo: os saves "desapareciam"
+    // (e o autosave de outra execução ia para outro sítio). Resolve-se contra
+    // a pasta do jogo, como os dirs de `game.*`, com aviso.
+    if config.save.dir.is_relative() {
+        eprintln!(
+            "warning: config.yaml: save.dir `{}` é relativo — resolvido contra {} \
+             (o contrato é absoluto, ~ expandido)",
+            config.save.dir.display(),
+            world_dir.display()
+        );
+        config.save.dir = world_dir.join(&config.save.dir);
+    }
     for root in &config.assets.roots {
         let resolved = if root.is_absolute() {
             root.clone()
@@ -514,6 +531,21 @@ mod tests {
         let err = load(dir.path()).unwrap_err().to_string();
         assert!(err.contains(CONFIG_FILE), "{err}");
         assert!(err.contains("viber create"), "{err}");
+    }
+
+    /// `save.dir` relativo era resolvido contra o cwd — os saves mudavam de
+    /// sítio conforme a pasta de onde o jogo era lançado. O contrato é
+    /// absoluto; a resolução mínima é contra a pasta do jogo.
+    #[test]
+    fn relative_save_dir_resolves_against_the_game_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "assets:\n  roots: []\n  bgm_dir: bgm\n  sfx_dir: sfx\n  terrain_textures_dir: t\n\
+             game:\n  scripts_dir: scripts\nsave:\n  dir: saves\n",
+        );
+        let config = load(dir.path()).unwrap();
+        assert_eq!(config.save_dir(), dir.path().join("saves"));
     }
 
     #[test]

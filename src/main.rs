@@ -35,7 +35,9 @@ enum Command {
     Editor {
         /// Path to the world XML (default: the editor's last-opened world)
         path: Option<PathBuf>,
-        /// Extra args passed through to the editor binary (--tab, --mode…)
+        /// Extra args passed through to the editor binary (--tab, --mode…).
+        /// O `--` do clap não é preciso: tudo o que sobra segue tal-e-qual.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra: Vec<String>,
     },
     /// Run a world XML file in a Bevy window
@@ -301,9 +303,9 @@ enum DebugCommand {
         /// Delay between samples, milliseconds
         #[arg(long, default_value_t = 500)]
         interval_ms: u64,
-        /// Rich tab dump: systems|world|physics|audio|extras|all (pt aliases:
-        /// sistemas|mundo|fisica|audio|extras|tudo). Implies --json shape;
-        /// human printers per tab unless --json.
+        /// Rich tab dump: systems|world|physics|audio|extras|frames|all (pt
+        /// aliases: sistemas|mundo|fisica|audio|extras|quadros|tudo). Implies
+        /// --json shape; human printers per tab unless --json.
         #[arg(long)]
         tab: Option<String>,
         /// Export the FULL profiler snapshot to a JSON file. Optional path
@@ -673,7 +675,7 @@ enum SessionCommand {
     },
     /// Lista todas as sessões conhecidas (mundo, porta, estado, dono)
     List,
-    /// Desce a engine partilhada (não pode haver lease ativo de outro)
+    /// Desce a engine partilhada (exige a sessão livre — sem lease ativo)
     Down {
         #[arg(long)]
         world: Option<PathBuf>,
@@ -684,34 +686,68 @@ enum SessionCommand {
 /// (sem re-delegar em `cargo run` — evita recursão).
 const CARGO_DELEGATE_GUARD: &str = "VIBER_CLI_NO_CARGO_DELEGATE";
 
+/// O ficheiro que IDENTIFICA o mundo na sessão/`engine.json`: uma pasta de
+/// projeto é a sua cena principal.
+///
+/// A sessão é do MUNDO, não da pasta: `viber run .` registava o DIRETÓRIO e o
+/// `viber session status` (que resolve `world.xml` no cwd) dizia "SEM SESSÃO"
+/// com a engine viva, e o `viber debug --world world.xml` não a encontrava.
+fn project_world_file(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        let main = viber::project::Project::discover(path).main_scene_path();
+        if main.is_file() {
+            return main;
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Resolve o mundo a usar: caminho explícito ou auto-descoberta no cwd
-/// (`world.xml`, depois o primeiro `worlds/*.xml` por ordem alfabética).
+/// (`world.xml`, a `main-scene` do `config.yaml`, depois o primeiro
+/// `worlds/*.xml` por ordem alfabética).
 fn resolve_world_path(path: Option<PathBuf>) -> Result<PathBuf> {
     let Some(path) = path else {
         let cwd = std::env::current_dir().context("reading the current directory")?;
-        let default_world = cwd.join("world.xml");
-        if default_world.is_file() {
-            return Ok(default_world);
-        }
-        let worlds_dir = cwd.join("worlds");
-        if worlds_dir.is_dir() {
-            let mut xmls: Vec<PathBuf> = std::fs::read_dir(&worlds_dir)
-                .with_context(|| format!("reading {}", worlds_dir.display()))?
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "xml"))
-                .collect();
-            xmls.sort();
-            if let Some(first) = xmls.first() {
-                return Ok(first.clone());
-            }
-        }
-        anyhow::bail!(
-            "no world found in {} (looked for world.xml and worlds/*.xml) — pass one: `viber run world.xml`",
-            cwd.display()
-        );
+        return discover_world_in(&cwd).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no world found in {} (looked for world.xml, the config.yaml main-scene and \
+                 worlds/*.xml) — pass one: `viber run world.xml`",
+                cwd.display()
+            )
+        });
     };
     Ok(path)
+}
+
+/// O mundo de `cwd`: `world.xml` (convenção), a cena principal declarada no
+/// `config.yaml` do projeto (`main-scene: maps/game.xml` — o ViberEditor já a
+/// usa, o CLI ignorava-a e um projeto sem `world.xml` dizia "no world
+/// found"), e por fim `worlds/*.xml` legado.
+fn discover_world_in(cwd: &Path) -> Option<PathBuf> {
+    let default_world = cwd.join("world.xml");
+    if default_world.is_file() {
+        return Some(default_world);
+    }
+    if cwd.join(viber::config::CONFIG_FILE).is_file() {
+        let main = viber::project::Project::at(cwd).main_scene_path();
+        if main.is_file() {
+            return Some(main);
+        }
+    }
+    let worlds_dir = cwd.join("worlds");
+    if worlds_dir.is_dir() {
+        let mut xmls: Vec<PathBuf> = std::fs::read_dir(&worlds_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "xml"))
+            .collect();
+        xmls.sort();
+        if let Some(first) = xmls.into_iter().next() {
+            return Some(first);
+        }
+    }
+    None
 }
 
 /// O ficheiro com o caminho do último mundo aberto pelo editor.
@@ -863,6 +899,7 @@ fn viber_checkout_root(from: &Path) -> Option<PathBuf> {
 /// ausente ou guard activo) — o chamador corre in-process.
 fn delegate_run_to_cargo(
     world: &Path,
+    scene: Option<&str>,
     debug: bool,
     bridge: Option<u16>,
     dlss: bool,
@@ -893,6 +930,12 @@ fn delegate_run_to_cargo(
         command.arg("--features").arg("dlss");
     }
     command.arg("--").arg("run").arg(&world);
+    // O filho resolve o `start-scene` (e o `--scene`) com o MESMO caminho que
+    // o pai recebeu — a identidade do bridge/sessão é esse caminho, não a
+    // cena de arranque (ver `AppOptions::world_path`).
+    if let Some(scene) = scene {
+        command.arg("--scene").arg(scene);
+    }
     if let Some(port) = bridge {
         command.arg("--bridge").arg(port.to_string());
     }
@@ -1297,13 +1340,16 @@ fn analyze(path: &Path, strict: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Corre a engine in-process. `identity` é o mundo que o CLI pediu (antes de o
+/// `start-scene` escolher a cena) — ver [`viber::app::AppOptions::world_path`].
 fn run(
     path: &Path,
+    identity: Option<PathBuf>,
     bridge_port: Option<u16>,
     camera_free: bool,
     entry: Option<String>,
-) -> Result<()> {
-    viber::app::build_app(
+) -> Result<std::process::ExitCode> {
+    let exit = viber::app::build_app(
         path,
         viber::app::AppOptions {
             mode: viber::app::RunMode::Game,
@@ -1311,10 +1357,17 @@ fn run(
             camera_free,
             window_title: None,
             start_entry: entry,
+            world_path: identity,
         },
     )?
     .run();
-    Ok(())
+    // O `AppExit` carrega o código com que a engine quer sair (`viber.quit` é
+    // Success; um erro de sistema é `Error(codigo)`). Descartá-lo devolvia 0 a
+    // um fim anormal — o CI de QA lia sucesso onde houve falha.
+    match exit {
+        bevy::app::AppExit::Success => Ok(std::process::ExitCode::SUCCESS),
+        bevy::app::AppExit::Error(code) => Ok(std::process::ExitCode::from(code.get())),
+    }
 }
 
 fn total_skipped(world: &ParsedWorld) -> usize {
@@ -1404,9 +1457,14 @@ fn dispatch(command: Command) -> Result<std::process::ExitCode> {
             camera,
         } => {
             run_target_housekeeping(debug, no_cargo);
-            let world = resolve_world_path(path)?;
+            // `requested` é a identidade do mundo (bridge/sessão): o
+            // `start-scene` abaixo só escolhe a CENA que arranca. Uma pasta
+            // de projeto identifica-se pela cena principal (ver
+            // [`project_world_file`]).
+            let requested = resolve_world_path(path)?;
+            let identity = project_world_file(&requested);
             // Pasta de projeto → cena principal; `--scene` → outra cena do projeto.
-            let world = viber::scene_loader::resolve_run_path(&world, scene.as_deref())?;
+            let world = viber::scene_loader::resolve_run_path(&requested, scene.as_deref())?;
             // `--bridge` sem valor escolhe porta livre ANTES da delegação —
             // a porta impressa no arranque tem de ser a que a engine usa de
             // facto (e a que o agente exporta/usa nos comandos debug).
@@ -1415,10 +1473,16 @@ fn dispatch(command: Command) -> Result<std::process::ExitCode> {
                 Some(Some(port)) => Some(port),
                 Some(None) => Some(free_bridge_port(bridge::DEFAULT_BRIDGE_PORT)?),
             };
+            // Porta 0 não é uma porta: o bridge bindava uma efémera, a linha
+            // de arranque imprimia `:0` e o agente exportava uma porta morta.
+            if bridge == Some(0) {
+                bail!("--bridge 0: porta inválida (1..=65535)");
+            }
             let camera_free = matches!(camera, Some(CameraMode::Free));
             if !no_cargo
                 && let Some(code) = delegate_run_to_cargo(
-                    &world,
+                    &requested,
+                    scene.as_deref(),
                     debug,
                     bridge,
                     dlss,
@@ -1428,8 +1492,7 @@ fn dispatch(command: Command) -> Result<std::process::ExitCode> {
             {
                 return Ok(std::process::ExitCode::from(code as u8));
             }
-            run(&world, bridge, camera_free, entry)
-                .map(|_| std::process::ExitCode::SUCCESS)
+            run(&world, Some(identity), bridge, camera_free, entry)
                 .with_context(|| format!("running {}", world.display()))
         }
         Command::Prune { debug } => {
@@ -1528,6 +1591,10 @@ fn session_paths(world: Option<&PathBuf>) -> Result<(viber::session::SessionPath
     // Flag vazia (unwrap_or_default nos chamadores) = auto-descoberta.
     let flag = world.filter(|p| !p.as_os_str().is_empty()).cloned();
     let world = resolve_world_path(flag)?;
+    // `--world <pasta-do-projeto>`: a sessão é da cena principal, não da pasta
+    // (a engine grava o engine.json sob a cena principal — duas chaves para a
+    // mesma engine davam-na DUAS vezes na descoberta implícita).
+    let world = project_world_file(&world);
     Ok((
         viber::session::SessionPaths::for_world(&world),
         std::path::absolute(&world)?,
@@ -1577,6 +1644,10 @@ fn run_session(command: SessionCommand) -> Result<std::process::ExitCode> {
                             "SEM engine (não há engine.json) mas OCUPADO por '{owner}' (~{} s)",
                             remaining.as_secs()
                         );
+                    } else if paths.has_engine_record() {
+                        println!(
+                            "SEM SESSÃO — engine.json ILEGÍVEL (`viber session down` limpa o registo)"
+                        );
                     } else {
                         println!(
                             "SEM SESSÃO — suba a engine partilhada: `viber session up` ({})",
@@ -1593,6 +1664,12 @@ fn run_session(command: SessionCommand) -> Result<std::process::ExitCode> {
             wait,
             world,
         } => {
+            // TTL 0 nascia expirado: o claim imprimia RECLAMADO e o claim
+            // seguinte roubava-o (dois donos); o touch renovava para um lease
+            // já vencido. O TTL é o contrato com os outros agentes.
+            if ttl == 0 {
+                bail!("--ttl 0: o lease expirava no instante do claim (use >= 1 s)");
+            }
             let (paths, _) = session_paths(Some(&world.unwrap_or_default()))?;
             match paths.claim(
                 &owner,
@@ -1618,6 +1695,11 @@ fn run_session(command: SessionCommand) -> Result<std::process::ExitCode> {
             }
         }
         SessionCommand::Touch { owner, ttl, world } => {
+            // Renovar para TTL 0 devolvia "RENOVADO" e deixava o lease
+            // expirado no instante seguinte — o próximo claim roubava-o.
+            if ttl == 0 {
+                bail!("--ttl 0: renovava para um lease já expirado (use >= 1 s)");
+            }
             let (paths, _) = session_paths(Some(&world.unwrap_or_default()))?;
             let renewed = paths.touch(owner.as_deref(), Duration::from_secs(ttl))?;
             println!("RENOVADO por {renewed:?}");
@@ -1707,6 +1789,7 @@ fn session_list() -> Result<()> {
         let state = match &engine {
             Some(engine) if probe_engine(engine.port) => format!("viva :{}", engine.port),
             Some(engine) => format!("MORTA (registada :{})", engine.port),
+            None if paths.has_engine_record() => "registo ilegível".to_string(),
             None => "sem engine".to_string(),
         };
         let lease = match paths.busy() {
@@ -1735,6 +1818,11 @@ fn session_list() -> Result<()> {
 /// o bind), mata o próprio filho e tenta a porta livre seguinte, até
 /// 3 tentativas. Com `--port` explícito não há próxima porta: uma tentativa.
 fn session_up(world: Option<&Path>, port: Option<u16>) -> Result<()> {
+    // Porta 0 = efémera: o ping nunca chega à porta registada e o boot
+    // queimava os 90 s de cada tentativa para depois falhar.
+    if port == Some(0) {
+        bail!("--port 0: porta inválida (1..=65535)");
+    }
     let (paths, world_abs) = session_paths(world.map(PathBuf::from).as_ref())?;
     // Claim curto só para serializar boot — falha se outro agente está em QA.
     match paths.claim("session-up", std::time::Duration::from_secs(120), None)? {
@@ -1867,13 +1955,26 @@ fn looks_like_engine(args: &[String], world: &Path) -> bool {
     let Some(argv0) = args.first() else {
         return false;
     };
-    if Path::new(argv0).file_name() != Some(std::ffi::OsStr::new("viber")) {
+    // O wrapper `~/.local/bin/viber` corre a cache como `viber-release`;
+    // exigir só "viber" tornava a engine partilhada impossível de descer.
+    let name = Path::new(argv0).file_name();
+    if name != Some(std::ffi::OsStr::new("viber"))
+        && name != Some(std::ffi::OsStr::new("viber-release"))
+    {
         return false;
     }
     let world = std::fs::canonicalize(world).unwrap_or_else(|_| world.to_path_buf());
     args.iter().skip(1).any(|arg| {
         let arg_path = std::fs::canonicalize(arg).unwrap_or_else(|_| PathBuf::from(arg));
-        arg_path == world
+        if arg_path == world {
+            return true;
+        }
+        // `viber run <pasta-do-projeto>` regista a CENA PRINCIPAL no
+        // engine.json mas o argv traz a pasta; sem esta forma, o `session
+        // down` recusava a engine (GPU presa) por "PID reutilizado".
+        arg_path.is_dir()
+            && std::fs::canonicalize(project_world_file(&arg_path))
+                .is_ok_and(|main| main == world)
     })
 }
 
@@ -1890,7 +1991,14 @@ fn session_down(world: Option<&Path>) -> Result<()> {
         );
     }
     let Some(engine) = paths.engine_info() else {
-        println!("viber session: nenhuma engine registada — nada a fazer");
+        if paths.has_engine_record() {
+            // Registos antigos/corrompidos: dizer "nada a fazer" deixava o
+            // ficheiro para sempre e o `session up` sem saber se há engine.
+            paths.clear_engine();
+            println!("viber session: engine.json ilegível — registo removido");
+        } else {
+            println!("viber session: nenhuma engine registada — nada a fazer");
+        }
         return Ok(());
     };
     // Identidade antes do sinal: um PID reutilizado pode ser um processo
@@ -2945,12 +3053,17 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             let mut logs = client.logs(limit)?;
             // Filtros client-side (o ring da engine fica inteiro).
             if let Some(level) = level {
+                // Um nível INVÁLIDO caía em `0`, que deixa passar TUDO: um
+                // typo (`--level warnn`) mostrava o ring inteiro em silêncio.
                 let min = match level.to_ascii_lowercase().as_str() {
                     "error" => 4,
                     "warn" | "warning" => 3,
                     "info" => 2,
                     "debug" => 1,
-                    _ => 0,
+                    "trace" => 0,
+                    other => {
+                        bail!("--level `{other}` inválido (error|warn|info|debug|trace)")
+                    }
                 };
                 let rank = |value: &Value| match value.as_str() {
                     Some("ERROR") => 4,
@@ -3005,6 +3118,12 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
             if let Some(ms) = hitch_ms {
+                // Um limiar negativo/NaN ia para a engine (o `json!` de um
+                // NaN serializa `null`) e transformava TODOS os frames em
+                // hitches — o oposto do pedido.
+                if !(ms.is_finite() && ms > 0.0) {
+                    bail!("--hitch-ms tem de ser um número > 0 (ms)");
+                }
                 let config = client.prof_config(Some(ms))?;
                 if !json {
                     println!(
@@ -3076,7 +3195,9 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
         } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
-            let format = normalize_trace_format(&format)?;
+            // `--status` é só leitura: validar o `--format` (que não usa)
+            // antes fazia `trace --status --format foo` falhar em vez de
+            // mostrar o estado.
             if status {
                 let current = client.trace_status()?;
                 if json {
@@ -3086,6 +3207,7 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
                 }
                 return Ok(());
             }
+            let format = normalize_trace_format(&format)?;
             let max_events = max_events
                 .unwrap_or(viber::profiler::trace::DEFAULT_MAX_EVENTS)
                 .clamp(1, 10_000_000);
@@ -3239,8 +3361,9 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
                 (None, Some(path)) => std::fs::read_to_string(&path)
                     .with_context(|| format!("a ler {}", path.display()))?,
                 (None, None) => {
-                    eprintln!("uso: viber debug lua '<código>' | --file <ficheiro.lua>");
-                    return Ok(());
+                    // Sem código nem ficheiro não há nada a avaliar: um exit 0
+                    // escondia o erro de invocação de quem parsa o resultado.
+                    bail!("uso: viber debug lua '<código>' | --file <ficheiro.lua>");
                 }
             };
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
@@ -3432,7 +3555,12 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             } else {
                 let mut shown = 0;
                 for (name, summary) in &names {
-                    if !needle.is_empty() && !name.to_ascii_lowercase().contains(&needle) {
+                    // O `--json` casa nome OU descrição; o modo texto só casava
+                    // o nome — o mesmo `--grep` dava resultados diferentes.
+                    if !needle.is_empty()
+                        && !name.to_ascii_lowercase().contains(&needle)
+                        && !summary.to_ascii_lowercase().contains(&needle)
+                    {
                         continue;
                     }
                     shown += 1;
@@ -3457,12 +3585,10 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
             let needle = grep.unwrap_or_default();
-            let code = if needle.is_empty() {
-                "return viber.debug.apidoc()".to_string()
-            } else {
-                format!("return viber.debug.apidoc() -- grep: {needle}")
-            };
-            let response = client.lua(&code)?;
+            // O filtro é CLIENT-SIDE: interpolar o `--grep` no código Luau
+            // (mesmo num comentário) deixava um `\n` no argumento sair do
+            // comentário e executar o que viesse a seguir na VM do jogo.
+            let response = client.lua("return viber.debug.apidoc()")?;
             if !response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 let error = response
                     .get("error")
@@ -3588,7 +3714,16 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
         DebugCommand::Play { port, world } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
-            client.lua("viber.debug.play() return true")?;
+            // O `client.lua` devolve Ok mesmo com `ok:false`: sem o check
+            // imprimia "✓ a correr" a uma engine sem `viber.debug.play`.
+            let response = client.lua("viber.debug.play() return true")?;
+            if !response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let error = response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("erro desconhecido");
+                bail!("erro Luau: {error}");
+            }
             println!("✓ a correr (speed restaurada)");
         }
         DebugCommand::Watch {
@@ -3649,7 +3784,17 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             let code = std::fs::read_to_string(&path)
                 .with_context(|| format!("a ler {}", path.display()))?;
             // 1) helpers de QA (globals persistem na REPL)
-            client.lua(QA_HELPERS)?;
+            let helpers = client.lua(QA_HELPERS)?;
+            // Se a instalação falhar, o cenário corre SEM `expect`/`fail` e o
+            // relatório final lê `__qa` inexistente como "0 asserts, 0 fails"
+            // — sucesso falso. Ver o chunk, não só o cenário.
+            if !helpers.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let error = helpers
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("erro desconhecido");
+                bail!("helpers de QA não instalaram: {error}");
+            }
             // 2) o cenário
             let response = client.lua(&code)?;
             let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
@@ -3700,6 +3845,18 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             update,
             json,
         } => {
+            // `--update` sem `--baseline` era ignorado em silêncio: o agente
+            // julgava ter aceitado o golden e só via o diff normal.
+            if update && baseline.is_none() {
+                bail!(
+                    "--update só faz sentido com --baseline <dir> (aceita a captura `a` como golden)"
+                );
+            }
+            if let Some(threshold) = threshold
+                && !(threshold.is_finite() && threshold >= 0.0)
+            {
+                bail!("--threshold tem de ser >= 0 (% de píxeis)");
+            }
             let roi = roi
                 .map(|r| bridge::diff::parse_roi(&r))
                 .transpose()
@@ -3940,6 +4097,39 @@ mod tests {
         ));
         assert!(!looks_like_engine(&[], &world));
     }
+
+    /// A identidade de uma pasta de projeto é a CENA PRINCIPAL: o
+    /// `viber run .` guardava a pasta no engine.json, o `session status`
+    /// (que resolve `world.xml`) não a encontrava e o `session down` recusava
+    /// o argv com a pasta por "PID reutilizado" — GPU presa.
+    #[test]
+    fn project_folder_identity_is_its_main_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("world.xml"), "<world static=\"true\"/>").unwrap();
+        let main = project_world_file(dir.path());
+        assert_eq!(
+            main,
+            dir.path().join("world.xml").canonicalize().unwrap(),
+            "a pasta identifica-se pela cena principal"
+        );
+        // Sem cena principal, a pasta fica como veio (o run falha e diz porquê).
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(project_world_file(empty.path()), empty.path());
+
+        let args = vec![
+            "/checkout/target/release/viber".to_string(),
+            "run".to_string(),
+            dir.path().display().to_string(),
+            "--bridge".to_string(),
+            "15702".to_string(),
+        ];
+        assert!(looks_like_engine(&args, &main), "argv com a pasta");
+        let other = tempfile::tempdir().unwrap();
+        assert!(
+            !looks_like_engine(&args, &other.path().join("world.xml")),
+            "pasta de outro jogo"
+        );
+    }
     use super::*;
 
     /// As três formas de `--bridge`: ausente = sem bridge, nu = porta livre
@@ -3997,6 +4187,45 @@ mod tests {
                 );
             }
             _ => panic!("esperava dois Command::Debug"),
+        }
+    }
+
+    /// A auto-descoberta no cwd tem de honrar `project.main-scene`: um projeto
+    /// cujo mundo principal não se chama `world.xml` dizia "no world found"
+    /// (o ViberEditor já o resolvia; o CLI não).
+    #[test]
+    fn discover_world_honours_the_config_main_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            "assets:\n  roots: []\n  bgm_dir: bgm\n  sfx_dir: sfx\n  terrain_textures_dir: t\n\
+             game:\n  scripts_dir: scripts\nsave:\n  dir: /tmp/x\n\
+             project:\n  main-scene: maps/game.xml\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+        std::fs::write(dir.path().join("maps/game.xml"), "<world static=\"true\"/>").unwrap();
+        let found = discover_world_in(dir.path()).expect("main-scene do config.yaml");
+        assert!(found.ends_with("maps/game.xml"), "{found:?}");
+        // `world.xml` continua a ganhar quando existe (convenção primeiro).
+        std::fs::write(dir.path().join("world.xml"), "<world static=\"true\"/>").unwrap();
+        let found = discover_world_in(dir.path()).unwrap();
+        assert!(found.ends_with("world.xml"), "{found:?}");
+    }
+
+    /// Os extras do `viber editor` são encaminhados TAL-E-QUAL (o help
+    /// promete `--tab`/`--mode`); sem `trailing_var_arg` o clap os recusava
+    /// como flags desconhecidas do próprio `viber`.
+    #[test]
+    fn editor_forwards_flags_to_the_editor_binary() {
+        let parsed = Cli::try_parse_from(["viber", "editor", "w.xml", "--tab", "3"])
+            .expect("extras aceitam flags");
+        match parsed.command {
+            Some(Command::Editor { path, extra }) => {
+                assert_eq!(path.as_deref(), Some(Path::new("w.xml")));
+                assert_eq!(extra, vec!["--tab".to_string(), "3".to_string()]);
+            }
+            _ => panic!("esperava Command::Editor"),
         }
     }
 }

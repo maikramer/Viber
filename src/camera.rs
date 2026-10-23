@@ -465,6 +465,9 @@ pub fn third_person_camera(
     let shake_mul = a11y.as_deref().map(crate::a11y::shake_scale).unwrap_or(1.0);
     let (mut shake_off, shake_roll) = shake_offset_roll(shake.trauma, real.elapsed_secs());
     shake_off *= shake_mul;
+    // O ROLL é parte do mesmo shake: escalar só o offset deixava a câmara a
+    // rodar ±1,7° com o tremor DESLIGADO nas opções de acessibilidade.
+    let shake_roll = shake_roll * shake_mul;
     // Solavanco direcional: mola subamortecida em dt virtual (no hit-stop
     // quase não anda — o shake cobre essa janela em tempo real).
     let (kick_off, kick_vel) = kick_spring_step(kick.offset, kick.vel, dt);
@@ -659,6 +662,89 @@ pub fn third_person_camera(
         if shake_roll.abs() > 1e-5 {
             let view = transform.forward();
             transform.rotate_axis(view, shake_roll);
+        }
+    }
+}
+
+/// Câmara de JOGO conduzida por script (`viber.camera_free`/`camera_pose`).
+///
+/// O `OrbitCamera` continua a ser o dono da câmara (post-FX, HUD, tone
+/// mapping): o modo livre só substitui a POSE que o `third_person_camera`
+/// escreveria, correndo depois dele. `active = false` devolve o controlo ao
+/// rig de terceira pessoa sem recriar entidades nem perder o look da cena.
+#[derive(Debug, Clone, Resource)]
+pub struct ScriptCameraFree {
+    /// O script está a conduzir a câmara de jogo.
+    pub active: bool,
+    /// Olho pedido (`viber.camera_pose`).
+    pub pos: Vec3,
+    /// Ponto olhado pedido.
+    pub look: Vec3,
+}
+
+impl Default for ScriptCameraFree {
+    fn default() -> Self {
+        Self {
+            active: false,
+            pos: Vec3::ZERO,
+            look: Vec3::NEG_Z,
+        }
+    }
+}
+
+/// Pose VIVA da câmara de jogo publicada para `viber.camera_state()`.
+///
+/// `yaw`/`pitch` descrevem a DIREÇÃO DE VISTA (não o rig orbital): o forward
+/// é `(sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)`, a convenção que o
+/// `camera_pose` de script usa. Atualizada todos os frames no
+/// [`script_camera`].
+#[derive(Debug, Clone, Copy, Resource)]
+pub struct CameraSnapshot {
+    pub pos: Vec3,
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+}
+
+impl Default for CameraSnapshot {
+    fn default() -> Self {
+        Self {
+            pos: Vec3::ZERO,
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+        }
+    }
+}
+
+/// Aplica a pose do modo livre e publica o snapshot da câmara.
+///
+/// Corre DEPOIS do [`third_person_camera`] (ver `app.rs`): no modo livre
+/// sobrescreve o resultado do rig, fora dele não toca em nada e apenas lê.
+pub fn script_camera(
+    free: Res<ScriptCameraFree>,
+    mut snapshot: ResMut<CameraSnapshot>,
+    mut cameras: Query<(&mut Transform, &OrbitCamera)>,
+) {
+    let mut recorded = false;
+    for (mut transform, cam) in &mut cameras {
+        // Câmaras com alvo nomeado são de cena/editor: não são a de jogo.
+        if cam.target.is_some() {
+            continue;
+        }
+        if free.active {
+            transform.translation = free.pos;
+            let dir = free.look - free.pos;
+            // Olho == alvo é degenerado (`look_at` normaliza o zero): mantém a
+            // rotação anterior em vez de injetar NaN na cena.
+            if dir.length_squared() > 1e-8 {
+                transform.look_at(free.look, Vec3::Y);
+            }
+        }
+        if !recorded {
+            let forward = transform.forward();
+            snapshot.pos = transform.translation;
+            snapshot.yaw_deg = forward.x.atan2(forward.z).to_degrees();
+            snapshot.pitch_deg = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+            recorded = true;
         }
     }
 }
@@ -1196,5 +1282,64 @@ mod tests {
         app.update();
         let named_t = app.world().get::<Transform>(named).unwrap();
         assert_eq!(named_t.translation, Vec3::ZERO, "named camera untouched");
+    }
+
+    #[test]
+    fn test_script_camera_drives_only_the_game_camera_when_free() {
+        let mut app = App::new();
+        app.init_resource::<ScriptCameraFree>();
+        app.init_resource::<CameraSnapshot>();
+        app.add_systems(Update, script_camera);
+        let game = app
+            .world_mut()
+            .spawn((test_camera(None), Transform::IDENTITY))
+            .id();
+        let named = app
+            .world_mut()
+            .spawn((test_camera(Some("props")), Transform::IDENTITY))
+            .id();
+
+        // Fora do modo livre só publica o snapshot (pose intocada).
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(game).unwrap().translation,
+            Vec3::ZERO
+        );
+        let snap = *app.world().resource::<CameraSnapshot>();
+        assert_eq!(snap.pos, Vec3::ZERO);
+        // Forward do `Transform::IDENTITY` é -Z ⇒ yaw 180°.
+        assert!(approx(snap.yaw_deg.abs(), 180.0));
+        assert!(approx(snap.pitch_deg, 0.0));
+
+        {
+            let mut free = app.world_mut().resource_mut::<ScriptCameraFree>();
+            free.active = true;
+            free.pos = Vec3::new(10.0, 20.0, 30.0);
+            free.look = Vec3::new(10.0, 20.0, 22.0); // a olhar -Z
+        }
+        app.update();
+        let pose = app.world().get::<Transform>(game).unwrap();
+        assert!(pose.translation.distance(Vec3::new(10.0, 20.0, 30.0)) < 1e-4);
+        // Alvo nomeado não é a câmara de jogo: fica onde estava.
+        assert_eq!(
+            app.world().get::<Transform>(named).unwrap().translation,
+            Vec3::ZERO
+        );
+        let snap = *app.world().resource::<CameraSnapshot>();
+        assert!(approx(snap.pos.x, 10.0));
+        assert!(approx(snap.yaw_deg.abs(), 180.0), "yaw {}", snap.yaw_deg);
+
+        // Sair do modo livre não reposiciona (o rig de terceira pessoa volta
+        // a escrever no frame seguinte, fora deste sistema).
+        app.world_mut().resource_mut::<ScriptCameraFree>().active = false;
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(game)
+                .unwrap()
+                .translation
+                .distance(Vec3::new(10.0, 20.0, 30.0))
+                < 1e-4
+        );
     }
 }

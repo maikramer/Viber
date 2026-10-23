@@ -80,6 +80,96 @@ pub fn landing_position(
     Vec3::new(requested.x, surface, requested.z)
 }
 
+/// Altura da sonda de aterragem acima do ponto pedido (`viber.teleport_player`).
+///
+/// O destino autoral (marco, cama, fogueira) fica um pouco acima do chão.
+/// Dois metros cobrem esse desvio e ainda deixam a câmara de um telhado
+/// baixo abaixo do ponto de partida.
+pub const TELEPORT_PROBE_HEIGHT: f32 = 2.0;
+/// Queda máxima procurada por colliders abaixo do destino (m). Cobre a cota
+/// do arranque (y = 150) e desníveis de mapa sem varrer o mundo inteiro.
+pub const TELEPORT_MAX_DROP: f32 = 400.0;
+/// Folga (m) acima da superfície encontrada: o character controller assenta
+/// no frame seguinte; começar exatamente na face deixava-o preso nela.
+pub const TELEPORT_SKIN: f32 = 0.02;
+
+/// Primeira superfície de FÍSICA abaixo de `(x, z)` (props, plataformas,
+/// pontes e o trimesh do terreno), de `from_y` para baixo.
+///
+/// `exclude` são corpos a ignorar: o próprio herói (um teleporte no mesmo XZ
+/// não pode aterrar na sua cápsula) e, quando o destino é um prop, o prop
+/// (um poço/torre não pode servir de "chão" por cima dele mesmo). Raios que
+/// começam DENTRO de um collider devolvem `toi == 0`: nesse caso a resposta é
+/// `None` (o destino está encravado numa parede) e o chamador cai para o
+/// terreno analítico, em vez de pousar o herói em cima do muro.
+pub fn physics_ground_below(
+    world: &mut World,
+    x: f32,
+    z: f32,
+    from_y: f32,
+    max_drop: f32,
+    exclude: &[Entity],
+) -> Option<f32> {
+    use bevy_rapier3d::prelude::{
+        QueryFilter, RapierContextColliders, RapierContextSimulation, RapierQueryPipeline,
+        RapierRigidBodySet,
+    };
+    use bevy_rapier3d::rapier::parry::query::DefaultQueryDispatcher;
+    let context = world
+        .iter_entities()
+        .find(|e| e.contains::<RapierContextSimulation>())
+        .map(|e| e.id())?;
+    let simulation = world.get::<RapierContextSimulation>(context)?;
+    let colliders = world.get::<RapierContextColliders>(context)?;
+    let bodies = world.get::<RapierRigidBodySet>(context)?;
+    // Sensores (triggers/volumes) não são chão. `exclude_collider`/
+    // `exclude_rigid_body` só guardam UM par, por isso as exclusões extra
+    // (herói + prop do destino) vão por predicado.
+    let skip = exclude.to_vec();
+    let keep = |entity: Entity, _collider: &bevy_rapier3d::rapier::geometry::Collider| {
+        !skip.contains(&entity)
+    };
+    let filter = QueryFilter::default().exclude_sensors().predicate(&keep);
+    let origin = Vec3::new(x, from_y, z);
+    let distance = RapierQueryPipeline::new_scoped(
+        &simulation.broad_phase,
+        colliders,
+        bodies,
+        &filter,
+        &DefaultQueryDispatcher,
+        |pipeline| pipeline.cast_ray(origin, Vec3::NEG_Y, max_drop, true),
+    )
+    .map(|(_, toi)| toi)?;
+    // `toi == 0`: origem dentro de geometria sólida.
+    (distance > 0.01).then_some(from_y - distance)
+}
+
+/// Y de aterragem de um teleporte resolvido contra a FÍSICA.
+///
+/// `landing_position` só conhece o terreno: numa atalaia (entidade no TOPO
+/// da plataforma) ou num telhado largava o herói na base. Os colliders dos
+/// props são estáticos e nascem com o mundo, por isso o raio acerta neles
+/// mesmo em zonas cujo terreno ainda não assentou; quando não há collider
+/// nenhum (coluna por assar/fora do mapa) fica o plano B analítico.
+pub fn teleport_landing(world: &mut World, requested: Vec3, exclude: &[Entity]) -> Vec3 {
+    let from_y = requested.y + TELEPORT_PROBE_HEIGHT;
+    if let Some(surface) = physics_ground_below(
+        world,
+        requested.x,
+        requested.z,
+        from_y,
+        TELEPORT_PROBE_HEIGHT + TELEPORT_MAX_DROP,
+        exclude,
+    ) {
+        return Vec3::new(requested.x, surface + TELEPORT_SKIN, requested.z);
+    }
+    let terrain = world.get_resource::<TerrainRuntime>();
+    match terrain {
+        Some(rt) => landing_position(Some(&*rt), requested),
+        None => requested,
+    }
+}
+
 /// Chão para um reposicionamento CURTO de quem já está no mundo (dash,
 /// lunge, knockback): a superfície sólida sob `from_y` (overhangs e grutas
 /// ficam por baixo da rocha), a superfície renderizada quando a sonda não vê
@@ -384,6 +474,9 @@ pub fn player_movement(
     mut cameras: Query<&mut OrbitCamera>,
     mut sfx: MessageWriter<crate::ambient::SfxEvent>,
     actions: Option<Res<crate::input_map::ActionState>>,
+    // Um UiInput focado (barra de fala do NLU) tem o teclado: WASD/espaço
+    // não podem mover o herói enquanto o jogador escreve.
+    typing: Option<Res<crate::ui::widgets::UiFocusedInput>>,
     mut players: Query<
         (
             Entity,
@@ -392,7 +485,9 @@ pub fn player_movement(
             Option<&mut bevy_rapier3d::prelude::KinematicCharacterController>,
             Option<&bevy_rapier3d::prelude::KinematicCharacterControllerOutput>,
             Option<&mut TeleportSettle>,
-            Option<&crate::physics_fx::Knockback>,
+            // Mutável: o empurrão do herói é aplicado E decaído aqui, no
+            // mesmo passo (o `physics_fx` salta os players de propósito).
+            Option<&mut crate::physics_fx::Knockback>,
         ),
         // `own_system("locomotion")` cala este sistema por completo (kart).
         Without<Camera>,
@@ -432,11 +527,12 @@ pub fn player_movement(
     }
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
-    // Há chão de collider carregado sob o herói? (streaming de colunas)
-    let terrain_ready = collision.is_some_and(|status| status.ready);
     // Estado cru da tecla: soltar corta o input no mesmo frame. Um piso de
     // hold depois do release fazia o herói continuar a andar.
-    let (move_x, move_forward, sprint, jump_pressed) = if let Some(actions) = actions.as_deref() {
+    let typing = typing.is_some_and(|f| f.0.is_some());
+    let (move_x, move_forward, sprint, jump_pressed) = if typing {
+        (0.0, 0.0, false, false)
+    } else if let Some(actions) = actions.as_deref() {
         (
             actions.move_x,
             actions.forward,
@@ -462,7 +558,7 @@ pub fn player_movement(
     // Borda, não nível: o buffer é de 100 ms. `pressed` renovava o relógio
     // em todo o frame com a barra premida e o herói saltava em cada aterragem.
 
-    for (entity, mut transform, mut player, mut controller, output, mut settle, knockback) in
+    for (entity, mut transform, mut player, mut controller, output, mut settle, mut knockback) in
         &mut players
     {
         // Tutela pós-teleporte: enquanto dura, o chão ANALÍTICO manda mesmo
@@ -566,9 +662,18 @@ pub fn player_movement(
         let mut motion = Vec3::new(player.vel_x, 0.0, player.vel_z) * dt;
         // O empurrão de um golpe entra no MESMO pedido ao character
         // controller: escrito direto no Transform atravessava paredes e
-        // props (o `physics_fx` só o decai para o herói).
-        if let Some(knockback) = knockback {
-            motion += knockback.velocity.with_y(0.0) * dt;
+        // props. Aplicado e DECAÍDO aqui, no mesmo passo, com a integral
+        // exata do decaimento — antes o `physics_fx` decaía a velocidade
+        // noutro sistema (ordem arbitrária) e este frame andava só
+        // `v·dt`, que num soluço de frame é uma fração ínfima dos metros
+        // pedidos (a distância do empurrão dependia do framerate).
+        if let Some(knockback) = knockback.as_deref_mut() {
+            motion += knockback.velocity.with_y(0.0) * crate::physics_fx::knockback_travel_factor(dt);
+            knockback.velocity *= crate::physics_fx::knockback_decay_factor(dt);
+            if knockback.velocity.length() < crate::physics_fx::KNOCKBACK_EPSILON {
+                knockback.velocity = Vec3::ZERO;
+                commands.entity(entity).remove::<crate::physics_fx::Knockback>();
+            }
         }
 
         // Facing: slerp toward the move heading at `rotation_speed` rad/s,
@@ -621,6 +726,12 @@ pub fn player_movement(
             transform.translation.y,
             transform.translation.z,
         );
+        // Há chão de collider carregado sob ESTE herói? (streaming de colunas;
+        // o estado é por entidade — um co-op em que o parceiro está noutra
+        // coluna não pode desligar o chão analítico deste).
+        let terrain_ready = collision
+            .as_deref()
+            .is_some_and(|status| status.is_ready(entity));
         // Sem terreno (interior) não há campo: as duas redes analíticas ficam
         // desligadas e manda o collider da sala.
         let field = runtime.filter(|rt| rt.in_field(px, pz));
@@ -967,8 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jump_apex_reaches_height() {
-        // integrate: with v0 = jump_velocity, apex ≈ jump_height
+    fn test_jump_apex_reaches_height() {        // integrate: with v0 = jump_velocity, apex ≈ jump_height
         let v0 = jump_velocity(2.3);
         let mut y = 0.0f32;
         let mut vy = v0;
@@ -1002,8 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gravity_skips_resting_frames_only() {
-        // Parado ou a andar numa encosta (grounded, vel_y a zero): sem tick —
+    fn test_gravity_skips_resting_frames_only() {        // Parado ou a andar numa encosta (grounded, vel_y a zero): sem tick —
         // era este empurrão que o controller convertia em escorregar.
         assert!(!gravity_applies(true, 0.0));
         // Airborne (a cair ou no topo do arco): gravidade sempre.
@@ -1090,6 +1199,55 @@ mod tests {
             player.jump_buffer_time
         );
         assert_eq!(player.vel_y, 0.0);
+    }
+
+    /// O empurrão do herói é aplicado E decaído no MESMO passo, com a
+    /// integral exata: 2 m/s durante 100 ms andam `2·(1−e^(−0,6))/6` m
+    /// (~0,151), não `2·dt` (0,2) nem a fração que sobrava depois de o
+    /// `physics_fx` decair a velocidade noutro sistema.
+    #[test]
+    fn hero_knockback_uses_the_exact_decay_in_the_movement_step() {
+        use bevy::ecs::system::RunSystemOnce as _;
+        use std::time::Duration;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::menus::MenusOpen>()
+            .add_message::<crate::ambient::SfxEvent>();
+        let mut time = app.world_mut().remove_resource::<Time>().unwrap();
+        time.advance_by(Duration::from_millis(100));
+        app.world_mut().insert_resource(time);
+        let hero = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                Player::default(),
+                crate::physics_fx::Knockback {
+                    velocity: Vec3::X * 2.0,
+                },
+            ))
+            .id();
+        app.world_mut()
+            .run_system_once(player_movement)
+            .expect("player_movement");
+        let x = app.world().get::<Transform>(hero).unwrap().translation.x;
+        let expected = 2.0 * crate::physics_fx::knockback_travel_factor(0.1);
+        assert!(
+            (x - expected).abs() < 1e-4,
+            "deslocamento {x}, esperado {expected}"
+        );
+        let velocity = app
+            .world()
+            .get::<crate::physics_fx::Knockback>(hero)
+            .expect("knockback vivo")
+            .velocity
+            .x;
+        let decayed = 2.0 * crate::physics_fx::knockback_decay_factor(0.1);
+        assert!(
+            (velocity - decayed).abs() < 1e-4,
+            "velocidade {velocity}, esperada {decayed}"
+        );
     }
 
     #[test]

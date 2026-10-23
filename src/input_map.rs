@@ -133,8 +133,16 @@ pub fn gather_actions(
     keys: Res<ButtonInput<KeyCode>>,
     map: Res<ActionMap>,
     pads: Query<&Gamepad>,
+    // Com um `<UiInput>` focado (a barra de fala do NLU) as teclas são TEXTO:
+    // o movimento, o `viber.input.*` e o `viber.interacted` já o respeitam —
+    // sem este guarda, escrever "j" na barra disparava o ataque.
+    typing: Option<Res<crate::ui::widgets::UiFocusedInput>>,
     mut state: ResMut<ActionState>,
 ) {
+    if typing.as_deref().is_some_and(|f| f.0.is_some()) {
+        *state = ActionState::default();
+        return;
+    }
     let mut move_x = 0.0;
     let mut forward = 0.0;
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
@@ -209,7 +217,14 @@ impl Plugin for InputMapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActionMap>()
             .init_resource::<ActionState>()
-            .add_systems(PreUpdate, gather_actions);
+            // `just_pressed`/`pressed` são reescritos pelo `InputPlugin` no
+            // mesmo schedule; sem a ordem explícita este sistema podia ler o
+            // estado do frame ANTERIOR (ação 1 frame atrasada, conforme a
+            // ordem que o scheduler escolhesse).
+            .add_systems(
+                PreUpdate,
+                gather_actions.after(bevy::input::InputSystems),
+            );
     }
 }
 
