@@ -494,6 +494,80 @@ impl VoxelMod for RoundConeMod {
     }
 }
 
+/// A half-ellipsoid with a **vertical face** through its centre — the hill a
+/// cave mouth is cut into.
+///
+/// The face plane passes through `center` and is perpendicular to `normal`
+/// (the **outward** direction): rock exists on the opposite side, like a
+/// hillside that ends in a cut rock face at the entrance. Without it a cave's
+/// open end on flat ground is a pit (the tube starts `radius` below the
+/// surface); with it the subtractive tube cuts a portal into the face and the
+/// hill above keeps the roof.
+#[derive(Debug, Clone)]
+pub struct HalfEllipsoidMod {
+    pub center: Vec3,
+    pub radii: Vec3,
+    /// Unit, horizontal, pointing OUT of the cave.
+    pub normal: Vec3,
+    /// Amplitude (meters) of a deterministic sine relief on the surface. 0 is
+    /// a perfect rounded wall, which reads as concrete; a metre or so makes
+    /// the face and the dome look like rock.
+    pub noise: f32,
+    pub label: String,
+}
+
+impl HalfEllipsoidMod {
+    pub fn new(
+        label: impl Into<String>,
+        center: Vec3,
+        radii: Vec3,
+        normal: Vec3,
+        noise: f32,
+    ) -> Self {
+        Self {
+            center,
+            radii: radii.max(Vec3::splat(0.01)),
+            normal: normal.normalize_or_zero(),
+            noise: if noise.is_finite() { noise.max(0.0) } else { 0.0 },
+            label: label.into(),
+        }
+    }
+
+    /// Continuous, deterministic relief in `[-1.5, 1.5]`: no RNG, so the same
+    /// world meshes byte for byte.
+    fn wobble(p: Vec3) -> f32 {
+        (p.x * 0.31).sin() * 0.5 + (p.z * 0.37).cos() * 0.5 + (p.y * 0.23).sin() * 0.5
+    }
+}
+
+impl VoxelMod for HalfEllipsoidMod {
+    fn distance(&self, p: Vec3) -> f32 {
+        let q = (p - self.center) / self.radii;
+        let relief = Self::wobble(p) * self.noise;
+        let ellipsoid = (q.length() - 1.0) * self.radii.min_element() - relief;
+        // Intersection with the half-space BEHIND the face: max() keeps only
+        // the part where both are solid (ellipsoid and inward side).
+        let face = (p - self.center).dot(self.normal) + relief * 0.6;
+        ellipsoid.max(face)
+    }
+
+    fn bounds(&self) -> Bounds3 {
+        let pad = Vec3::splat(self.noise * 1.6);
+        Bounds3::from_corners(
+            self.center - self.radii - pad,
+            self.center + self.radii + pad,
+        )
+    }
+
+    fn op(&self) -> ModOp {
+        ModOp::Union
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 /// A yawed ellipsoid — a cave chamber, or the rounded crown of an arch void.
 ///
 /// The distance is the standard scaled-sphere estimate, which **under**estimates

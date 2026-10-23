@@ -23,7 +23,7 @@ use bevy::math::{Vec2, Vec3};
 
 use super::super::mesh::HeightField;
 use super::super::paths::{chaikin_smooth, resample};
-use super::mods::{CapsuleMod, EllipsoidMod, ModOp, RoundConeMod, VoxelMod};
+use super::mods::{CapsuleMod, EllipsoidMod, HalfEllipsoidMod, ModOp, RoundConeMod, VoxelMod};
 
 /// Default tunnel radius (meters) — wide enough to walk through.
 pub const DEFAULT_CAVE_RADIUS: f32 = 3.0;
@@ -116,6 +116,21 @@ pub struct CaveSpec {
     pub chambers: Vec<CaveChamberSpec>,
     /// Chimneys to the surface (`<Shaft>`).
     pub shafts: Vec<CaveShaftSpec>,
+    /// Raised rock mass at each open mouth (`mound-height`, meters). 0 keeps
+    /// the raw mouth. On flat ground the open end always reads as a pit: the
+    /// tube starts `radius` below the surface. This grows a hill over the
+    /// first metres of the tunnel so the subtractive tube cuts a portal into
+    /// its flank. It is a [`ModOp::Union`] solid, not a heightfield edit.
+    pub mound_height: f32,
+    /// Horizontal radius of that mound (`mound-radius`, meters). 0 derives
+    /// `4 * radius_max()`.
+    pub mound_radius: f32,
+    /// Lift the tube centre by its own radius at the open ends
+    /// (`mouth-lift`): the tube **floor** meets the outside ground instead of
+    /// sitting `radius` below it. The mouth becomes a walk-in arch with no
+    /// bowl to jump out of. Requires a mound (or a real hillside) to fill the
+    /// rock around the lifted tube.
+    pub mouth_lift: bool,
 }
 
 impl Default for CaveSpec {
@@ -130,6 +145,9 @@ impl Default for CaveSpec {
             mouth_fraction: DEFAULT_MOUTH_FRACTION,
             chambers: Vec::new(),
             shafts: Vec::new(),
+            mound_height: 0.0,
+            mound_radius: 0.0,
+            mouth_lift: false,
         }
     }
 }
@@ -139,6 +157,9 @@ impl CaveSpec {
     ///
     /// Flat in the middle, ramping to zero at each mouth. `smoothstep` rather
     /// than a straight ramp so the mouth flares instead of ending in a cone.
+    /// With `mouth_lift` the ramp ends at `-radius`: the tube centre rises by
+    /// one radius, so the **floor** lands on the outside ground and the mouth
+    /// is a walk-in arch instead of a bowl `radius` deep.
     fn depth_at(&self, t: f32) -> f32 {
         if !self.open_ends {
             return self.depth;
@@ -149,7 +170,20 @@ impl CaveSpec {
             return self.depth;
         }
         let s = edge.clamp(0.0, 1.0);
-        self.depth * (s * s * (3.0 - 2.0 * s))
+        let mouth = if self.mouth_lift {
+            -self.radius_at(t)
+        } else {
+            0.0
+        };
+        // Com lift a rampa é LINEAR: o smoothstep tem um pico de 1,5× a
+        // inclinação média (39° numa entrada de 28°), e o herói escorregava
+        // nesse pico. A linear mantém a inclinação média constante.
+        let ramp = if self.mouth_lift {
+            s
+        } else {
+            s * s * (3.0 - 2.0 * s)
+        };
+        mouth + (self.depth - mouth) * ramp
     }
 
     /// Tube radius at path fraction `t`, mouth flare included.
@@ -207,14 +241,47 @@ impl CaveSpec {
         // authored end point, so the last station is usually a short stub —
         // keying on the index would put the middle of a `radius="2 6 2"`
         // profile wherever the stations happened to fall, not halfway along
-        // the tunnel.
-        let ts = arc_fractions(&stations);
+        // the tunnel. Um caminho de comprimento ZERO (dois pontos iguais,
+        // `<Cave path="10 10 10 10"/>`) não tem túnel: sem guarda todas as
+        // frações ficavam a 0, `depth_at(0)` é 0 e o build emitia uma
+        // cápsula-esfera de ar À SUPERFÍCIE — uma cratera que ninguém pediu.
+        // O `<Bridge>` e o `<Arch>` já devolvem vazio neste caso.
+        let Some(ts) = arc_fractions(&stations) else {
+            return Vec::new();
+        };
         let centre = |i: usize| -> Vec3 {
             let p = stations[i];
             Vec3::new(p.x, base.sample(p.x, p.y) - self.depth_at(ts[i]), p.y)
         };
 
-        let mut mods: Vec<Box<dyn VoxelMod>> = Vec::with_capacity(stations.len());
+        let mut mods: Vec<Box<dyn VoxelMod>> =
+            Vec::with_capacity(stations.len() + 2);
+        // O monte da boca vem ANTES dos tubos subtractivos: a ordem importa no
+        // campo (`Union` faz min, `Subtract` faz max), por isso a rocha tem de
+        // existir primeiro para o tubo a poder cortar. Invertido, o monte
+        // voltava a tapar o túnel.
+        if self.open_ends && self.mound_height > 0.0 && self.mound_height.is_finite() {
+            let r_mound = if self.mound_radius > 0.0 && self.mound_radius.is_finite() {
+                self.mound_radius
+            } else {
+                self.radius_max() * 4.5
+            };
+            for (end, from) in [(0usize, 1usize), (stations.len() - 1, stations.len() - 2)] {
+                let mouth = stations[end];
+                let inward = (stations[from] - mouth).normalize_or_zero();
+                let ground = base.sample(mouth.x, mouth.y);
+                // A FACE é o plano da boca; o monte cresce para DENTRO. Assim
+                // não há rocha à frente da entrada (que a taparia) e o tubo
+                // corta um arco na face vertical.
+                mods.push(Box::new(HalfEllipsoidMod::new(
+                    format!("{label}:mound:{end}"),
+                    Vec3::new(mouth.x, ground, mouth.y),
+                    Vec3::new(r_mound, self.mound_height, r_mound),
+                    Vec3::new(-inward.x, 0.0, -inward.y),
+                    (r_mound * 0.06).clamp(0.4, 1.2),
+                )));
+            }
+        }
         for i in 0..stations.len() - 1 {
             let (ra, rb) = (self.radius_at(ts[i]), self.radius_at(ts[i + 1]));
             // A constant tube stays a capsule — same mod, same numbers, so a
@@ -284,8 +351,8 @@ impl CaveSpec {
 }
 
 /// Cumulative arc-length fraction of every station, 0 at the first and 1 at
-/// the last.
-fn arc_fractions(stations: &[Vec2]) -> Vec<f32> {
+/// the last. `None` for a zero-length path (nothing to bore).
+fn arc_fractions(stations: &[Vec2]) -> Option<Vec<f32>> {
     let mut acc = Vec::with_capacity(stations.len());
     let mut run = 0.0_f32;
     acc.push(0.0);
@@ -294,9 +361,9 @@ fn arc_fractions(stations: &[Vec2]) -> Vec<f32> {
         acc.push(run);
     }
     if run <= 1e-6 {
-        return vec![0.0; stations.len()];
+        return None;
     }
-    acc.iter().map(|d| d / run).collect()
+    Some(acc.iter().map(|d| d / run).collect())
 }
 
 /// A value sampled from a profile at fraction `t`: empty is 0, one value is
@@ -443,6 +510,15 @@ mod tests {
         let mut s = spec();
         s.radius = vec![0.0];
         assert!(s.build(&Flat(50.0)).is_empty());
+        // Dois pontos iguais: comprimento zero. Sem guarda isto emitia uma
+        // cápsula-esfera de ar à superfície (o `depth_at(0)` é 0) — uma
+        // cratera onde o autor escreveu um caminho degenerado.
+        let mut s = spec();
+        s.path = vec![Vec2::new(10.0, 10.0), Vec2::new(10.0, 10.0)];
+        assert!(
+            s.build(&Flat(50.0)).is_empty(),
+            "zero-length path must not punch a sphere at the surface"
+        );
     }
 
     #[test]
@@ -501,5 +577,85 @@ mod tests {
         let b = spec().build(&Flat(50.0));
         let bounds = |m: &Vec<Box<dyn VoxelMod>>| m.iter().map(|x| x.bounds()).collect::<Vec<_>>();
         assert_eq!(bounds(&a), bounds(&b));
+    }
+
+    /// Avalia os mods na mesma ordem do [`VoxelField`] (Union = min,
+    /// Subtract = max) sem construir o campo inteiro.
+    fn density(mods: &[Box<dyn VoxelMod>], base: &dyn HeightField, p: Vec3) -> f32 {
+        let mut d = p.y - base.sample(p.x, p.z);
+        for m in mods {
+            if !m.bounds().contains(p) {
+                continue;
+            }
+            let md = m.distance(p);
+            d = match m.op() {
+                ModOp::Union => d.min(md),
+                ModOp::Subtract => d.max(-md),
+            };
+        }
+        d
+    }
+
+    #[test]
+    fn test_mound_lifts_a_hill_over_the_mouth_and_the_tube_cuts_it() {
+        let base = Flat(0.0);
+        let bare = spec().build(&base);
+        // Sem monte, 4 m acima da boca é céu (é o poço que se via).
+        assert!(density(&bare, &base, Vec3::new(-40.0, 4.0, 0.0)) > 0.0);
+
+        let mut s = spec();
+        s.mound_height = 10.0;
+        s.mound_radius = 16.0;
+        let mods = s.build(&base);
+        // O monte existe logo atrás da face e fora do tubo.
+        assert!(
+            density(&mods, &base, Vec3::new(-39.0, 4.0, 0.0)) < 0.0,
+            "o monte devia cobrir a boca"
+        );
+        // A face é vertical: 2 m à frente dela é céu, não rocha a tapar a entrada.
+        assert!(
+            density(&mods, &base, Vec3::new(-42.0, 4.0, 0.0)) > 0.0,
+            "o monte não pode avançar para fora da boca"
+        );
+        // Mas o tubo subtractivo continua aberto 6 m adentro...
+        assert!(
+            density(&mods, &base, Vec3::new(-34.0, 0.0, 0.0)) > 0.0,
+            "o túnel devia continuar escavado"
+        );
+        // ...e com teto de rocha por cima.
+        assert!(
+            density(&mods, &base, Vec3::new(-34.0, 4.0, 0.0)) < 0.0,
+            "o monte devia dar teto ao túnel"
+        );
+    }
+
+    #[test]
+    fn test_mouth_lift_levels_the_floor_with_the_ground() {
+        let base = Flat(0.0);
+        let mut s = spec();
+        s.mound_height = 10.0;
+        s.mound_radius = 16.0;
+        s.mouth_lift = true;
+        s.mouth_fraction = 0.5;
+        assert_eq!(s.depth_at(0.0), -3.0, "a boca sobe um raio");
+        let mods = s.build(&base);
+        // O chão da boca está À COTA do terreno: 0,2 m acima é ar...
+        assert!(
+            density(&mods, &base, Vec3::new(-40.0, 0.2, 0.0)) > 0.0,
+            "a boca deve ser um arco andável, não um poço"
+        );
+        // ...e 0,5 m abaixo é rocha (não há cova para onde cair).
+        let p = Vec3::new(-40.0, -0.5, 0.0);
+        assert!(
+            density(&mods, &base, p) < 0.0,
+            "o piso da boca deve assentar no terreno"
+        );
+        // Sem lift, a mesma cota está dentro do tubo escavado.
+        let mut bare = spec();
+        bare.mound_height = 10.0;
+        bare.mound_radius = 16.0;
+        bare.mouth_fraction = 0.5;
+        let bare_mods = bare.build(&base);
+        assert!(density(&bare_mods, &base, Vec3::new(-40.0, -0.5, 0.0)) > 0.0);
     }
 }

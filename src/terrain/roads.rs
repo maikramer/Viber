@@ -282,11 +282,20 @@ impl RoadNetworkSpec {
         let mut degree: HashMap<&str, usize> = HashMap::new();
         let mut max_width: HashMap<&str, f32> = HashMap::new();
         for seg in &self.segments {
+            // A largura da fita que CHEGA ao way é a do segmento (a média das
+            // larguras dos dois ways, ver `expand`), não a largura do próprio
+            // way. Usar a do way subdimensionava o disco onde uma rua estreita
+            // encontra uma larga: o segmento saía com `(2 + 10) / 2 = 6 m` de
+            // largura e o disco do lado estreito ficava com raio de 1,6 m —
+            // a ponta da fita de 3 m de meia-largura passava por fora e a
+            // costura da junção aparecia.
+            let w = match (seg.width, self.way_width(&seg.a), self.way_width(&seg.b)) {
+                (Some(w), _, _) => w,
+                (None, Some(wa), Some(wb)) => (wa + wb) * 0.5,
+                _ => self.default_width,
+            };
             for id in [&seg.a, &seg.b] {
                 *degree.entry(id.as_str()).or_default() += 1;
-                let w = seg
-                    .width
-                    .unwrap_or_else(|| self.way_width(id).unwrap_or(self.default_width));
                 let slot = max_width.entry(id.as_str()).or_insert(0.0);
                 *slot = (*slot).max(w);
             }
@@ -2503,6 +2512,70 @@ mod tests {
         assert!(
             (j[0].radius - expect).abs() < 1e-4,
             "raio segue a ribbon ({expect}): {j:?}"
+        );
+    }
+
+    /// O disco da junção cobre a largura EFETIVA da fita que chega, não a do
+    /// way anfitrião: uma rua de 2 m que encontra três de 10 m produz
+    /// segmentos de 6 m e um disco de 6 m do lado estreito (3,84 m de raio).
+    /// Com a largura do próprio way o raio ficava em 1,68 m e a ponta da fita
+    /// de 3 m de meia-largura ficava de fora.
+    #[test]
+    fn test_junction_disc_covers_a_wide_neighbour_at_a_narrow_way() {
+        let net = RoadNetworkSpec {
+            default_width: 2.0,
+            ways: vec![
+                WaySpec {
+                    id: "hub".into(),
+                    at: Vec2::ZERO,
+                    width: Some(2.0),
+                },
+                WaySpec {
+                    id: "n".into(),
+                    at: Vec2::new(0.0, 30.0),
+                    width: Some(10.0),
+                },
+                WaySpec {
+                    id: "e".into(),
+                    at: Vec2::new(30.0, 0.0),
+                    width: Some(10.0),
+                },
+                WaySpec {
+                    id: "s".into(),
+                    at: Vec2::new(0.0, -30.0),
+                    width: Some(10.0),
+                },
+            ],
+            segments: vec![
+                SegmentSpec {
+                    a: "hub".into(),
+                    b: "n".into(),
+                    ..SegmentSpec::default()
+                },
+                SegmentSpec {
+                    a: "hub".into(),
+                    b: "e".into(),
+                    ..SegmentSpec::default()
+                },
+                SegmentSpec {
+                    a: "hub".into(),
+                    b: "s".into(),
+                    ..SegmentSpec::default()
+                },
+            ],
+            ..RoadNetworkSpec::default()
+        };
+        let j = net.junction_points();
+        assert_eq!(j.len(), 1);
+        let ribbon_half = (2.0 + 10.0) * 0.5 * 0.5; // média dos ways / 2
+        let expect = ribbon_half * (1.0 + RIBBON_WOBBLE) + JUNCTION_MARGIN;
+        assert!(
+            (j[0].radius - expect).abs() < 1e-4,
+            "disco cobre a fita de {ribbon_half} m de meia-largura ({expect}): {j:?}"
+        );
+        assert!(
+            j[0].radius > 2.0 * 0.5 * (1.0 + RIBBON_WOBBLE) + JUNCTION_MARGIN,
+            "não pode voltar à largura do way anfitrião: {j:?}"
         );
     }
 

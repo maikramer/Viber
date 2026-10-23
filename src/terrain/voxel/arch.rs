@@ -123,9 +123,18 @@ impl ArchSpec {
     /// Resolves the openings this spec asks for against the height field.
     fn instances(&self, base: &dyn HeightField) -> Vec<ArchInstance> {
         let foot = |at: Vec2, yaw: f32, span: f32| {
-            // The two feet sit half a clear span plus half a leg out from the
-            // centre, along the arch axis.
-            let reach = span * 0.5 + self.thickness * 0.5;
+            // The two feet sit half the CLEAR span plus half a leg out from
+            // the centre, along the arch axis. No perfil `portal` a abertura
+            // efetiva é clampada a 3/4 da altura (`push_portal`), e é essa
+            // meia-abertura que a perna ocupa: sondar a autoral punha a base
+            // do arco à cota de um ponto vários metros ao lado (numa encosta,
+            // a perna flutuava ou enterrava-se).
+            let span_half = if self.profile == ArchProfile::Portal {
+                (span * 0.5).min(self.height * 0.75)
+            } else {
+                span * 0.5
+            };
+            let reach = span_half + self.thickness * 0.5;
             let (s, c) = yaw.sin_cos();
             // Inverse of `yaw_local`: local +X back out into the world.
             let axis = Vec2::new(c, -s);
@@ -344,6 +353,30 @@ mod tests {
         assert!(
             b.min.y <= west_foot,
             "block bottom {:.2} must reach the downhill ground {west_foot:.2}",
+            b.min.y
+        );
+    }
+
+    #[test]
+    fn test_a_wide_portal_probes_its_feet_at_the_effective_span() {
+        // `portal` clampa a abertura efetiva a 3/4 da altura (aqui 3 m de
+        // meia-abertura), por isso as pernas ficam em ±(3 + 1) = ±4 m. Sondar
+        // a meia-abertura AUTORAL (10 m) ancorava o bloco na cota de um ponto
+        // 7 m ao lado: numa encosta a perna flutuava ou enterrava-se.
+        let spec = ArchSpec {
+            at: Vec2::ZERO,
+            span: Some(20.0),
+            height: 4.0,
+            thickness: 2.0,
+            ..ArchSpec::default()
+        };
+        let mods = spec.build(&Slope);
+        assert_eq!(mods.len(), 1);
+        let b = mods[0].bounds();
+        let leg_ground = Slope.sample(-4.0, 0.0).min(Slope.sample(4.0, 0.0));
+        assert!(
+            b.min.y >= leg_ground - 2.0,
+            "base do arco {:.2} longe do chão das pernas {leg_ground:.2}",
             b.min.y
         );
     }

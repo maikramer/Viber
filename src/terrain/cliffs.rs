@@ -857,6 +857,13 @@ pub fn sharpen_terrain(
     } else {
         super::spec::DEFAULT_SHARPEN_ANGLE
     };
+    // `tan` é negativa a partir de 90° (e explode em 90): o teste
+    // `drop > limit` ficava verdadeiro em TODOS os texels do core e o
+    // `sharpen-angle="95"` terraçava o mapa inteiro em degraus de 2,5 m.
+    // O `scan_steep` já tem esta guarda; o sharpen não a herdou.
+    if angle.is_finite() && angle >= 89.9 {
+        return 0;
+    }
     let limit = angle.to_radians().tan() * grid.texel();
     let seed = if spec.sharpen_seed != 0 {
         spec.sharpen_seed
@@ -1178,6 +1185,36 @@ mod tests {
         let pre_mask = CliffMask::build(&grid, &spec);
         let changed = sharpen_terrain(&mut grid, &spec, &water, &pre_mask);
         assert_eq!(changed, 0, "every steep texel is underwater here");
+    }
+
+    /// `sharpen-angle` ≥ 90° não pode inverter o teste de declive: a tangente
+    /// fica negativa (95°) ou salta para ~1,6e16 (90°), e antes do guard o
+    /// primeiro terraçava TODOS os texels do core. O `scan_steep` já recusava
+    /// esta gama.
+    #[test]
+    fn test_sharpen_rejects_an_angle_at_or_past_vertical() {
+        let mut grid =
+            BrushGrid::new(vec![0u16; 64 * 64], 64, 64, 64.0, 50.0, 1.0).expect("grid");
+        grid.begin_stroke("field");
+        for z in 0..64 {
+            for x in 0..64 {
+                let cx = grid.cell_center(x, z).x;
+                // Rampa suave de 10° (bem abaixo de qualquer trigger).
+                grid.set_cell_height(x, z, 10.0 + cx.clamp(0.0, 30.0) * 0.176);
+            }
+        }
+        grid.commit_stroke();
+        let before = grid.raw().to_vec();
+        let mask = CliffMask::build_with(&grid, 30.0, 10.0, 2.0, 2.0);
+        for angle in [90.0f32, 95.0] {
+            let mut spec = crate::terrain::TerrainSpec::default();
+            spec.sharpen = true;
+            spec.sharpen_angle = angle;
+            spec.sharpen_seed = 3;
+            let changed = sharpen_terrain(&mut grid, &spec, &[], &mask);
+            assert_eq!(changed, 0, "sharpen-angle {angle} não terraça nada");
+            assert_eq!(grid.raw(), before.as_slice(), "grelha intacta a {angle}°");
+        }
     }
 
     /// O bake escreve wall space no R e fator de região no A, e só onde a

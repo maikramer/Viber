@@ -79,8 +79,13 @@ fn resolve_cell_size(hint: f32, world_size: f32, mods: usize) -> f32 {
     if mods < REFINE_ABOVE_MODS {
         return hint.max(floor);
     }
-    // Acima de REFINE_ABOVE_MODS afina-se até ao piso (nunca para além dele).
-    hint.max(floor)
+    // Acima de REFINE_ABOVE_MODS afina-se até ao piso: é o MENOR passo que
+    // mantém `span <= MAX_CELLS_PER_EDGE`, portanto afina o balde sem furar
+    // o teto de memória. (`hint.max(floor)` deixava o passo do chunk — 64 m —
+    // e as ~40 caixas de um tabuleiro continuavam todas no mesmo balde; o
+    // refinamento documentado em AGENTS.md/`chunk_build_bench` tinha ficado
+    // morto, com o ramo a devolver exatamente o mesmo que o de baixo.)
+    floor
 }
 
 impl ModIndex {
@@ -431,6 +436,37 @@ mod tests {
             super::MAX_CELLS_PER_EDGE
         );
         assert!(idx.cell_size() >= super::MIN_CELL_SIZE);
+    }
+
+    /// Um mundo com muitos mods (tabuleiro de ponte, viadutos) AFINA o balde
+    /// até ao piso: com o passo do chunk (64 m) as dezenas de caixas de um
+    /// tabuleiro caem todas no mesmo balde e cada amostra do campo testa-as
+    /// todas (o custo medido em `chunk_build_bench` era 3,5×).
+    #[test]
+    fn test_many_mods_refine_the_bucket_pitch() {
+        let mods: Vec<_> = (0..24u32)
+            .map(|i| {
+                let x = i as f32 * 4.0;
+                boxed("deck", Vec3::new(x, 0.0, 0.0), Vec3::new(x + 8.0, 4.0, 8.0))
+            })
+            .collect();
+        let idx = ModIndex::build(&mods, 4000.0, 64.0);
+        let floor = 4000.0 / super::MAX_CELLS_PER_EDGE;
+        assert!(
+            (idx.cell_size() - floor).abs() < 1e-3,
+            "pitch {} devia afinar ao piso {floor}",
+            idx.cell_size()
+        );
+        // E o balde devolve poucos candidatos, não os 24 (a caixa de 8 m com
+        // bounds +1 toca ~5 baldes na linha; 24 caixas num balde de 64 m é o
+        // que o passo do chunk dava).
+        let near = idx.candidates_at(44.0, 4.0);
+        assert!(
+            near.len() <= 8 && near.len() < mods.len() / 2,
+            "um balde de {:.1} m não devia listar {} mods",
+            idx.cell_size(),
+            near.len()
+        );
     }
 
     #[test]

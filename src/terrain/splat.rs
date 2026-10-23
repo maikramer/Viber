@@ -31,6 +31,7 @@ use bevy::math::Vec2;
 use bevy::render::render_resource::{Extent3d, TextureFormat};
 
 use super::brush::{BrushGrid, smootherstep01};
+use super::paths::{nearest_on_path, station_lerp};
 use super::roads::RoadPath;
 use super::water::{WaterBody, WaterKind};
 use crate::textures::patch_image;
@@ -362,14 +363,14 @@ impl BiomeField {
             patchiness: 0.0,
             aridity: 0.0,
         };
-        // Sem alocação: o campo corre por texel (milhões de vezes no bake).
-        let mut weights = [0.0f32; 16];
+        // Duas passagens (soma, depois mistura), sem alocação: o campo corre
+        // por texel (milhões de vezes no bake). A tabela fixa de 16 slots
+        // anterior cortava as cunhas 17+ em silêncio e redistribuía o peso
+        // delas pelas restantes (o meta `.ahgt` não impõe limite).
         let mut total = 0.0;
-        for (wedge, slot) in self.wedges.iter().zip(weights.iter_mut()) {
+        for wedge in &self.wedges {
             let d = dir.dot(wedge.dir).max(0.0);
-            let w = d.powi(Self::WEDGE_SHARPNESS as i32);
-            total += w;
-            *slot = w;
+            total += d.powi(Self::WEDGE_SHARPNESS as i32);
         }
         let outer = 1.0 - core;
         if total <= 1e-6 {
@@ -385,7 +386,9 @@ impl BiomeField {
             acc.aridity += blend.aridity * w;
         };
         add(vale, core);
-        for (wedge, w) in self.wedges.iter().zip(&weights) {
+        for wedge in &self.wedges {
+            let d = dir.dot(wedge.dir).max(0.0);
+            let w = d.powi(Self::WEDGE_SHARPNESS as i32);
             add(wedge.biome.palette(), outer * w / total);
         }
         // Fecha a soma: as cunhas já somam 1 por construção, mas o warp e o
@@ -1038,15 +1041,30 @@ fn shore_weights(x: f32, z: f32, y: f32, ctx: &mut TexelCtx) -> (f32, f32, f32, 
     (sand, mud, shallow, bed)
 }
 
-/// Signed distance to the nearest non-bridge road ribbon (≤ 0 on it).
+/// Signed distance to the nearest road ribbon that actually touches the
+/// ground (≤ 0 on it).
+///
+/// Vãos SUSPENSOS (`deck`: viaduto ou `<Road profile="bridge">`) ficam de
+/// fora: a fita é desenhada à cota do tabuleiro e a projeção XZ dela não toca
+/// no vale em baixo. Sem esta guarda o splat pintava uma trilha de
+/// `dirt_road`/`dirt_trail` no fundo do vale sob o viaduto — visível de lado,
+/// porque o chão lá em baixo está exposto.
 fn road_distance(x: f32, z: f32, ctx: &mut TexelCtx) -> f32 {
     let p = Vec2::new(x, z);
     let mut best = f32::INFINITY;
     for (bounds, road) in ctx.road_boxes {
-        if !bounds.contains(p) {
+        if !bounds.contains(p) || road.bridge {
             continue;
         }
-        best = best.min(road.distance_to_road(p));
+        let Some(hit) = nearest_on_path(&road.stations, p) else {
+            continue;
+        };
+        // O vão é decidido pela ESTAÇÃO projetada, não por «estar na fita»: a
+        // franja de 1–2,4 m além da borda também não pode gastar o vale.
+        if road.deck_weight(&hit) > 0.5 {
+            continue;
+        }
+        best = best.min(hit.point.distance(p) - station_lerp(&road.half_width, &hit));
     }
     best
 }
@@ -1567,6 +1585,87 @@ mod tests {
         assert!(
             (n_a - n_b).abs() > 1.0,
             "different seeds must shift the noise fields"
+        );
+    }
+
+    #[test]
+    fn test_biome_field_keeps_every_wedge_past_sixteen() {
+        use bevy::math::Vec2;
+        // 16 cunhas `vale` e 4 `desert` TODAS na mesma direção: a lei do campo
+        // manda ~20 % de deserto. A tabela fixa de 16 slots ignorava as 4
+        // últimas em silêncio e o chão saía 100 % vale.
+        let mut wedges: Vec<BiomeWedge> = (0..16)
+            .map(|_| BiomeWedge {
+                dir: Vec2::X,
+                biome: Biome::Vale,
+            })
+            .collect();
+        for _ in 0..4 {
+            wedges.push(BiomeWedge {
+                dir: Vec2::X,
+                biome: Biome::Desert,
+            });
+        }
+        let field = BiomeField {
+            wedges,
+            core: 0.0,
+            blend: 1.0,
+        };
+        let blend = field.sample(100.0, 0.0, 0);
+        assert!(
+            blend.aridity > 0.15 && blend.ground[SLOT_DESERT_SAND] > 0.1,
+            "as cunhas 17+ entram na mistura: aridity {:.3}, desert_sand {:.3}",
+            blend.aridity,
+            blend.ground[SLOT_DESERT_SAND]
+        );
+        let sum: f32 = blend.ground.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-3, "soma normalizada: {sum}");
+    }
+
+    #[test]
+    fn test_splat_does_not_paint_a_trail_under_a_viaduct() {
+        use crate::terrain::roads::RoadProfile;
+        let world = flat_world();
+        // Pista ao longo de X: tabuleiro suspenso em |x| ≤ 3, rampa em terra
+        // nos extremos.
+        let stations: Vec<Vec2> = (-10..=10).map(|i| Vec2::new(i as f32, 0.0)).collect();
+        let n = stations.len();
+        let deck: Vec<bool> = stations.iter().map(|p| p.x.abs() <= 3.0).collect();
+        let road = RoadPath {
+            name: None,
+            stations,
+            half_width: vec![2.0; n],
+            profile: RoadProfile::Artery,
+            surface: vec![6.0; n],
+            deck,
+            bridge: false,
+            deck_y: None,
+        };
+        let boxes_r = vec![(road_bounds(&road, 4.4), &road)];
+        let boxes_w: Vec<(Bounds, &WaterBody)> = Vec::new();
+        let mut ctx = TexelCtx {
+            params: &params(),
+            shore: 4.0,
+            water_boxes: &boxes_w,
+            road_boxes: &boxes_r,
+            cliff: None,
+        };
+        let under = weights_at(0.0, 0.0, world.grid.sample(0.0, 0.0), 1.0, 50.0, &mut ctx);
+        assert!(
+            under[SLOT_DIRT_TRAIL] + under[SLOT_DIRT_ROAD] < 1e-3,
+            "o vale sob o tabuleiro não leva trilha: {under:?}"
+        );
+        // Franja logo além da borda do tabuleiro (1,5 m): a projeção ainda é
+        // uma estação em vão, por isso também não gasta o chão.
+        let fringe = weights_at(0.0, 3.5, world.grid.sample(0.0, 3.5), 1.0, 50.0, &mut ctx);
+        assert!(
+            fringe[SLOT_DIRT_ROAD] < 1e-3,
+            "a franja do viaduto também não pinta o vale: {fringe:?}"
+        );
+        let ground = weights_at(9.0, 0.0, world.grid.sample(9.0, 0.0), 1.0, 50.0, &mut ctx);
+        assert!(
+            ground[SLOT_DIRT_TRAIL] + ground[SLOT_DIRT_ROAD] > 0.05,
+            "o vão em terra continua gasto: {ground:?}"
         );
     }
 

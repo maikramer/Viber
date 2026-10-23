@@ -38,8 +38,8 @@ pub use cliff::{CliffBand, build_cliff_mods, profile_offset};
 pub use field::{Span, VoxelField};
 pub use index::{ChunkClass, ModIndex};
 pub use mods::{
-    ArchMod, Bounds3, BoxMod, CapsuleMod, EllipsoidMod, ModOp, OrientedBoxMod, RoundConeMod,
-    VoxelMod,
+    ArchMod, Bounds3, BoxMod, CapsuleMod, EllipsoidMod, HalfEllipsoidMod, ModOp, OrientedBoxMod,
+    RoundConeMod, VoxelMod,
 };
 pub use scatter::{RockFeaturesSpec, ScatterGuards, ScatterResult, ScatterStats, TakenDisc};
 pub use spawn::{

@@ -1405,18 +1405,19 @@ pub fn bootstrap(world: &mut World) {
     // Caminho 100% VOLUMÉTRICO: toda a grelha sai do campo voxel por
     // transvoxel, com ladder de LOD por coluna. O heightfield sobrevive só
     // como DADO (termo-base do SDF, carve de água/estradas, máscaras).
-    let voxel_standard = {
-        let handle = terrain_standard_material(
-            world,
-            &mut materials,
-            asset_server.as_ref(),
-            &spec,
-            &mut watched,
-        );
-        let mut m = materials.get(&handle).cloned().unwrap_or_default();
-        m.double_sided = true;
-        materials.add(m)
-    };
+    let voxel_standard = terrain_standard_material(
+        world,
+        &mut materials,
+        asset_server.as_ref(),
+        &spec,
+        &mut watched,
+        // Double-sided: as folhas finas sub-voxel (arcos, beirais) leem-se
+        // como buracos com culling. Tem de ser ESTE o material publicado — a
+        // versão anterior publicava um CLONE e o watch da textura ficava no
+        // original: uma textura em falta era limpa no material errado e o
+        // terreno inteiro desaparecia em vez de cair no tint.
+        true,
+    );
     let stats = super::voxel::spawn_voxel_columns(
         world,
         &mut meshes,
@@ -1488,11 +1489,13 @@ fn terrain_standard_material(
     asset_server: Option<&AssetServer>,
     spec: &TerrainSpec,
     watched: &mut Vec<WatchedTexture>,
+    double_sided: bool,
 ) -> Handle<StandardMaterial> {
     let mut material = StandardMaterial {
         base_color: Color::WHITE,
         metallic: 0.0,
         perceptual_roughness: 0.95,
+        double_sided,
         ..StandardMaterial::default()
     };
     let mut texture_handle = None;
@@ -2096,7 +2099,7 @@ fn spawn_water(
             base_color: Color::WHITE,
             metallic: 0.0,
             perceptual_roughness: 0.08,
-            reflectance: 0.8,
+            reflectance: 0.30,
             alpha_mode: bevy::material::AlphaMode::Blend,
             cull_mode: None,
             ..StandardMaterial::default()
@@ -2166,16 +2169,38 @@ fn spawn_water(
                 })
                 .collect()
         } else {
+            // Rios: a espuma vive na LINHA DE ÁGUA, como nos lagos — um
+            // emissor no centro da linha punha um rasto de espuma a descer o
+            // meio do canal (o comentário acima promete "ao longo da linha de
+            // água"). Amostra ambas as margens em estações alternadas, cada
+            // uma à meia-largura efetiva do registry (a mesma métrica da
+            // ribbon), até ao teto por corpo.
             let step = (FOAM_SPACING / super::water::RIVER_STATION_SPACING)
                 .round()
                 .max(1.0) as usize;
-            body.stations
-                .iter()
-                .enumerate()
-                .step_by(step)
-                .take(FOAM_MAX_PER_BODY)
-                .filter_map(|(i, st)| body.surface_y.get(i).map(|&y| (*st, y)))
-                .collect()
+            let n = body.stations.len();
+            let mut out = Vec::with_capacity(FOAM_MAX_PER_BODY);
+            for i in (0..n).step_by(step) {
+                if out.len() >= FOAM_MAX_PER_BODY {
+                    break;
+                }
+                let st = body.stations[i];
+                let next = body.stations[(i + 1).min(n - 1)];
+                let prev = body.stations[i.saturating_sub(1)];
+                let dir = (next - prev).normalize_or_zero();
+                let perp = Vec2::new(-dir.y, dir.x);
+                let half = body.half_width_at(i);
+                let Some(&y) = body.surface_y.get(i) else {
+                    continue;
+                };
+                for side in [-1.0f32, 1.0] {
+                    if out.len() >= FOAM_MAX_PER_BODY {
+                        break;
+                    }
+                    out.push((st + perp * (half * side), y));
+                }
+            }
+            out
         };
         for (p, y) in foam_positions {
             // Margens voxel: um emissor dentro da parede sólida nunca é
