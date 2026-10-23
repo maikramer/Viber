@@ -45,8 +45,19 @@ impl Locale {
     }
 }
 
+/// Idioma pedido por `VIBER_LANG`; vazio/só espaços é OMISSO (`pt`). Um
+/// `VIBER_LANG= viber run` (variável vazia num script) selecionava
+/// `locale/.json`, que não existe, e deixava a tabela vazia — todas as chaves
+/// `@…` apareciam cruas, sem aviso nenhum.
 pub fn lang_from_env() -> String {
-    std::env::var("VIBER_LANG").unwrap_or_else(|_| "pt".into())
+    pick_lang(std::env::var("VIBER_LANG").ok().as_deref())
+}
+
+fn pick_lang(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|lang| !lang.is_empty())
+        .unwrap_or("pt")
+        .to_string()
 }
 
 pub struct LocalePlugin {
@@ -68,5 +79,15 @@ mod tests {
         let locale = Locale::load(Path::new("/no/such/locale"), "pt");
         assert_eq!(locale.resolve("Olá"), "Olá");
         assert_eq!(locale.resolve("@hi"), "@hi");
+    }
+
+    /// `VIBER_LANG` vazio (ou só espaços) cai no default `pt`, nunca no
+    /// ficheiro inexistente `locale/.json`.
+    #[test]
+    fn empty_env_language_falls_back_to_pt() {
+        assert_eq!(pick_lang(None), "pt");
+        assert_eq!(pick_lang(Some("")), "pt");
+        assert_eq!(pick_lang(Some("   ")), "pt");
+        assert_eq!(pick_lang(Some(" en ")), "en");
     }
 }

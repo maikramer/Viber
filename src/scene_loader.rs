@@ -902,6 +902,9 @@ pub fn reset_scene_resources(world: &mut World) {
     // override deixado por um script antigo escolhia a layer da cena nova.
     reset_default::<crate::music::MusicLayerOverride>(world);
     reset_default::<PortalGrace>(world);
+    // Falhas de sync da cena anterior (o badge "recarregar" do editor) não
+    // sobrevivem à troca: a cena nova pode ser perfeitamente sync-ável.
+    reset_default::<crate::scene::sync::SceneSyncStatus>(world);
     crate::nav::reset_for_scene(world);
 }
 
