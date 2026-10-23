@@ -75,8 +75,9 @@ impl HotReloadState {
                 if !is_write_event(&event.kind) {
                     return;
                 }
-                // Canal cheio = editor a fazer spam; a próxima recarga apanha
-                // o ficheiro final. Nunca bloquear a thread do watcher.
+                // O canal é drenado a cada frame; o send nunca bloqueia a
+                // thread do watcher, e um editor em spam só faz a próxima
+                // recarga apanhar o ficheiro final.
                 let _ = tx.send(event);
             }
         })?;
@@ -168,6 +169,31 @@ pub fn reload_script(
     Ok(count)
 }
 
+/// Caminho de `abs` relativo a `root` (canónico), com `/`.
+///
+/// A forma ENTREGUE pelo watcher ganha quando é lexicalmente limpa (sem `.`/`..`):
+/// preserva o nome de um symlink DENTRO de `scripts/`, que é a chave do
+/// registry (`alias.lua -> sub/real.lua` tem de recarregar `alias.lua`). Se o
+/// caminho não começa na raiz (grafias de backend: `/var` vs `/private/var`
+/// no macOS, FSEvents) ou não é lexicalmente limpo, cai-se na forma canónica.
+fn relative_to_root(root: &Path, abs: &Path) -> Option<String> {
+    let lexical = abs
+        .strip_prefix(root)
+        .ok()
+        .filter(|rel| {
+            rel.components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+        .map(Path::to_path_buf);
+    let canonical = abs
+        .canonicalize()
+        .ok()
+        .and_then(|path| path.strip_prefix(root).ok().map(Path::to_path_buf));
+    lexical
+        .or(canonical)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+}
+
 /// Drena o watcher e aplica as recargas prontas. Corre ANTES do
 /// `luau_on_add`/`luau_update` para o frame seguinte já usar o chunk novo.
 #[allow(clippy::type_complexity)]
@@ -178,18 +204,13 @@ pub fn hot_reload_poll(
 ) {
     let Some(mut state) = state else { return };
     for abs in state.ready_paths() {
-        // O watcher entrega caminhos absolutos com o prefixo da raiz
-        // canónica; o registry indexa caminhos relativos (com `/` — o
-        // mesmo formato dos paths no XML). Canonicalizar antes de casar:
-        // alguns backends (FSEvents, symlinks, `./`) entregam a MESMA
-        // entrada noutra grafia e o `strip_prefix` falhava em silêncio —
-        // hot-reload morto sem um único aviso.
-        let abs = abs.canonicalize().unwrap_or(abs);
-        let Some(rel) = abs
-            .strip_prefix(&state.root)
-            .ok()
-            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        else {
+        // Caminho do registry (relativo à raiz canónica, com `/`). A forma
+        // ENTREGUE pelo watcher ganha quando é lexicalmente limpa: um
+        // `scripts/alias.lua` simbólico para outro ficheiro é a chave que o
+        // XML referencia, e canonicalizá-lo dava `sub/real.lua` — o registry
+        // não casava e a edição era ignorada em silêncio. A forma canónica
+        // cobre as grafias de backend (`./`, symlinks de path no macOS).
+        let Some(rel) = relative_to_root(&state.root, &abs) else {
             continue;
         };
         // Só chunks que a engine já carregou (ficheiros novos não referem
@@ -260,6 +281,30 @@ mod tests {
     }
     use super::*;
     use std::fs;
+
+    /// O caminho do registry vem do watcher e preserva o nome de um symlink
+    /// DENTRO de `scripts/`; a forma canónica só serve de fallback (grafias
+    /// de backend, `..`). Canonicalizar sempre dava `sub/real.lua` para um
+    /// `alias.lua -> sub/real.lua` e a edição era ignorada sem aviso.
+    #[test]
+    fn relative_path_keeps_symlink_names_under_the_root() {
+        let dir = temp_scripts_dir("relpath");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/real.lua"), "loaded = 1").unwrap();
+        let root = dir.canonicalize().expect("raiz canónica");
+        std::os::unix::fs::symlink(root.join("sub/real.lua"), root.join("alias.lua"))
+            .expect("symlink");
+        assert_eq!(
+            relative_to_root(&root, &root.join("alias.lua")).as_deref(),
+            Some("alias.lua")
+        );
+        // `..` não é lexicalmente limpo → forma canónica.
+        assert_eq!(
+            relative_to_root(&root, &root.join("sub/../sub/real.lua")).as_deref(),
+            Some("sub/real.lua")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn temp_scripts_dir(tag: &str) -> PathBuf {
         let dir =

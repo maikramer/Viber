@@ -61,11 +61,40 @@ pub fn dispatch_contacts(
     controllers: Query<(Entity, &KinematicCharacterControllerOutput)>,
 ) {
     let dt = time.delta_secs();
-    // Dono despawnado: o exit já não tem para quem correr.
-    book.pairs
-        .retain(|(owner, _), _| scripts.get(*owner).is_ok());
-
+    // Dono despawnado: o exit já não tem para quem correr. O OUTRO lado
+    // também conta: um prop que desaparece a meio do contacto não gera
+    // `CollisionEvent::Stopped` (o collider sai com a entidade) e o par
+    // ficava vivo para sempre — `on_*_stay` corria todos os frames com um id
+    // morto e a posição ZERO. Sem `GlobalTransform` a entidade não existe
+    // para a física (Transform requer GlobalTransform), logo é o teste de
+    // vivacidade certo aqui.
+    //
+    // O OUTRO lado despawnado ainda leva o hook de EXIT (sintético, só com o
+    // id): para o Rapier o contacto acabou, e sem este evento um script que
+    // conta quem está dentro do sensor nunca descia (o `Stopped` nunca chega).
     let mut fires: Vec<(Entity, ContactHook, OtherBody)> = Vec::new();
+    let mut gone: Vec<((Entity, Entity), bool)> = Vec::new();
+    book.pairs.retain(|key, live| {
+        if scripts.get(key.0).is_err() {
+            return false;
+        }
+        if globals.get(key.1).is_err() {
+            gone.push((*key, live.trigger));
+            return false;
+        }
+        true
+    });
+    for ((owner, other), trigger) in gone {
+        fires.push((
+            owner,
+            ContactHook::exit(trigger),
+            OtherBody {
+                id: other.to_bits() as i64,
+                name: None,
+                pos: Vec3::ZERO,
+            },
+        ));
+    }
 
     for event in events.read() {
         let (a, b, flags, started) = match *event {
@@ -509,6 +538,65 @@ mod tests {
             "controller e evento não duplicam o enter"
         );
         assert_eq!(lua_string(&app, "last"), "hero");
+    }
+
+    #[test]
+    fn other_despawned_mid_contact_fires_exit() {
+        // Um corpo que desaparece DENTRO do sensor não gera
+        // `CollisionEvent::Stopped`: sem um exit sintético o script que conta
+        // quem está dentro ficava com a contagem presa para sempre.
+        let mut app = physics_app(
+            "entered = 0\n\
+             exited = 0\n\
+             function on_trigger_enter(other)\n\
+               entered = entered + 1\n\
+             end\n\
+             function on_trigger_exit(other)\n\
+               exited = exited + 1\n\
+             end\n",
+        );
+        let zone = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                RigidBody::Fixed,
+                Collider::cuboid(1.0, 1.0, 1.0),
+                LuaScriptRef {
+                    path: "zone.lua".into(),
+                },
+                Name::new("zone"),
+            ))
+            .id();
+        {
+            let mut entity = app.world_mut().entity_mut(zone);
+            stamp_collider_role(&mut entity, true, true);
+        }
+        let hero = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(6.0, 0.0, 0.0),
+                RigidBody::KinematicPositionBased,
+                Collider::ball(0.4),
+                Name::new("hero"),
+            ))
+            .id();
+        for _ in 0..5 {
+            app.update();
+        }
+        app.world_mut()
+            .get_mut::<Transform>(hero)
+            .unwrap()
+            .translation = Vec3::ZERO;
+        for _ in 0..12 {
+            app.update();
+        }
+        assert_eq!(lua_count(&app, "entered"), 1, "um enter");
+        // Despawn a meio do contacto: o Rapier não emite Stopped.
+        app.world_mut().despawn(hero);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(lua_count(&app, "exited"), 1, "exit sintético uma vez");
     }
 
     fn shove_hero(mut controllers: Query<&mut KinematicCharacterController>) {

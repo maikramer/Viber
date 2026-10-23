@@ -121,10 +121,18 @@ fn hud_script_opens_journal_and_punches_the_combo() {
           game=function() return game end,
           quest_defs=function() return {} end,
           quest_state=function() return "not_taken" end,
-          load=function() return {
-            quest_defs=function() return {} end,
-            quest_state=function() return "not_taken" end,
-          } end,
+          load=function(path)
+            -- O HUD carrega a barra de fala; o contrato testado aqui é o do
+            -- HUD, por isso o stub devolve um tick vazio em vez do módulo real
+            -- (que depende de `viber.nlu`/`viber.ui.events`).
+            if path == "ui/say.lua" then
+              return {tick=function() end}
+            end
+            return {
+              quest_defs=function() return {} end,
+              quest_state=function() return "not_taken" end,
+            }
+          end,
           ui={
             number=function(key) return 0 end,
             get=function(key) return combo end,

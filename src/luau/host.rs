@@ -310,7 +310,23 @@ impl LuaScriptHost {
         // O lint aceita o estilo antigo `scripts/x.lua`; o runtime tem de
         // resolver o mesmo caminho (a chave do registry fica a autoral).
         let relative = path.strip_prefix("scripts/").unwrap_or(path);
-        let full = self.scripts_dir.join(relative);
+        // Mesma regra do `viber.load`/`load_json`: um `script="../../x.lua"`
+        // (ou um caminho absoluto) lia e executava um ficheiro FORA de
+        // `scripts/` — e a lint só via o caminho autoral.
+        let relative_path = std::path::Path::new(relative);
+        let inside = !relative.is_empty()
+            && relative_path.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+        if !inside {
+            return Err(mlua::Error::runtime(format!(
+                "script '{path}': só caminhos relativos a scripts/ (sem '..')"
+            )));
+        }
+        let full = self.scripts_dir.join(relative_path);
         let code = std::fs::read_to_string(&full).map_err(|e| {
             mlua::Error::runtime(format!("failed to read script {}: {e}", full.display()))
         })?;
@@ -343,6 +359,12 @@ impl LuaScriptHost {
             ctx.entity = Some(entity);
             ctx.path = Some(path.to_string());
             ctx.origin = origin;
+            // Nome/props são POR ENTIDADE e só existem depois de um hook ou
+            // do snapshot do frame; o top-level de uma instância nova lia o
+            // nome/props da ÚLTIMA entidade que correu (o mesmo bug que os
+            // hooks já não têm). Sem dados, nil — nunca o vizinho.
+            ctx.self_name = None;
+            ctx.self_props = None;
             ctx.origin
         } else {
             Vec3::ZERO
@@ -378,7 +400,6 @@ impl LuaScriptHost {
             if let Some(mut ctx) = self.lua.app_data_mut::<ScriptCtx>() {
                 ctx.top_level = false;
             }
-            ran?;
             let script = self
                 .registry
                 .get_mut(path)
@@ -388,6 +409,13 @@ impl LuaScriptHost {
             // `raw_get` falhar; com `ran` ainda falso, cada `on_add`/contacto
             // re-corria o TOP-LEVEL (timers e efeitos do topo repetiam-se a
             // cada toque). O erro continua a ser reportado uma vez.
+            //
+            // Também marca antes de propagar um erro do PRÓPRIO top-level:
+            // o top-level corre UMA vez por path (contrato), e um script que
+            // rebenta depois de registar `viber.every`/`viber.after`
+            // re-registava o timer por cada entidade nova que o usasse. Os
+            // hooks definidos antes do erro ficam extraídos (o parcial
+            // continua a correr; os erros são dados, não fatais).
             script.ran = true;
             script.on_update = script.env.raw_get::<Option<Function>>("on_update")?;
             script.on_player_attack = script.env.raw_get::<Option<Function>>("on_player_attack")?;
@@ -403,6 +431,9 @@ impl LuaScriptHost {
             script.on_collision_exit = script
                 .env
                 .raw_get::<Option<Function>>("on_collision_exit")?;
+            // O erro do top-level continua a chegar ao chamador (warn 1× via
+            // `warn_once`) — mas o chunk já está marcado como executado.
+            ran?;
         }
         Ok(())
     }
@@ -465,6 +496,10 @@ impl LuaScriptHost {
             ctx.origin = origin;
             ctx.self_name = self_name;
             ctx.self_props = self_props;
+            // O hook não tem range autorado próprio (`set_interaction` só
+            // aplica pós-frame): sem isto a callback lia o range de OUTRA
+            // entidade, semeado pelo último `on_update` do frame anterior.
+            ctx.interaction_range = None;
         }
         let cb = self
             .registry
@@ -504,9 +539,12 @@ impl LuaScriptHost {
             ctx.origin = origin;
             ctx.dt = dt;
             // Um hook de `tree.lua` partilhado lia o `self_name`/props do
-            // último `on_update` (outra árvore) — `viber.prop` mentia.
+            // último `on_update` (outra árvore) — `viber.prop` mentia. O
+            // `interaction_range` também é por entidade: um contacto não tem
+            // range autorado (o `set_interaction` aplica pós-frame).
             ctx.self_name = self_name;
             ctx.self_props = self_props;
+            ctx.interaction_range = None;
         }
         let callback = self.registry.get(path).and_then(|script| match hook {
             ContactHook::TriggerEnter => script.on_trigger_enter.clone(),
@@ -792,7 +830,18 @@ fn json_to_lua_value(lua: &mlua::Lua, value: &serde_json::Value) -> mlua::Result
         serde_json::Value::Object(map) => {
             let table = lua.create_table()?;
             for (key, value) in map {
-                table.raw_set(key.as_str(), json_to_lua_value(lua, value)?)?;
+                // Chaves de tabela NUMÉRICAS: o dump (`lua_table_to_json`)
+                // grava-as como texto porque JSON só tem chaves string. Sem
+                // as converter de volta, `st.inside[bits]` (o padrão de um
+                // script que indexa por id) lia nil depois do streaming
+                // dormir/acordar a entidade. Só a forma canónica (`7`, `0`,
+                // `-3`) volta a inteiro: "07"/"1.5" ficam strings.
+                match key.parse::<i64>() {
+                    Ok(index) if index.to_string() == key.as_str() => {
+                        table.raw_set(index, json_to_lua_value(lua, value)?)?;
+                    }
+                    _ => table.raw_set(key.as_str(), json_to_lua_value(lua, value)?)?,
+                }
             }
             mlua::Value::Table(table)
         }

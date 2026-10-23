@@ -751,6 +751,197 @@ fn test_bridge_lua_bulk_profiling() {
     assert_eq!(response["result"], serde_json::json!(true));
 }
 
+/// Porta própria — `step`/`play`, `ground` sem terreno e raios sem player.
+const STEP_TEST_PORT: u16 = 35714;
+
+/// Regressões do QA frame a frame: o `play` não pode congelar o mundo
+/// (o `FrameStepper` nascia com `restore` 0.0), o `ground` sem terreno não
+/// pode dizer `applied: 1`, e um raio sem player não pode ser ignorado.
+#[test]
+fn test_step_play_ground_and_radius_regressions() {
+    let mut app = lua_app(STEP_TEST_PORT);
+    let speed = |app: &App| {
+        app.world()
+            .resource::<Time<bevy::time::Virtual>>()
+            .relative_speed()
+    };
+    assert_eq!(speed(&app), 1.0);
+
+    // `play` sem `step`: não há speed guardada — NÃO pode pausar o mundo.
+    let r = lua_call(&mut app, STEP_TEST_PORT, "viber.debug.play() return true");
+    assert_eq!(r["ok"], serde_json::json!(true));
+    app.update();
+    assert_eq!(speed(&app), 1.0, "play sem step não pausa");
+
+    // `step 2`: avança 2 frames a speed 1 e fica pausado.
+    let r = lua_call(&mut app, STEP_TEST_PORT, "viber.debug.step(2) return true");
+    assert_eq!(r["applied"], serde_json::json!(1));
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(speed(&app), 0.0, "step deixa o mundo pausado");
+    // `play` restaura a speed da PRIMEIRA chamada da cadeia (1.0), não 0.
+    let r = lua_call(&mut app, STEP_TEST_PORT, "viber.debug.play() return true");
+    assert_eq!(r["ok"], serde_json::json!(true));
+    assert_eq!(speed(&app), 1.0, "play restaura a speed anterior ao step");
+
+    // `ground{}` sem campo nenhum e só-paredes sem materiais de chunk:
+    // `applied: 0` com warning (antes: no-op silencioso com applied 1).
+    let r = lua_call(&mut app, STEP_TEST_PORT, "viber.debug.ground{} return true");
+    assert_eq!(r["applied"], serde_json::json!(0));
+    assert!(
+        r["warnings"].to_string().contains("nenhum campo"),
+        "warning: {}",
+        r["warnings"]
+    );
+    let r = lua_call(
+        &mut app,
+        STEP_TEST_PORT,
+        "viber.debug.ground{moss = 0.5} return true",
+    );
+    assert_eq!(r["applied"], serde_json::json!(0));
+    assert!(
+        r["warnings"].to_string().contains("sem materiais de chunk"),
+        "warning: {}",
+        r["warnings"]
+    );
+
+    // Raio sem player: erro claro em vez de devolver o snapshot inteiro
+    // (ou os colliders/luzes longe) como se estivessem no raio.
+    let player = {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<Entity, bevy::ecs::query::With<crate::player::Player>>();
+        query.single(app.world()).ok()
+    };
+    app.world_mut().despawn(player.expect("player do lua_app"));
+    for code in [
+        "return viber.debug.entities(10)",
+        "return viber.debug.colliders(10)",
+        "return viber.debug.lights(10)",
+    ] {
+        let r = lua_call(&mut app, STEP_TEST_PORT, code);
+        assert_eq!(r["ok"], serde_json::json!(false), "code: {code} → {r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("sem player")),
+            "erro de raio: {r}"
+        );
+    }
+}
+
+/// Tab do profiler inválido é erro BRP (antes caía no snapshot base e
+/// parecia dados do tab pedido); `all` sem `ProfilerPlugin` é erro, não
+/// panic do exclusive system.
+#[test]
+fn test_profiler_tab_validates_name_and_plugin() {
+    let mut world = World::default();
+    let error = profiler_tab(In(Some(serde_json::json!({ "tab": "fisics" }))), &mut world)
+        .expect_err("tab desconhecido é erro");
+    assert!(error.message.contains("desconhecido"), "{}", error.message);
+    let error = profiler_tab(In(Some(serde_json::json!({ "tab": "all" }))), &mut world)
+        .expect_err("sem ProfilerState é erro");
+    assert!(
+        error.message.contains("profiler inativo"),
+        "{}",
+        error.message
+    );
+}
+
+/// Porta própria — fila de capturas.
+const CAPTURE_QUEUE_TEST_PORT: u16 = 35715;
+
+/// O render aceita UM `Screenshot` por janela por frame: a fila tem de
+/// spawnar um por frame (o resto no frame seguinte), senão o segundo pedido
+/// é despawnado pelo `extract_screenshots` e nunca capturado.
+#[test]
+fn test_capture_requests_spawn_one_per_frame() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins).add_plugins(BridgePlugin {
+        port: CAPTURE_QUEUE_TEST_PORT,
+    });
+    app.update(); // Startup: liga o servidor HTTP (não usado neste teste)
+    {
+        let shared = app.world().resource::<BridgeShared>();
+        let mut store = shared.captures.lock().unwrap();
+        let _first = store.request();
+        let _second = store.request();
+    }
+    app.update();
+    {
+        let shared = app.world().resource::<BridgeShared>();
+        let store = shared.captures.lock().unwrap();
+        assert_eq!(
+            store.pending.len(),
+            1,
+            "o segundo pedido espera o frame seguinte"
+        );
+        assert_eq!(
+            store.screenshot_entities.len(),
+            1,
+            "um `Screenshot` por frame"
+        );
+    }
+    app.update();
+    {
+        let shared = app.world().resource::<BridgeShared>();
+        let store = shared.captures.lock().unwrap();
+        assert_eq!(store.pending.len(), 0, "fila drenada ao ritmo do render");
+        assert_eq!(store.screenshot_entities.len(), 2);
+    }
+}
+
+/// `viber.tree` honra `max_depth` (o dock do editor pede 3) e publica a
+/// posição de MUNDO dos filhos (não a local).
+#[test]
+fn test_tree_max_depth_and_world_translation() {
+    let mut world = World::default();
+    let root = world.spawn((Name::new("root"), Transform::IDENTITY)).id();
+    let child = world
+        .spawn((
+            Name::new("child"),
+            ChildOf(root),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            GlobalTransform::from_translation(Vec3::new(11.0, 2.0, 3.0)),
+        ))
+        .id();
+    world.spawn((Name::new("grand"), ChildOf(child)));
+
+    // Sem `max_depth`: as três entidades NOMEADAS (o `World` do Bevy tem
+    // ainda a entidade interna 0v0 de `DefaultQueryFilters`).
+    let all = tree(In(None), &mut world).expect("tree");
+    let named = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .expect("lista")
+            .iter()
+            .filter_map(|node| node.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(named(&all).len(), 3, "{all}");
+    let child_node = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node.get("name").and_then(Value::as_str) == Some("child"))
+        .expect("child na árvore");
+    assert_eq!(
+        child_node.get("translation"),
+        Some(&serde_json::json!([11.0, 2.0, 3.0])),
+        "filho publica posição de mundo (GlobalTransform)"
+    );
+
+    // `max_depth: 2` = raízes + filhos (a neta fica fora).
+    let shallow =
+        tree(In(Some(serde_json::json!({ "max_depth": 2 }))), &mut world).expect("tree com depth");
+    let names = named(&shallow);
+    assert!(names.iter().any(|name| name == "root"), "{names:?}");
+    assert!(names.iter().any(|name| name == "child"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "grand"), "{names:?}");
+}
+
 /// Porta própria — os testes do bridge correm em paralelo no mesmo binário.
 const IDENTITY_TEST_PORT: u16 = 35707;
 
@@ -944,10 +1135,21 @@ fn test_bridge_lua_introspection_round3() {
         &mut app,
         LUA5_TEST_PORT,
         "local i = viber.debug.info('mob') local g = viber.debug.info('goblin')
-         return { i.hp, i.max_hp, i.ai.nav_profile, g.script }",
+         return { i.hp, i.max_hp, i.ai.nav_profile, g.script,
+                  i.ai.velocity ~= nil, i.ai.desired ~= nil }",
     );
     assert_eq!(r["result"][0].as_f64(), Some(30.0));
     assert_eq!(r["result"][3], serde_json::json!("ghost.lua"));
+    assert_eq!(
+        r["result"][4],
+        serde_json::json!(true),
+        "info().ai traz velocity"
+    );
+    assert_eq!(
+        r["result"][5],
+        serde_json::json!(true),
+        "info().ai traz desired"
+    );
 
     // nav() — config inserida, sem tile ainda.
     let r = lua_call(
@@ -1190,12 +1392,22 @@ fn test_bridge_lua_control_round4() {
     assert_eq!(transform.translation.x, 5.0);
     assert_eq!(transform.translation.z, 0.0);
 
-    // spawn de primitiva FÍSICA: collider + corpo fixo.
+    // spawn de primitiva FÍSICA: collider + corpo fixo. Devolve o NOME do
+    // nó (`debug:spawn:N`) — é o handle para `find` no chunk seguinte (a
+    // entidade só nasce quando a op aplica, depois do chunk).
     let r = lua(
-        "viber.debug.spawn('box:2,2,2', 10, 0, 10, {color = '#ff0000'}) return true",
+        "local name = viber.debug.spawn('box:2,2,2', 10, 0, 10, {color = '#ff0000'}) return name",
         &mut app,
     );
     assert_eq!(r["applied"], serde_json::json!(1));
+    let spawned_name = r["result"]
+        .as_str()
+        .expect("spawn devolve o nome do nó")
+        .to_string();
+    assert!(
+        spawned_name.starts_with("debug:spawn:"),
+        "nome: {spawned_name}"
+    );
     let mut query = app.world_mut().query::<(
         &Name,
         Option<&bevy_rapier3d::prelude::Collider>,
@@ -1249,6 +1461,54 @@ fn test_bridge_lua_control_round4() {
         let srgba = mat.base_color.to_srgba();
         assert!((srgba.green - 1.0).abs() < 1e-3, "base_color verde");
         assert_eq!(mat.metallic, 1.0);
+    }
+
+    // Clone-on-write: dois props que partilham o MESMO material não podem ser
+    // pintados juntos — `set_material` cria uma cópia só para a entidade.
+    let shared = app
+        .world_mut()
+        .resource_mut::<bevy::asset::Assets<bevy::pbr::StandardMaterial>>()
+        .add(bevy::pbr::StandardMaterial::default());
+    let a = app
+        .world_mut()
+        .spawn((
+            Name::new("shared-a"),
+            bevy::pbr::MeshMaterial3d(shared.clone()),
+            Transform::default(),
+        ))
+        .id();
+    let b = app
+        .world_mut()
+        .spawn((
+            Name::new("shared-b"),
+            bevy::pbr::MeshMaterial3d(shared.clone()),
+            Transform::default(),
+        ))
+        .id();
+    let r = lua(
+        "viber.debug.set_material('shared-a', {base_color = '#0000ff'}) return true",
+        &mut app,
+    );
+    assert_eq!(r["applied"], serde_json::json!(1));
+    {
+        let world = app.world();
+        let ha = world
+            .get::<bevy::pbr::MeshMaterial3d<bevy::pbr::StandardMaterial>>(a)
+            .unwrap()
+            .0
+            .clone();
+        let hb = world
+            .get::<bevy::pbr::MeshMaterial3d<bevy::pbr::StandardMaterial>>(b)
+            .unwrap()
+            .0
+            .clone();
+        assert_ne!(ha, hb, "a entidade tocada tem material próprio");
+        assert_eq!(hb, shared, "o irmão continua no material partilhado");
+        let assets = world.resource::<bevy::asset::Assets<bevy::pbr::StandardMaterial>>();
+        let tinted = assets.get(&ha).unwrap().base_color.to_srgba();
+        assert!(tinted.blue > 0.99 && tinted.red < 0.01, "azul aplicado");
+        let untouched = assets.get(&hb).unwrap().base_color.to_srgba();
+        assert!(untouched.red > 0.99, "o irmão não foi pintado");
     }
 
     // set_light ao vivo.

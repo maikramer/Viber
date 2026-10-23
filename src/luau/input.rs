@@ -253,7 +253,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 })?;
                 let active = lua
                     .app_data_ref::<ScriptCtx>()
-                    .map(|ctx| input_is_active(&ctx, code, state))
+                    .map(|ctx| !ctx.ui_typing && input_is_active(&ctx, code, state))
                     .unwrap_or(false);
                 Ok(active)
             })?,

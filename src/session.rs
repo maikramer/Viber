@@ -4,7 +4,7 @@
 //! por agente causou OOM de VRAM a 2026-09-02).
 //!
 //! Contrato (o mutex é o SO, não convenção):
-//! - `<cache>/viber/session-<slug>/lease.json` publicado com hard link
+//! - `<cache>/viber/session/<slug>/lease.json` publicado com hard link
 //!   atómico (`publish_new`: só cria se o destino não existe, conteúdo
 //!   COMPLETO desde o primeiro instante); dois `claim` concorrentes → um
 //!   ganha, o outro recebe `Busy`.
@@ -172,6 +172,16 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// `agora + ttl` em ms, sem overflow.
+///
+/// `ttl.as_millis() as u64` truncava um TTL enorme (`--ttl u64::MAX`): o
+/// `expires_at_ms` dava a volta e o lease nascia JÁ EXPIRADO — o claim dizia
+/// RECLAMADO e o claim seguinte roubava-o. Satura no teto (≈ 584 M anos).
+fn expiry_after(ttl: Duration) -> u64 {
+    let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    now_ms().saturating_add(ttl_ms)
 }
 
 /// Nome de ficheiro tmp ÚNICO por processo+chamada — um `.tmp` partilhado
@@ -346,7 +356,7 @@ impl SessionPaths {
         let lease = Lease {
             owner: owner.to_string(),
             pid: std::process::id(),
-            expires_at_ms: now_ms() + ttl.as_millis() as u64,
+            expires_at_ms: expiry_after(ttl),
         };
         let raw = serde_json::to_string(&lease).context("a escrever lease.json")?;
         if !publish_new(&self.lease_file(), &raw)? {
@@ -370,6 +380,17 @@ impl SessionPaths {
     /// o pid nunca batería). Sem owner, recusa e ensina.
     pub fn release(&self, owner: Option<&str>) -> Result<bool> {
         let Some(lease) = self.read_lease() else {
+            // Distinguir "não havia lease" de "havia um ilegível": o
+            // `busy`/`try_claim` tratam o ficheiro corrupto como OCUPADO,
+            // portanto dizer "não havia lease ativo" deixava o agente num
+            // ciclo sem saída (nem release nem claim passam) sem saber que
+            // tinha de remover o ficheiro à mão.
+            if self.lease_file().exists() {
+                bail!(
+                    "{} ilegível/corrupto — apague-o à mão para libertar a sessão",
+                    self.lease_file().display()
+                );
+            }
             return Ok(false); // nada a libertar
         };
         check_owner(&lease, owner)?;
@@ -394,6 +415,14 @@ impl SessionPaths {
             bail!("sem lease para renovar — reclame primeiro (`session claim`)");
         };
         check_owner(&lease, owner)?;
+        // Um lease já EXPIRADO não se renova: o TTL é o contrato com os
+        // outros agentes — passado ele, qualquer `claim` pode publicar o seu
+        // (com outro owner+pid) entre a nossa re-leitura e o rename, e este
+        // `write_atomic` sobrescrevia o lease do novo dono: dois donos para a
+        // mesma sessão. O dono antigo tem de reclamar de novo.
+        if lease.expires_at_ms <= now_ms() {
+            bail!("lease expirou entretanto — reclame de novo (`session claim`)");
+        }
         // Re-ler imediatamente antes de escrever: um lease roubado após o TTL
         // não pode ser sobrescrito pelo dono antigo.
         match self.read_lease() {
@@ -405,7 +434,7 @@ impl SessionPaths {
             ),
             None => bail!("lease desapareceu entretanto — foi roubado ou libertado"),
         }
-        lease.expires_at_ms = now_ms() + ttl.as_millis() as u64;
+        lease.expires_at_ms = expiry_after(ttl);
         let raw = serde_json::to_string(&lease)?;
         write_atomic(&self.lease_file(), &raw).context("a renovar lease.json")?;
         Ok(ttl)
@@ -458,6 +487,13 @@ impl SessionPaths {
 
     pub fn clear_engine(&self) {
         let _ = std::fs::remove_file(self.engine_file());
+    }
+
+    /// Existe um `engine.json`, parseável ou não? O `session down` usa isto
+    /// para limpar um registo ILEGÍVEL — sem isso dizia "nada a fazer" e
+    /// deixava o ficheiro (e a dúvida sobre a engine) para sempre.
+    pub fn has_engine_record(&self) -> bool {
+        self.engine_file().exists()
     }
 }
 
@@ -546,6 +582,23 @@ mod tests {
         let (_, remaining) = paths.busy().expect("ainda ocupado");
         assert!(
             remaining > Duration::from_secs(290),
+            "restante {remaining:?}"
+        );
+    }
+
+    /// Um TTL absurdo não pode truncar `as_millis()` para u64 e produzir um
+    /// lease já expirado (o claim dizia RECLAMADO e o seguinte roubava-o).
+    #[test]
+    fn test_huge_ttl_does_not_wrap_the_deadline() {
+        let (_dir, paths) = tmp_session("huge-ttl");
+        let claim = paths
+            .claim("agente", Duration::from_secs(u64::MAX), None)
+            .expect("claim com TTL máximo");
+        assert!(matches!(claim, ClaimOutcome::Acquired { .. }));
+        let (owner, remaining) = paths.busy().expect("lease tem de estar vivo");
+        assert_eq!(owner, "agente");
+        assert!(
+            remaining > Duration::from_secs(365 * 24 * 3600),
             "restante {remaining:?}"
         );
     }
@@ -649,5 +702,41 @@ mod tests {
         assert_eq!(info.port, 15702);
         paths.clear_engine();
         assert!(paths.engine_info().is_none());
+    }
+
+    /// Um `lease.json` ilegível deixa a sessão OCUPADA para o `claim`/`busy`:
+    /// o `release` tem de o dizer e ensinar o remédio, não "não havia lease
+    /// ativo" (o agente ficava num ciclo sem saída e a sessão presa).
+    #[test]
+    fn test_release_on_corrupt_lease_explains_the_fix() {
+        let (_dir, paths) = tmp_session("corrupt-release");
+        paths.ensure_dir().unwrap();
+        std::fs::write(paths.lease_file(), "{quebrado").unwrap();
+        let err = paths
+            .release(Some("agente"))
+            .expect_err("não pode dizer que não havia lease")
+            .to_string();
+        assert!(err.contains("ilegível"), "{err}");
+        assert!(paths.lease_file().exists(), "não apaga o que não parseia");
+    }
+
+    /// Passado o TTL, o lease deixou de ser nosso: renová-lo podia
+    /// sobrescrever o de um `claim` concorrente que já publicou (dois donos).
+    #[test]
+    fn test_expired_lease_cannot_be_renewed() {
+        let (_dir, paths) = tmp_session("touch-expired");
+        paths
+            .claim("agente", Duration::from_secs(0), None)
+            .expect("claim com ttl 0");
+        let err = paths
+            .touch(Some("agente"), Duration::from_secs(60))
+            .expect_err("lease expirado não se renova")
+            .to_string();
+        assert!(err.contains("expirou"), "{err}");
+        // E o próximo claim rouba-o limpo.
+        let stolen = paths
+            .claim("novo", Duration::from_secs(60), None)
+            .expect("claim depois do TTL");
+        assert!(matches!(stolen, ClaimOutcome::Acquired { .. }));
     }
 }

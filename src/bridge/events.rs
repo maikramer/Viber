@@ -31,8 +31,10 @@ pub struct BridgeEvent {
     pub seq: u64,
     /// Unix time (s, fracionário).
     pub time: f64,
-    /// "hurt" | "damage" | "death" | "quest" | "ui" | "travel" | "toast"
-    /// | "levelup"
+    /// "damage" | "death" | "ui" | "toast". As regras de jogo (quests, XP,
+    /// level-up, travel) vivem no Lua do jogo e não têm message na engine —
+    /// NENHUM evento desses tipos é emitido (o `kind` é `&'static str`; um
+    /// valor novo exige um produtor em [`collect_bridge_events`]).
     pub kind: &'static str,
     pub data: Json,
 }
@@ -124,6 +126,12 @@ pub fn collect_bridge_events(
     mut ui_actions: MessageReader<crate::ui::actions::UiAction>,
     mut toasts: MessageReader<crate::luau::ScriptToast>,
     deaths: Query<(Entity, Option<&Name>, &crate::vitals::Health), Changed<crate::vitals::Health>>,
+    // Entidades já reportadas mortas: `Changed<Health>` NÃO é "cruzou para
+    // 0". Um `damage` num cadáver reescreve `current = 0` (o deref-mut marca
+    // changed) e um `set_max_hp` também, o que emitia um "death" novo a cada
+    // chamada — QA via mortes fantasma. Sai do conjunto se a entidade voltar
+    // a ter HP > 0 (revive).
+    mut already_dead: Local<std::collections::HashSet<Entity>>,
 ) {
     let mut damage_seen = 0usize;
     for event in damage_numbers.read() {
@@ -150,14 +158,84 @@ pub fn collect_bridge_events(
     for toast in toasts.read() {
         log.push("toast", json!({ "message": toast.0.clone() }));
     }
-    // Mortes: HP acabou de cruzar para 0 (Changed evita repetir o cadáver).
+    // Mortes: só no CRUZAMENTO para HP 0 — um cadáver que continue a levar
+    // `damage`/`set_max_hp` não repete o evento.
     for (entity, name, health) in &deaths {
         if health.current <= 0.0 {
+            if !already_dead.insert(entity) {
+                continue;
+            }
             let mut data = json!({ "entity": entity.to_bits() });
             if let Some(name) = name {
                 data["name"] = json!(name.to_string());
             }
             log.push("death", data);
+        } else {
+            already_dead.remove(&entity);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deaths(app: &App) -> usize {
+        app.world()
+            .resource::<BridgeEventLog>()
+            .since(0)
+            .filter(|event| event.kind == "death")
+            .count()
+    }
+
+    /// O evento `death` é do CRUZAMENTO para 0, não de qualquer mudança num
+    /// cadáver (`Changed<Health>` sozinho repetia-o a cada `damage`/
+    /// `set_max_hp` num corpo já a 0).
+    #[test]
+    fn test_death_event_only_on_hp_crossing() {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .add_message::<crate::feedback::DamageNumberEvent>()
+            .add_message::<crate::ui::actions::UiAction>()
+            .add_message::<crate::luau::ScriptToast>()
+            .init_resource::<BridgeEventLog>()
+            .add_systems(bevy::app::PostUpdate, collect_bridge_events);
+        let entity = app
+            .world_mut()
+            .spawn(crate::vitals::Health {
+                current: 10.0,
+                max: 10.0,
+            })
+            .id();
+        app.update();
+        assert_eq!(deaths(&app), 0, "vivo não gera death");
+
+        app.world_mut()
+            .get_mut::<crate::vitals::Health>(entity)
+            .unwrap()
+            .current = 0.0;
+        app.update();
+        assert_eq!(deaths(&app), 1, "HP a 0 cruza uma vez");
+
+        // Cadáver: mexer no máximo não pode repetir o evento.
+        app.world_mut()
+            .get_mut::<crate::vitals::Health>(entity)
+            .unwrap()
+            .max = 99.0;
+        app.update();
+        assert_eq!(deaths(&app), 1, "cadáver não repete o death");
+
+        // Revive e morre outra vez: evento novo é legítimo.
+        app.world_mut()
+            .get_mut::<crate::vitals::Health>(entity)
+            .unwrap()
+            .current = 5.0;
+        app.update();
+        app.world_mut()
+            .get_mut::<crate::vitals::Health>(entity)
+            .unwrap()
+            .current = 0.0;
+        app.update();
+        assert_eq!(deaths(&app), 2);
     }
 }

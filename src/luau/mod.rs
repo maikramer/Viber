@@ -38,6 +38,8 @@ pub mod fx;
 pub mod game;
 pub mod host;
 pub mod input;
+pub mod nlu;
+pub mod decision;
 pub mod ownership;
 pub mod props;
 pub mod runtime;
@@ -150,20 +152,24 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         app.add_systems(
             Update,
             (
-                luau_on_add,
-                // Troca de cena: os `on_update` param até a cena nova assentar (os
-                // spawners ainda não repovoaram — `alive_in_region` diria 0).
-                timed(Group::Scripts, luau_update).run_if(crate::scene_loader::scene_settled),
-                timed(Group::Scripts, aggro_alert_system)
+                luau_on_add.run_if(crate::app::scripts_enabled),
+                // Troca de cena: os `on_update` param até a cena nova assentar
+                // (os spawners ainda não repovoaram — `alive_in_region` diria 0).
+                timed(Group::Scripts, luau_update)
+                    .run_if(crate::app::scripts_enabled)
                     .run_if(crate::scene_loader::scene_settled),
-                // As remoções correm SEMPRE: o descarregamento despawna as instâncias e o
-                // `RemovedComponents` não espera por ninguém.
+                timed(Group::Scripts, aggro_alert_system)
+                    .run_if(crate::app::scripts_enabled)
+                    .run_if(crate::scene_loader::scene_settled),
+                // As remoções correm SEMPRE — inclusive em modo Edit: o
+                // `RemovedComponents` só guarda ~2 frames, e sem este sistema
+                // `viber.state()`/timers/loops de som de uma entidade apagada
+                // no editor ficavam pendurados para sempre.
                 luau_on_remove,
             )
-                .chain()
-                // Modo Edit (ViberEditor): a cena está congelada — nenhum
-                // `on_update` corre enquanto se edita.
-                .run_if(crate::app::scripts_enabled),
+                .chain(),
+            // Modo Edit (ViberEditor): a cena está congelada — nenhum
+            // `on_update`/`on_add` corre enquanto se edita; só as remoções.
         );
         // Depois do step do Rapier (PostUpdate): os eventos deste frame e os
         // hits do character controller chegam aos hooks no mesmo frame.

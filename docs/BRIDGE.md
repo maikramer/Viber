@@ -104,19 +104,20 @@ Destaque para o que não existia noutra engine de QA:
   queries de colisão.
 - **Construção**: `spawn("box:2,1,2", x, y, z, {color, collider=true, snap,
   yaw, scale})` primitivas FÍSICAS; `spawn("/assets/…/torre.glb", …)` GLB do
-  pool (load assíncrono — o id responde já, `info(id)` depois mostra
-  carregado); `spawn_light`; `set_material/set_light` ao vivo;
-  `clear_markers` limpa TODO o `debug:*`.
+  pool (load assíncrono — devolve o NOME alocado `debug:spawn:N`; usa
+  `find(name)`/`info` no chunk seguinte para o handle); `spawn_light`;
+  `set_material/set_light` ao vivo; `clear_markers` limpa TODO o `debug:*`.
 - **Fluxo de jogo**: `save/load` (mesmo caminho da UI), `teleport_to(name)`,
   `set_camera{distance,pitch,yaw,target}`.
 
 ### 3. PROVAR (asserção e medição)
 
 - **Event log estruturado** (`src/bridge/events.rs`): ring de 1000 eventos
-  `{seq, time, kind, ...}` — `hurt/damage/death/quest/ui/travel/toast/
-  levelup`. `viber.debug.events(since_seq)` ou `viber debug events --since
-  N` (o último seq é o próximo cursor). "A quest ficou ready?", "houve dano
-  no golpe?" são perguntas respondíveis sem grepar logs.
+  `{seq, time, kind, ...}` — `damage/ui/toast/death`. `viber.debug.events(since_seq)`
+  ou `viber debug events --since N` (o último seq é o próximo cursor). "Houve
+  dano no golpe?", "que ação de UI disparou?" são perguntas respondíveis sem
+  grepar logs. (As regras de jogo — quests, XP, viagem — vivem no Lua do jogo;
+  um `kind` novo exige um produtor em `collect_bridge_events`.)
 - **`viber debug step <n>`**: PÁRA o mundo e avança EXATAMENTE n frames à
   speed 1 — e **fica parado** (cada `step` volta a congelar; `step 0` só
   congela). `viber debug play` retoma a speed que estava antes da primeira

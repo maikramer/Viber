@@ -2184,3 +2184,344 @@ end
     assert_eq!(number("alarms"), 4.0);
     assert_eq!(number("members"), 2.0);
 }
+
+#[test]
+fn test_timer_cancel_inside_callback_does_not_leave_markers() {
+    // `every` que se cancela na PRÓPRIA callback: o tick já recolheu a
+    // entrada, portanto o cancelamento tem de a apanhar pelo marcador — mas o
+    // marcador tem de sair no fim, senão cada cancel deixava uma entrada em
+    // `viber_timer_cancelled` para sempre.
+    let host = host_with(
+        "fired = 0\n\
+             handle = nil\n\
+             function on_update(dt)\n\
+               if handle == nil then\n\
+                 handle = viber.every(0.1, function()\n\
+                   fired = fired + 1\n\
+                   viber.timer_cancel(handle)\n\
+                 end)\n\
+               end\n\
+             end",
+        "auto.lua",
+    );
+    let mut app = test_app(host);
+    app.world_mut().spawn((
+        Transform::default(),
+        LuaScriptRef {
+            path: "auto.lua".into(),
+        },
+    ));
+    advance_time(&mut app, 0.2);
+    app.update();
+    advance_time(&mut app, 1.0);
+    app.update();
+    let host = app.world().resource::<LuaScriptHost>();
+    assert_eq!(
+        host.script_global("auto.lua", "fired").unwrap(),
+        mlua::Value::Integer(1),
+        "cancelado na callback não volta a disparar"
+    );
+    let cancelled: Table = host
+        .lua
+        .named_registry_value("viber_timer_cancelled")
+        .unwrap();
+    assert_eq!(cancelled.raw_len(), 0, "sem marcadores órfãos");
+    let collected: Table = host
+        .lua
+        .named_registry_value("viber_timer_collected")
+        .unwrap();
+    assert_eq!(collected.raw_len(), 0, "sem recolhidos órfãos");
+}
+
+#[test]
+fn test_timer_cancel_after_firing_does_not_leave_markers() {
+    // Cancelar um handle já consumido devolve false e não escreve nada na
+    // tabela de cancelados (era um crescimento sem fim num script que
+    // cancela handles antigos por frame).
+    let host = host_with(
+        "fired = 0\n\
+             handle = nil\n\
+             cancel_ret = nil\n\
+             function on_update(dt)\n\
+               if handle == nil then\n\
+                 handle = viber.after(0.1, function() fired = fired + 1 end)\n\
+               elseif fired > 0 and cancel_ret == nil then\n\
+                 cancel_ret = viber.timer_cancel(handle)\n\
+               end\n\
+             end",
+        "tarde.lua",
+    );
+    let mut app = test_app(host);
+    app.world_mut().spawn((
+        Transform::default(),
+        LuaScriptRef {
+            path: "tarde.lua".into(),
+        },
+    ));
+    advance_time(&mut app, 0.2);
+    app.update(); // arma o `after` (vence 0.2 s depois)
+    advance_time(&mut app, 0.2);
+    app.update(); // dispara e o script cancela o handle já consumido
+    let host = app.world().resource::<LuaScriptHost>();
+    assert_eq!(
+        host.script_global("tarde.lua", "fired").unwrap(),
+        mlua::Value::Integer(1),
+        "o after disparou"
+    );
+    assert_eq!(
+        host.script_global("tarde.lua", "cancel_ret").unwrap(),
+        mlua::Value::Boolean(false),
+        "handle já disparado não existia"
+    );
+    let cancelled: Table = host
+        .lua
+        .named_registry_value("viber_timer_cancelled")
+        .unwrap();
+    assert_eq!(cancelled.raw_len(), 0, "sem marcadores órfãos");
+}
+
+#[test]
+fn test_load_module_cache_key_normalizes_dot_segments() {
+    // `viber.load("lib/x.lua")` e `viber.load("./lib/x.lua")` são O MESMO
+    // módulo: com chaves diferentes corria duas vezes (dois estados) e o
+    // hot-reload só evictava a grafia do watcher.
+    let dir = tempfile::tempdir().expect("tmpdir");
+    std::fs::write(
+        dir.path().join("lib_count.lua"),
+        "viber.game().runs = (viber.game().runs or 0) + 1\nreturn { n = 1 }",
+    )
+    .unwrap();
+    let mut host = LuaScriptHost::new(dir.path().to_path_buf()).expect("host");
+    host.load_script(
+        "user.lua",
+        "local a = viber.load('lib_count.lua')\n\
+         local b = viber.load('./lib_count.lua')\n\
+         same = a == b\n\
+         runs = viber.game().runs",
+    )
+    .unwrap();
+    let mut world = World::new();
+    host.activate(world.spawn_empty().id(), "user.lua")
+        .expect("activate");
+    let game: Table = host.lua.named_registry_value("viber_game").unwrap();
+    assert_eq!(
+        game.raw_get::<i64>("runs").unwrap(),
+        1,
+        "módulo correu uma só vez"
+    );
+    assert_eq!(
+        host.script_global("user.lua", "same").unwrap(),
+        mlua::Value::Boolean(true),
+        "as duas grafias devolvem o mesmo módulo"
+    );
+}
+
+#[test]
+fn test_load_script_from_dir_rejects_paths_outside_scripts() {
+    // A mesma regra do `viber.load`: um `script=` com `..`/absoluto lia e
+    // executava um ficheiro fora de `scripts/`.
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join("ok.lua"), "function on_update(dt) end").unwrap();
+    let mut host = LuaScriptHost::new(scripts).expect("host");
+    assert!(host.load_script_from_dir("ok.lua").is_ok());
+    assert!(host.load_script_from_dir("scripts/ok.lua").is_ok());
+    for bad in ["../evil.lua", "/etc/passwd", "sub/../../evil.lua", ""] {
+        assert!(
+            host.load_script_from_dir(bad).is_err(),
+            "devia rejeitar o caminho {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn test_find_empty_name_matches_nobody() {
+    let host = host_with(
+        "achou = nil\nquantos = nil\n\
+             function on_update(dt)\n\
+               if done then return end\n\
+               done = true\n\
+               achou = viber.find('')\n\
+               quantos = #viber.find_all('')\n\
+             end",
+        "vazio.lua",
+    );
+    let mut app = test_app(host);
+    for name in ["alvo", "alvo2", "porta"] {
+        app.world_mut().spawn((
+            Name::new(name),
+            Transform::default(),
+            GlobalTransform::default(),
+        ));
+    }
+    app.world_mut().spawn((
+        Transform::default(),
+        LuaScriptRef {
+            path: "vazio.lua".into(),
+        },
+    ));
+    app.update();
+    let host = app.world().resource::<LuaScriptHost>();
+    assert_eq!(
+        host.script_global("vazio.lua", "achou").unwrap(),
+        mlua::Value::Nil,
+        "nome vazio não identifica ninguém"
+    );
+    assert_eq!(
+        host.script_global("vazio.lua", "quantos").unwrap(),
+        mlua::Value::Integer(0),
+        "find_all('') não devolve o mundo inteiro"
+    );
+}
+
+#[test]
+fn test_nearby_does_not_include_the_calling_entity() {
+    let host = host_with(
+        "n = nil\nprimeiro = nil\n\
+             function on_update(dt)\n\
+               if done then return end\n\
+               done = true\n\
+               local list = viber.nearby(10)\n\
+               n = #list\n\
+               primeiro = list[1] and list[1].name\n\
+             end",
+        "perto.lua",
+    );
+    let mut app = test_app(host);
+    app.world_mut().spawn((
+        Name::new("eu"),
+        Transform::default(),
+        GlobalTransform::default(),
+        LuaScriptRef {
+            path: "perto.lua".into(),
+        },
+    ));
+    app.world_mut().spawn((
+        Name::new("outro"),
+        Transform::from_xyz(4.0, 0.0, 0.0),
+        GlobalTransform::from_xyz(4.0, 0.0, 0.0),
+    ));
+    app.update();
+    let host = app.world().resource::<LuaScriptHost>();
+    assert_eq!(
+        host.script_global("perto.lua", "n").unwrap(),
+        mlua::Value::Integer(1),
+        "só o outro"
+    );
+    match host.script_global("perto.lua", "primeiro").unwrap() {
+        mlua::Value::String(name) => assert_eq!(name.to_string_lossy(), "outro"),
+        other => panic!("primeiro = {other:?}"),
+    }
+}
+
+#[test]
+fn test_state_restore_keeps_numeric_keys() {
+    // O dump grava chaves numéricas como texto (JSON); o restore tem de as
+    // devolver a inteiros — `st.inside[bits]` lia nil depois do streaming.
+    let host = LuaScriptHost::new(PathBuf::from("scripts")).expect("host");
+    let mut world = World::new();
+    let source = world.spawn_empty().id();
+    let target = world.spawn_empty().id();
+    {
+        let states: Table = host.lua.named_registry_value("viber_states").unwrap();
+        let state = host.lua.create_table().unwrap();
+        state.raw_set(7, "sete").unwrap();
+        state.raw_set(0, "zero").unwrap();
+        state.raw_set("nome", "zona").unwrap();
+        states.raw_set(source.to_bits() as i64, state).unwrap();
+    }
+    let json = host.dump_entity_state(source).expect("dump");
+    host.restore_entity_state(target, &json).expect("restore");
+    let states: Table = host.lua.named_registry_value("viber_states").unwrap();
+    let restored: Table = states.raw_get(target.to_bits() as i64).unwrap();
+    assert_eq!(restored.raw_get::<String>(7).unwrap(), "sete");
+    assert_eq!(restored.raw_get::<String>(0).unwrap(), "zero");
+    assert_eq!(restored.raw_get::<String>("nome").unwrap(), "zona");
+}
+
+#[test]
+fn test_release_system_returns_the_native_handler() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             viber.release_system('locomotion')\n\
+         end",
+        "release.lua",
+    );
+    let mut app = test_app(host);
+    app.init_resource::<crate::luau::ScriptSystemOwners>();
+    app.world_mut()
+        .resource_mut::<crate::luau::ScriptSystemOwners>()
+        .0
+        .insert("locomotion".into());
+    app.world_mut().spawn((
+        Transform::default(),
+        LuaScriptRef {
+            path: "release.lua".into(),
+        },
+    ));
+    app.update();
+    let owners = app.world().resource::<crate::luau::ScriptSystemOwners>();
+    assert!(
+        !owners.owns("locomotion"),
+        "locomoção devolvida ao player_movement: {:?}",
+        owners.0
+    );
+}
+
+#[test]
+fn test_set_visible_hides_the_entity_subtree() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             local st = viber.state()\n\
+             if st.done then return end\n\
+             st.done = true\n\
+             viber.set_visible(false)\n\
+         end",
+        "hide.lua",
+    );
+    let mut app = test_app(host);
+    let entity = app
+        .world_mut()
+        .spawn((
+            Transform::default(),
+            Visibility::Inherited,
+            LuaScriptRef {
+                path: "hide.lua".into(),
+            },
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(entity).unwrap(),
+        Visibility::Hidden
+    );
+}
+
+#[test]
+fn test_camera_free_and_pose_reach_the_resource() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             local st = viber.state()\n\
+             if st.done then return end\n\
+             st.done = true\n\
+             viber.camera_free(true)\n\
+             viber.camera_pose(1, 2, 3, 1, 2, 2)\n\
+         end",
+        "cam.lua",
+    );
+    let mut app = test_app(host);
+    app.init_resource::<crate::camera::ScriptCameraFree>();
+    app.init_resource::<crate::camera::CameraSnapshot>();
+    app.world_mut().spawn((
+        Transform::default(),
+        LuaScriptRef {
+            path: "cam.lua".into(),
+        },
+    ));
+    app.update();
+    let free = app.world().resource::<crate::camera::ScriptCameraFree>();
+    assert!(free.active, "modo livre ligado");
+    assert_eq!(free.pos, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(free.look, Vec3::new(1.0, 2.0, 2.0));
+}

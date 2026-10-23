@@ -36,7 +36,13 @@ pub enum ScriptCommand {
         run: f32,
         turn_rate: Option<f32>,
     },
-    TeleportPlayer(Vec3),
+    /// `viber.teleport_player(x, y, z [, id_ignorado])` — o `id` opcional é
+    /// excluído do raio de aterragem (o próprio marco: um poço/torre não pode
+    /// servir de "chão" por cima dele mesmo).
+    TeleportPlayer {
+        pos: Vec3,
+        exclude: Option<Entity>,
+    },
     /// `viber.change_scene(id, entry)` — troca de cena (fade, descarrega, carrega).
     /// `via` = nome da entidade que pediu (o `@back` do regresso aponta-a).
     ChangeScene {
@@ -106,6 +112,23 @@ pub enum ScriptCommand {
     /// Reclama um sistema nativo (`viber.own_system("dialogue")`) — o handler
     /// nativo correspondente cala e a lógica passa a ser do script.
     OwnSystem(String),
+    /// Devolve um sistema nativo ao handler (`viber.release_system`) — o
+    /// inverso de [`Self::OwnSystem`]: o script larga o corpo do herói e o
+    /// `player_movement` volta a andar com ele.
+    ReleaseSystem(String),
+    /// Câmara de jogo conduzida por script (`viber.camera_free`). `false`
+    /// devolve a pose ao rig de terceira pessoa no frame seguinte.
+    CameraFree(bool),
+    /// Pose do modo livre (`viber.camera_pose`): olho + ponto olhado.
+    CameraPose {
+        pos: Vec3,
+        look: Vec3,
+    },
+    /// Esconde/mostra uma entidade e a subárvore (`viber.set_visible`).
+    SetVisible {
+        entity: Entity,
+        visible: bool,
+    },
     /// Dano em ÁREA (`viber.radial_damage`): falloff linear (skills.rs) +
     /// knockback radial opcional; mortes seguem a paridade do
     /// `kill_creature` (corpo, XP, quests, evento `Kill`).

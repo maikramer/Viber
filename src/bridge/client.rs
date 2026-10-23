@@ -138,28 +138,50 @@ impl BridgeClient {
     /// Pede uma captura e faz polling de `viber.screenshot_status` até o PNG
     /// chegar (a captura completa ao fim de ~1-3 frames do render).
     pub fn screenshot(&self, timeout_ms: u64) -> Result<(Vec<u8>, String)> {
-        let request = self.call("viber.screenshot", json!({}))?;
+        let budget = Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + budget;
+        // O pedido inicial e cada poll respeitam o orçamento pedido. Antes,
+        // um poll contra uma engine pendurada (frame congelado) bloqueava os
+        // 30 s do READ_TIMEOUT: `--timeout-ms 1000` levava 30 s a falhar.
+        let request = match self.call_timeout(
+            "viber.screenshot",
+            json!({}),
+            budget.min(READ_TIMEOUT).max(Duration::from_millis(50)),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    bail!("timeout ({timeout_ms} ms) à espera do screenshot");
+                }
+                return Err(error);
+            }
+        };
         let id = request
             .get("id")
             .and_then(Value::as_u64)
             .context("resposta sem capture id")?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 bail!("timeout ({timeout_ms} ms) à espera do screenshot");
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(50).min(remaining));
+            let read = deadline
+                .saturating_duration_since(Instant::now())
+                .min(READ_TIMEOUT)
+                .max(Duration::from_millis(20));
             // Um Err transitório num poll não deve abortar enquanto houver
             // deadline — só propaga quando o tempo esgotou.
-            let status = match self.call("viber.screenshot_status", json!({ "id": id })) {
-                Ok(status) => status,
-                Err(error) => {
-                    if Instant::now() < deadline {
-                        continue;
+            let status =
+                match self.call_timeout("viber.screenshot_status", json!({ "id": id }), read) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        if Instant::now() < deadline {
+                            continue;
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-            };
+                };
             match status.get("status").and_then(Value::as_str) {
                 Some("captured") => {
                     let b64 = status
@@ -207,19 +229,39 @@ impl BridgeClient {
         skip: u32,
         timeout_ms: u64,
     ) -> Result<(Vec<u8>, String, u32, u32, Value)> {
-        let request = self.call("viber.burst", json!({ "frames": frames, "skip": skip }))?;
+        let budget = Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + budget;
+        let request = match self.call_timeout(
+            "viber.burst",
+            json!({ "frames": frames, "skip": skip }),
+            budget.min(READ_TIMEOUT).max(Duration::from_millis(50)),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    bail!("timeout ({timeout_ms} ms) à espera do burst de {frames} frames");
+                }
+                return Err(error);
+            }
+        };
         let id = request
             .get("id")
             .and_then(Value::as_u64)
             .context("resposta sem burst id")?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut last_captured = 0u64;
         loop {
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 bail!("timeout ({timeout_ms} ms) à espera do burst de {frames} frames");
             }
-            std::thread::sleep(Duration::from_millis(50));
-            let status = match self.call("viber.burst_status", json!({ "id": id })) {
+            std::thread::sleep(Duration::from_millis(50).min(remaining));
+            // Poll com o orçamento RESTANTE: uma engine pendurada falha no
+            // --timeout-ms pedido e não nos 30 s de cada leitura.
+            let read = deadline
+                .saturating_duration_since(Instant::now())
+                .min(READ_TIMEOUT)
+                .max(Duration::from_millis(20));
+            let status = match self.call_timeout("viber.burst_status", json!({ "id": id }), read) {
                 Ok(status) => status,
                 Err(error) => {
                     if Instant::now() < deadline {
@@ -317,11 +359,13 @@ impl BridgeClient {
     }
 
     /// Exporta o snapshot completo do profiler para ficheiro
-    /// (`viber.profiler.export`); devolve `{path, bytes}`.
+    /// (`viber.profiler.export`); devolve `{path, bytes}`. Um caminho
+    /// relativo é resolvido no cwd do CLIENTE (é aí que o utilizador o
+    /// procurar; o `fs::write` do engine usa o cwd DELE).
     pub fn prof_export(&self, path: Option<&std::path::Path>) -> Result<Value> {
         let mut params = json!({});
         if let Some(path) = path {
-            params["path"] = json!(path.display().to_string());
+            params["path"] = json!(client_side_path(path).display().to_string());
         }
         self.call("viber.profiler.export", params)
     }
@@ -359,7 +403,7 @@ impl BridgeClient {
     pub fn trace_export(&self, path: Option<&std::path::Path>, format: &str) -> Result<Value> {
         let mut params = json!({ "format": format });
         if let Some(path) = path {
-            params["path"] = json!(path.display().to_string());
+            params["path"] = json!(client_side_path(path).display().to_string());
         }
         self.call("viber.profiler.trace_export", params)
     }
@@ -541,6 +585,14 @@ fn normalize_mouse(raw: &str) -> String {
         "forward" => "Forward".into(),
         other => other.to_string(),
     }
+}
+
+/// Caminho absoluto no cwd do CLIENTE. As exportações (`prof`/`trace`) são
+/// escritas pelo PROCESSO DA ENGINE, com o cwd dela: um `-o trace.json`
+/// relativo (a forma dos exemplos do AGENTS.md) caía na pasta da engine e o
+/// CLI reportava um ficheiro que não estava onde o utilizador o procurava.
+fn client_side_path(path: &Path) -> std::path::PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Uma engine viva conhecida pelo registo de sessões (`engine.json` + TCP a
@@ -810,6 +862,16 @@ pub fn port_alive(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_client_side_path_resolves_relative_against_cli_cwd() {
+        let relative = client_side_path(Path::new("trace.json"));
+        assert!(relative.is_absolute(), "{relative:?}");
+        assert!(relative.ends_with("trace.json"), "{relative:?}");
+        // Caminho absoluto fica intocado.
+        let absolute = Path::new("/tmp/viber-trace.json");
+        assert_eq!(client_side_path(absolute), absolute);
+    }
 
     #[test]
     fn test_port_alive_matches_tcp_listener() {

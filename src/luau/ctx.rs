@@ -93,9 +93,16 @@ pub struct ScriptCtx {
     pub sender: Option<i64>,
     /// Forward do herói no plano (x, z) — `viber.player_forward()`.
     pub player_forward: Vec2,
+    /// Pose VIVA da câmara de jogo — `viber.camera_state()`: posição do olho
+    /// e direção de vista (yaw/pitch em graus, convenção do `camera_pose`).
+    pub camera: Option<(Vec3, f32, f32)>,
     /// Dir raiz dos scripts (`<mundo>/scripts`) — `viber.load` resolve
     /// módulos contra ele. Fixo por mundo (semeado no `LuaScriptHost::new`).
     pub scripts_dir: Option<std::path::PathBuf>,
+    /// Um `UiInput` está focado (barra de fala do NLU): teclas digitadas não
+    /// podem disparar [E]/dígitos/hotbar. O player_movement já lê o recurso
+    /// directamente; aqui é o espelho para a API `viber.input`/`interacted`.
+    pub ui_typing: bool,
     /// Chave do save do mundo (`world_save_key`) — `viber.save_slots` lê os
     /// metadados dos slots sem o jogo conhecer o path.
     pub world_key: Option<String>,

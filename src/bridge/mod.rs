@@ -161,9 +161,14 @@ impl CaptureStore {
         };
         self.captures.insert(id, info);
         self.pending.push((id, path.clone()));
-        // Evicção das capturas mais antigas (o PNG no disco fica).
+        // Evicção das capturas mais antigas (o PNG no disco fica). Uma
+        // captura ainda `pending` NUNCA sai: o `process_capture_requests`
+        // spawna-a no Update seguinte e sem a entrada o cliente recebia
+        // `unknown capture id` e a entidade `Screenshot` era despawnada
+        // antes de o render a consumir.
         let cutoff = id.saturating_sub(Self::RETAINED);
-        self.captures.retain(|k, _| *k > cutoff);
+        self.captures
+            .retain(|key, info| *key > cutoff || info.status == "pending");
         (id, path)
     }
 
@@ -310,7 +315,11 @@ impl Plugin for BridgePlugin {
 #[derive(Debug, Default, Resource)]
 pub struct FrameStepper {
     pub remaining: u32,
-    pub restore: f32,
+    /// Speed a restaurar pelo `play` — `None` até o primeiro `step` da
+    /// cadeia. Era `f32` com `Default` 0.0: como o recurso nasce no build do
+    /// plugin, o PRIMEIRO `play` de qualquer sessão (mesmo sem `step`) lia
+    /// 0.0 e congelava o mundo em vez de o despausar.
+    pub restore: Option<f32>,
     pub skip: bool,
     pub active: bool,
 }
@@ -472,7 +481,19 @@ fn process_capture_requests(world: &mut World) {
             .captures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        store.take_pending()
+        // NO MÁXIMO UMA captura por frame: o `extract_screenshots` do bevy
+        // aceita um `Screenshot` por janela e DESPAWNA os duplicados com
+        // warn (nunca capturados). Dois pedidos que chegassem no mesmo frame
+        // (dois agentes, ou pedidos em pipeline) deixavam o segundo
+        // `pending` para sempre — o ficheiro nunca era escrito e o cliente
+        // girava até ao timeout. Os restantes ficam na fila para o frame
+        // seguinte; a ordem de pedido é preservada.
+        let mut pending = store.take_pending();
+        if pending.len() > 1 {
+            let rest = pending.split_off(1);
+            store.pending.extend(rest);
+        }
+        pending
     };
     let mut spawned = Vec::with_capacity(requests.len());
     for (id, path) in requests {
@@ -612,29 +633,62 @@ fn scripts_reload(params: In<Option<Value>>, world: &mut World) -> BrpResult {
         .and_then(|value| value.as_str())
         .map(str::to_owned)
         .ok_or_else(|| invalid("scripts.reload: precisa de `path`".into()))?;
-    // entidades primeiro (leitura), depois o host mutável
-    let entities: Vec<(Entity, Vec3)> = {
+    // Caminho relativo a `scripts/`: a chave AUTORAL do registry pode trazer o
+    // prefixo histórico `scripts/` (o loader aceita as duas grafias). Sem
+    // normalizar, o reload carregava um SEGUNDO chunk com outra chave e as
+    // entidades continuavam a correr o antigo.
+    let relative = path.strip_prefix("scripts/").unwrap_or(&path).to_string();
+    // entidades primeiro (leitura), indexadas pela chave AUTORAL — depois o
+    // host mutável
+    let mut by_path: std::collections::HashMap<String, Vec<(Entity, Vec3)>> =
+        std::collections::HashMap::new();
+    {
         let mut query = world.query::<(Entity, &crate::luau::LuaScriptRef, Option<&Transform>)>();
-        query
-            .iter(world)
-            .filter(|(_, script, _)| script.path == path)
-            .map(|(entity, _script, transform)| {
-                (
-                    entity,
-                    transform.map_or(Vec3::ZERO, |transform| transform.translation),
-                )
-            })
-            .collect()
-    };
+        for (entity, script, transform) in query.iter(world) {
+            by_path.entry(script.path.clone()).or_default().push((
+                entity,
+                transform.map_or(Vec3::ZERO, |transform| transform.translation),
+            ));
+        }
+    }
     let Some(mut host) = world.get_resource_mut::<crate::luau::LuaScriptHost>() else {
         return Err(invalid(
             "scripts.reload: sem LuauScriptHost (mundo sem scripts?)".into(),
         ));
     };
     let scripts_dir = host.scripts_dir.clone();
-    match crate::hot_reload::reload_script(&mut host, &scripts_dir, &path, &entities) {
-        Ok(count) => Ok(json!({ "reloaded": true, "entities": count })),
-        Err(error) => Err(invalid(format!("scripts.reload: {error}"))),
+    // Script já carregado (qualquer das grafias) → só ele. Não carregado →
+    // pode ser um módulo do `viber.load`: aí sai do cache e TODOS os scripts
+    // re-correm o top-level (guardam o `return` antigo em locals) — o mesmo
+    // caminho do hot-reload automático. Editar um módulo pelo dock do editor
+    // não fazia nada porque só o registry era consultado.
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(key) = [path.clone(), relative.clone()]
+        .into_iter()
+        .find(|key| host.registry.contains(key))
+    {
+        targets.push(key);
+    } else if crate::luau::game::evict_module(&host.lua, &relative) {
+        targets.extend(host.registry.paths().into_iter().map(str::to_string));
+    } else {
+        return Err(invalid(format!(
+            "scripts.reload: '{path}' não está carregado (nem script nem módulo de viber.load)"
+        )));
+    }
+    let mut reloaded = 0usize;
+    let mut first_error: Option<String> = None;
+    for target in &targets {
+        let entities = by_path.get(target).cloned().unwrap_or_default();
+        match crate::hot_reload::reload_script(&mut host, &scripts_dir, target, &entities) {
+            Ok(count) => reloaded += count,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(invalid(format!("scripts.reload: {error}"))),
+        None => Ok(json!({ "reloaded": true, "entities": reloaded })),
     }
 }
 
@@ -897,8 +951,14 @@ pub(crate) fn raycast_json(
 }
 
 /// Árvore de entidades — o "a11y snapshot" do bridge: id, nome, pai,
-/// translation e lista de componentes (nomes reflectidos).
-fn tree(_params: In<Option<Value>>, world: &mut World) -> BrpResult {
+/// translation e lista de componentes (nomes reflectidos). `{"max_depth": N}`
+/// limita a N NÍVEIS (1 = só as raízes): o dock do editor pede 3 e recebia a
+/// árvore inteira (num mundo de 60k entidades, dezenas de MB no painel).
+fn tree(params: In<Option<Value>>, world: &mut World) -> BrpResult {
+    #[derive(Deserialize)]
+    struct Params {
+        max_depth: Option<usize>,
+    }
     #[derive(Serialize)]
     struct EntityNode {
         id: String,
@@ -911,8 +971,39 @@ fn tree(_params: In<Option<Value>>, world: &mut World) -> BrpResult {
         components: Vec<String>,
     }
 
+    let params: Params = parse_params(Some(params.0.unwrap_or_else(|| json!({}))))?;
+    // `max_depth` precisa do pai de CADA entidade antes de filtrar — a lista
+    // devolvida é plana. Sem o parâmetro (CLI/agentes) mantém-se tudo.
+    let parents: std::collections::HashMap<Entity, Entity> = if params.max_depth.is_some() {
+        world
+            .iter_entities()
+            .filter_map(|e| e.get::<ChildOf>().map(|child_of| (e.id(), child_of.0)))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let depth_of = |entity: Entity| -> usize {
+        let mut depth = 0usize;
+        let mut current = entity;
+        // Um ciclo de `ChildOf` é impossível, mas o limite evita prender o
+        // handler se uma entidade alguma vez se apontar a si própria.
+        while let Some(parent) = parents.get(&current) {
+            depth += 1;
+            current = *parent;
+            if depth > 4096 {
+                break;
+            }
+        }
+        depth
+    };
+
     let mut nodes = Vec::new();
     for entity in world.iter_entities() {
+        if let Some(max_depth) = params.max_depth
+            && depth_of(entity.id()) >= max_depth.max(1)
+        {
+            continue;
+        }
         let components: Vec<String> = entity
             .archetype()
             .components()
@@ -926,9 +1017,24 @@ fn tree(_params: In<Option<Value>>, world: &mut World) -> BrpResult {
             parent: entity
                 .get::<ChildOf>()
                 .map(|child_of| child_of.0.to_string()),
-            translation: entity
-                .get::<Transform>()
-                .map(|t| [t.translation.x, t.translation.y, t.translation.z]),
+            // Posição de MUNDO, como o snapshot do `viber.debug`: num nó
+            // dentro de um grupo o `Transform` é LOCAL e o `tree` publicava
+            // a cota local (tipicamente y=0) como se fosse a pose no mundo.
+            translation: if entity.get::<ChildOf>().is_some() {
+                entity
+                    .get::<GlobalTransform>()
+                    .map(|t| t.translation().to_array())
+                    .or_else(|| entity.get::<Transform>().map(|t| t.translation.to_array()))
+            } else {
+                entity
+                    .get::<Transform>()
+                    .map(|t| t.translation.to_array())
+                    .or_else(|| {
+                        entity
+                            .get::<GlobalTransform>()
+                            .map(|t| t.translation().to_array())
+                    })
+            },
             components,
         });
     }
@@ -965,9 +1071,13 @@ fn profiler_snapshot(_params: In<Option<Value>>, world: &mut World) -> BrpResult
 }
 
 /// Snapshot rico de um tab do profiler (`viber.profiler.tab`):
-/// `{"tab": "systems|world|physics|audio|extras|all"}`. `all` devolve todos
-/// (o mesmo payload do export, sem escrever ficheiro).
+/// `{"tab": "systems|world|physics|audio|frames|extras|all"}`. `all` devolve
+/// todos (o mesmo payload do export, sem escrever ficheiro); um tab
+/// desconhecido é erro BRP (não cai no snapshot base em silêncio).
 fn profiler_tab(params: In<Option<Value>>, world: &mut World) -> BrpResult {
+    /// Tabs servidos pelo profiler. `all`/`extras` têm caminhos próprios;
+    /// `systems` é o snapshot base.
+    const TABS: [&str; 5] = ["systems", "world", "physics", "audio", "frames"];
     let tab = params
         .0
         .as_ref()
@@ -975,7 +1085,26 @@ fn profiler_tab(params: In<Option<Value>>, world: &mut World) -> BrpResult {
         .and_then(Value::as_str)
         .unwrap_or("systems")
         .to_string();
+    // Tab desconhecido caía no `_ =>` do `tab_snapshot` e devolvia o
+    // snapshot BASE (systems) sem o dizer — um typo em `--tab fisics`
+    // parecia dados de física. Erro explícito com a lista.
+    if tab != "all" && tab != "extras" && !TABS.contains(&tab.as_str()) {
+        return Err(invalid(format!(
+            "tab `{tab}` desconhecido — esperado systems|world|physics|audio|frames|extras|all"
+        )));
+    }
+    // `full_snapshot`/`export_to_file` fazem `world.resource::<ProfilerState>()`
+    // (panic se o ProfilerPlugin não estiver no app) — o handler tem de
+    // falhar com erro BRP, não derrubar a engine.
     if tab == "all" {
+        if world
+            .get_resource::<crate::profiler::ProfilerState>()
+            .is_none()
+        {
+            return Err(invalid(
+                "profiler inativo neste app (ProfilerPlugin?)".into(),
+            ));
+        }
         // O MESMO JSON do botão COPIAR / do ficheiro de export.
         return Ok(crate::profiler::full_snapshot(world));
     }
@@ -994,6 +1123,16 @@ fn profiler_export(params: In<Option<Value>>, world: &mut World) -> BrpResult {
         Some(Value::String(s)) => Some(PathBuf::from(s)),
         Some(_) => return Err(invalid("`path` tem de ser string".into())),
     };
+    // `export_to_file` → `full_snapshot` → `world.resource::<ProfilerState>()`:
+    // sem o plugin, o exclusive system panicava e derrubava a engine.
+    if world
+        .get_resource::<crate::profiler::ProfilerState>()
+        .is_none()
+    {
+        return Err(invalid(
+            "profiler inativo neste app (ProfilerPlugin?)".into(),
+        ));
+    }
     match crate::profiler::export_to_file(world, path) {
         Ok(path) => {
             let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);

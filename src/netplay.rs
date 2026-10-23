@@ -135,7 +135,10 @@ fn start(role: NetRole) -> Option<NetLink> {
         NetRole::Off => return None,
         NetRole::Host { port } => {
             let listener = TcpListener::bind(("0.0.0.0", *port)).ok()?;
-            listener.set_nonblocking(true).ok()?;
+            // BLOQUEANTE de propósito: o `accept` corre num thread próprio.
+            // Com o listener non-blocking, o `accept` imediato devolvia
+            // `WouldBlock` (o convidado ainda não tinha ligado) e o thread
+            // MORRIA — o anfitrião nunca aceitava ninguém.
             let shared_thread = Arc::clone(&shared);
             thread::spawn(move || {
                 if let Ok((stream, _)) = listener.accept() {
@@ -168,6 +171,20 @@ pub fn net_sync(
         .map(|a| (a.attack_just, a.interact_just))
         .unwrap_or((false, false));
     *acc += time.delta_secs();
+    // Ações são EDGE de UM frame: enviadas dentro do bloco da pose (que só
+    // publica a cada 50 ms), as que caíam num frame com o acumulador ainda
+    // por cruzar eram perdidas em silêncio (~2/3 delas a 60 fps). O pose
+    // continua a 20 Hz; o `act` sai no frame em que aconteceu.
+    if attack_just || interact_just {
+        if let Ok(mut out) = link.shared.outbound.lock() {
+            if attack_just {
+                out.push(NetMsg::Act("attack".into()));
+            }
+            if interact_just {
+                out.push(NetMsg::Act("interact".into()));
+            }
+        }
+    }
     if *acc >= 0.05
         && let Some(player) = players.iter().next()
         && let Ok(mut out) = link.shared.outbound.lock()
@@ -181,12 +198,6 @@ pub fn net_sync(
             z: p.z,
             yaw,
         });
-        if attack_just {
-            out.push(NetMsg::Act("attack".into()));
-        }
-        if interact_just {
-            out.push(NetMsg::Act("interact".into()));
-        }
     }
     let inbound = link
         .shared

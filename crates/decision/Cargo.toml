@@ -1,0 +1,21 @@
+[package]
+name = "vael-decision"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "vael_decision"
+
+[[bin]]
+name = "vael-decision"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+tokenizers = "0.23"
+# O mesmo ORT do vael-nlu (a engine já o traz). O grafo usa MatMulNBits (4-bit).
+ort = { version = "2.0.0-rc.15", features = ["download-binaries"] }
+vael-nlu = { path = "../nlu" }

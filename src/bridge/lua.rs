@@ -470,6 +470,15 @@ pub struct GroundInfo {
 #[derive(Default)]
 pub struct DebugOps(pub Vec<DebugOp>);
 
+/// Cópia por entidade dos materiais alterados por `set_material`.
+///
+/// Os props instanciados PARTILHAM o `StandardMaterial` do GLB: mutar o asset
+/// original pintava todos os irmãos (e o pool entre cenas). O primeiro
+/// `set_material` clona o material e aponta só aquela entidade para a cópia;
+/// chamadas seguintes reutilizam-na.
+#[derive(Default, bevy::prelude::Resource)]
+pub struct DebugMaterialOverrides(pub std::collections::HashMap<Entity, Handle<StandardMaterial>>);
+
 pub enum DebugOp {
     /// Posição absoluta, sem snap (o que o script escreve é o que fica).
     SetPos(Entity, Vec3),
@@ -640,7 +649,11 @@ pub enum DebugOp {
     TeleportTo(String),
     /// Spawn runtime: primitiva FÍSICA (`box:w,h,d`, `sphere:r`,
     /// `cylinder:r,h`) ou GLB do pool (load assíncrono via GltfScenePending).
+    /// O `name` (`debug:spawn:N`) é atribuído NA CHAMADA e devolvido à REPL —
+    /// é o handle para `find(name)` no chunk seguinte (a entidade só nasce
+    /// quando a op aplica, depois do chunk).
     Spawn {
+        name: String,
         url: String,
         pos: Vec3,
         yaw: Option<f32>,
@@ -1978,10 +1991,18 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
     let elapsed = world.resource::<Time>().elapsed_secs_f64();
     let mut warnings: Vec<String> = Vec::new();
     // `viber.ground_below` na REPL: handle de leitura do terreno, lido
-    // ANTES do empréstimo mutável do host.
-    let terrain_reader = world
-        .get_resource::<crate::terrain::runtime::TerrainRuntime>()
-        .map(|rt| rt.reader());
+    // ANTES do empréstimo mutável do host. As estradas/água (`viber.road`,
+    // `on_road`, `in_water`) vêm do MESMO recurso: sem elas o `ctx.surfaces`
+    // ficava no da última cena/on_update (ou `None`, com o Luau a responder
+    // "sem estradas" num mundo que as tem).
+    let terrain = world.get_resource::<crate::terrain::runtime::TerrainRuntime>();
+    let terrain_reader = terrain.map(|rt| rt.reader());
+    let surfaces = terrain.map(|rt| {
+        std::sync::Arc::new(crate::luau::SurfaceRegistries {
+            roads: rt.roads.clone(),
+            water: rt.water.clone(),
+        })
+    });
 
     let (ok, result, error, ops) = {
         let host = world.resource_mut::<LuaScriptHost>();
@@ -2003,6 +2024,11 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
             ctx.self_name = None;
             ctx.self_props = None;
             ctx.sender = None;
+            // O alcance de interação é POR entidade: na REPL não há entidade
+            // de script, e o valor herdado do último `on_update` dava um
+            // `viber.interacted` com o alcance de outra entidade.
+            ctx.interaction_range = None;
+            ctx.surfaces = surfaces;
         }
         host.lua.set_app_data(view);
         host.lua.set_app_data(DebugOps::default());
@@ -2047,6 +2073,12 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
             .app_data_mut::<DebugOps>()
             .map(|mut ops| std::mem::take(&mut ops.0))
             .unwrap_or_default();
+        // Fora do `viber.lua` não há quem drene a fila: um script de jogo que
+        // chamasse `viber.debug.toast`/`set_clock` em `on_update` enfileirava
+        // ops que ninguém aplicava (e que a REPL seguinte descartava) — a Vec
+        // crescia sem fim. As leituras já falham com "sem snapshot"; as
+        // escritas passam a falhar com a mesma causa em vez do no-op mudo.
+        host.lua.remove_app_data::<DebugOps>();
         // Limpa o snapshot: uma closure de SCRIPT DE JOGO que chamasse
         // viber.debug veria dados podres da última REPL — melhor falhar.
         host.lua.set_app_data(DebugView::default());
@@ -2076,17 +2108,17 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "entities",
         "entities(radius?)",
-        "entidades no snapshot {id,name?,x,y,z,disabled} (cap 4096, mais perto 1.º)",
+        "entidades no snapshot {id,name?,x,y,z,disabled} (cap 4096, mais perto 1.º); radius precisa do player",
     ),
     (
         "find",
         "find(name)",
-        "id (bits) por nome exato → substring case-insensitive",
+        "id (bits): nome exato em TODO o mundo; substring no snapshot (cap 4096)",
     ),
     (
         "find_all",
         "find_all(name)",
-        "ids (bits) de todas as entidades que casam (substring)",
+        "ids (bits) das que casam (substring) no snapshot (cap 4096)",
     ),
     ("pos", "pos(id)", "(x, y, z) da entidade"),
     (
@@ -2133,7 +2165,7 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "player",
         "player()",
-        "{id,x,y,z,hp,max_hp,xp,xp_next,speed}",
+        "{id,x,y,z,hp,max_hp,speed} (XP não é da engine)",
     ),
     ("camera", "camera()", "pose da OrbitCamera"),
     (
@@ -2191,12 +2223,12 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "skills",
         "skills()",
-        "árvore, pontos, nível, cooldowns, bónus",
+        "nil — os talentos são do JOGO (Lua), a engine não os conhece",
     ),
     (
         "waypoints",
         "waypoints()",
-        "Nota marcada + waypoint + 12 marcos",
+        "vazio {marked,landmarks} — a Nota é do JOGO (Lua, viber.markers)",
     ),
     (
         "save_info",
@@ -2208,17 +2240,17 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "colliders",
         "colliders(radius?)",
-        "dump de colliders (cap 256)",
+        "dump de colliders (cap 256; radius precisa do player)",
     ),
     (
         "lights",
         "lights(radius?)",
-        "dump de luzes (com shadows destacado)",
+        "dump de luzes (cap 256, com shadows destacado)",
     ),
     (
         "around",
         "around(radius, limit?)",
-        "resumo compacto do que está perto do player",
+        "resumo compacto do que está perto do player (cap 128)",
     ),
     ("prof", "prof()", "snapshot do profiler"),
     ("fps", "fps()", "fps instantâneo"),
@@ -2284,13 +2316,24 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     ("despawn", "despawn(id)", "remove a entidade"),
     ("heal", "heal(n)", "cura o player"),
     ("damage", "damage(n)", "dano no player"),
-    ("xp", "xp(n)", "XP ao player"),
-    ("give", "give(what, n)", "recurso/item → vault (aditivo)"),
-    ("take", "take(what, n)", "tira do vault (recurso ou item)"),
+    // As regras de jogo (XP/vault/quests/talentos) vivem no Lua do jogo:
+    // estas ops só avisam (warning) e `applied: 0`. Documentado assim para
+    // o `apidoc()` não prometer o que a engine não faz.
+    ("xp", "xp(n)", "avisa que o XP é do JOGO (Lua); não aplica"),
+    (
+        "give",
+        "give(what, n)",
+        "avisa que o cofre é do JOGO (Lua); não aplica",
+    ),
+    (
+        "take",
+        "take(what, n)",
+        "avisa que o cofre é do JOGO (Lua); não aplica",
+    ),
     (
         "vault_set",
         "vault_set(what, n)",
-        "valor ABSOLUTO de recurso/item",
+        "avisa que o cofre é do JOGO (Lua); não aplica",
     ),
     ("set_speed", "set_speed(n)", "velocidade do player"),
     ("set_time_scale", "set_time_scale(n)", "slow-mo; 0 = pausa"),
@@ -2309,27 +2352,27 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "quest_force",
         "quest_force(id, state)",
-        "força active|ready|done|not_taken",
+        "avisa que as quests são do JOGO (Lua); não aplica",
     ),
     (
         "quest_progress",
         "quest_progress(id, n)",
-        "fixa o progresso (kill/visit)",
+        "avisa que as quests são do JOGO (Lua); não aplica",
     ),
     (
         "skill_learn",
         "skill_learn(id)",
-        "aprende passiva (aplica o delta ao herói)",
+        "avisa que os talentos são do JOGO (Lua); não aplica",
     ),
     (
         "skill_points",
         "skill_points(n)",
-        "pontos disponíveis (absoluto)",
+        "avisa que os talentos são do JOGO (Lua); não aplica",
     ),
     (
         "skill_reset",
         "skill_reset()",
-        "esquece tudo, devolve pontos, reverte bónus",
+        "avisa que os talentos são do JOGO (Lua); não aplica",
     ),
     (
         "ai_state",
@@ -2389,8 +2432,16 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     ),
     ("rain_look", "rain_look{...}", "look da chuva ao vivo"),
     ("set_window", "set_window(w, h)", "resize p/ QA responsivo"),
-    ("sun", "sun{...}", "sol da cena E do shader do terreno"),
-    ("ground", "ground{...}", "splat + pele das paredes ao vivo"),
+    (
+        "sun",
+        "sun{...}",
+        "sol da cena E do shader do terreno (sem luz, só com yaw/pitch)",
+    ),
+    (
+        "ground",
+        "ground{...}",
+        "splat + pele das paredes ao vivo (warning/applied 0 sem terreno)",
+    ),
     ("save", "save()", "grava (mesmo caminho da UI)"),
     ("load", "load()", "carrega o save"),
     ("toast", "toast(msg)", "mensagem no HUD"),
@@ -2412,7 +2463,7 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "spawn",
         "spawn(url, x, y, z, {...})",
-        "primitiva FÍSICA (box/sphere/cylinder) ou GLB do pool",
+        "primitiva FÍSICA (box/sphere/cylinder) ou GLB do pool; devolve o nome debug:spawn:N",
     ),
     (
         "set_material",
@@ -2432,9 +2483,13 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "step",
         "step(n)",
-        "pausa e avança EXATAMENTE n frames (QA determinístico)",
+        "pausa, avança EXATAMENTE n frames a speed 1 e volta a pausar",
     ),
-    ("play", "play()", "restaura a speed anterior ao step"),
+    (
+        "play",
+        "play()",
+        "despausa: restaura a speed anterior ao 1.º step (no-op se nunca houve step)",
+    ),
 ];
 
 /// Instala `viber.debug` uma vez (idempotente) — leituras do [`DebugView`],
@@ -2446,10 +2501,14 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
     }
 
     fn push(lua: &Lua, op: DebugOp) -> mlua::Result<()> {
-        lua.app_data_mut::<DebugOps>()
-            .expect("DebugOps semeado por eval")
-            .0
-            .push(op);
+        let Some(mut ops) = lua.app_data_mut::<DebugOps>() else {
+            // Fora da REPL (chunk de script de jogo) não há fila: erro Lua
+            // claro em vez de acumular ops que nunca são aplicadas.
+            return Err(mlua::Error::runtime(
+                "viber.debug.*: escrita fora de viber.lua (só a REPL do bridge tem fila de ops)",
+            ));
+        };
+        ops.0.push(op);
         Ok(())
     }
 
@@ -2499,6 +2558,14 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                 .app_data_ref::<DebugView>()
                 .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
             let origin = view.player.as_ref().map(|p| p.position);
+            // Um raio sem origem era IGNORADO em silêncio: num mundo sem
+            // Player, `entities(10)` devolvia o snapshot inteiro como se
+            // tudo estivesse a 10 m. `around` já recusa o mesmo pedido.
+            if radius.is_some() && origin.is_none() {
+                return Err(mlua::Error::runtime(
+                    "entities: sem player — um raio precisa de origem (sem raio devolve o snapshot)",
+                ));
+            }
             let mut out = Vec::new();
             for info in &view.entities {
                 if let (Some(radius), Some(origin)) = (radius, origin) {
@@ -2770,6 +2837,13 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                 .app_data_ref::<DebugView>()
                 .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
             let origin = view.player.as_ref().map(|p| p.position);
+            // Raio sem origem era ignorado (ver `entities`): devolvia
+            // colliders longe como se estivessem no raio.
+            if radius.is_some() && origin.is_none() {
+                return Err(mlua::Error::runtime(
+                    "colliders: sem player — um raio precisa de origem",
+                ));
+            }
             let mut out = Vec::new();
             for info in view.entities.iter().filter(|info| info.collider.is_some()) {
                 if let (Some(radius), Some(origin)) = (radius, origin) {
@@ -2821,6 +2895,13 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                 .app_data_ref::<DebugView>()
                 .ok_or_else(|| mlua::Error::runtime("sem snapshot — só dentro de viber.lua"))?;
             let origin = view.player.as_ref().map(|p| p.position);
+            // Raio sem origem era ignorado (ver `entities`): devolvia luzes
+            // longe como se estivessem no raio.
+            if radius.is_some() && origin.is_none() {
+                return Err(mlua::Error::runtime(
+                    "lights: sem player — um raio precisa de origem",
+                ));
+            }
             let mut out = Vec::new();
             for info in view.entities.iter().filter(|info| info.light.is_some()) {
                 if let (Some(radius), Some(origin)) = (radius, origin) {
@@ -2849,6 +2930,12 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                     table.raw_set("range", range)?;
                 }
                 out.push(table);
+                // O cap documentado dos dumps (256) — sem ele um mundo com
+                // centenas de tochas devolvia TODAS e a resposta/REPL
+                // arrastava-se (o `colliders` já tinha o mesmo teto).
+                if out.len() >= 256 {
+                    break;
+                }
             }
             lua.create_sequence_from(out).map(Value::Table)
         })?,
@@ -3913,9 +4000,15 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                     ),
                     None => None,
                 };
+                // Nome reservado JÁ AQUI: o chunk não sobrevive à aplicação
+                // da op, mas o nome é o que permite encontrar a entidade no
+                // chunk seguinte (`find(name)`) — antes não havia como saber
+                // o id do que se acabou de criar.
+                let name = next_spawn_name();
                 push(
                     lua,
                     DebugOp::Spawn {
+                        name: name.clone(),
                         url,
                         pos: Vec3::new(x, y, z),
                         yaw: opts.yaw,
@@ -3924,7 +4017,8 @@ fn ensure_debug_api(lua: &Lua) -> mlua::Result<()> {
                         collider: opts.collider.unwrap_or(true),
                         snap: opts.snap.unwrap_or(true),
                     },
-                )
+                )?;
+                Ok(name)
             },
         )?,
     )?;
@@ -4661,6 +4755,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 .iter_entities()
                 .find(|e| e.get::<DirectionalLight>().is_some())
                 .map(|e| e.id());
+            let angles_requested = yaw.is_some() || pitch.is_some();
             let (mut sun_yaw, mut sun_pitch) = (0.0_f32, 45.0_f32);
             if let Some(id) = light
                 && let Some(t) = world.get::<Transform>(id)
@@ -4690,19 +4785,27 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             let travel = -pos;
             // O TERRENO tem sol próprio (uniform `sun_dir` dos chunks) — sem
             // publicar aqui, rodar a luz da cena não mudava um píxel de chão.
-            if let Some(mut assets) = world.get_resource_mut::<Assets<TerrainChunkMaterial>>() {
+            // Só se publica quando a direção é CONHECIDA: sem
+            // `DirectionalLight` e sem yaw/pitch, os defaults acima (0°/45°)
+            // não são o sol do mundo — escrevê-los fazia um
+            // `sun{illuminance=…}` sozinho "saltar" a luz do chão.
+            let direction_known = light.is_some() || angles_requested;
+            if direction_known
+                && let Some(mut assets) = world.get_resource_mut::<Assets<TerrainChunkMaterial>>()
+            {
                 for (_, mat) in assets.iter_mut() {
                     mat.params.sun_dir = Vec4::new(travel.x, travel.y, travel.z, 1.0);
                 }
             }
             let Some(light) = light else {
-                warnings
-                    .push("sun: sem DirectionalLight no mundo — só o sol do terreno mudou".into());
-                return true;
+                warnings.push(if direction_known {
+                    "sun: sem DirectionalLight no mundo — só o sol do terreno mudou".into()
+                } else {
+                    "sun: sem DirectionalLight no mundo — nada aplicado".into()
+                });
+                return direction_known;
             };
-            if (yaw.is_some() || pitch.is_some())
-                && let Some(mut transform) = world.get_mut::<Transform>(light)
-            {
+            if angles_requested && let Some(mut transform) = world.get_mut::<Transform>(light) {
                 transform.rotation =
                     Quat::from_rotation_arc(Vec3::NEG_Z, travel.normalize_or_zero());
             }
@@ -4730,14 +4833,30 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             forest,
             shore_width,
         } => {
-            // 1) Pele das paredes: TODOS os materiais de chunk partilham os
-            //    valores (a mesa de estilo é global).
-            if (moss.is_some()
+            // Um `ground{}` sem campo nenhum era um no-op silencioso com
+            // `applied: 1`; e uma chamada só de paredes num mundo sem
+            // materiais de chunk (interior, cena sem terreno) também dizia
+            // que tinha aplicado. Ambos passam a warning + `applied: 0`.
+            let walls_requested = moss.is_some()
                 || streaks.is_some()
                 || rock_darken.is_some()
                 || tri_slope.is_some()
                 || tri_soft.is_some()
-                || strata_strength.is_some())
+                || strata_strength.is_some();
+            let splat_requested = patchiness.is_some()
+                || gravel.is_some()
+                || dirt.is_some()
+                || forest.is_some()
+                || shore_width.is_some()
+                || vale_soft.is_some();
+            if !walls_requested && !splat_requested {
+                warnings.push("ground{}: nenhum campo — nada a mudar".into());
+                return false;
+            }
+            // 1) Pele das paredes: TODOS os materiais de chunk partilham os
+            //    valores (a mesa de estilo é global).
+            let mut walls_touched = false;
+            if walls_requested
                 && let Some(mut assets) = world.get_resource_mut::<Assets<TerrainChunkMaterial>>()
             {
                 for (_, mat) in assets.iter_mut() {
@@ -4759,7 +4878,14 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                     if let Some(v) = moss {
                         mat.params.walls_b.z = v.clamp(0.0, 1.0);
                     }
+                    walls_touched = true;
                 }
+            }
+            if walls_requested && !walls_touched {
+                warnings.push(
+                    "ground: sem materiais de chunk de terreno — pele das paredes não aplicada"
+                        .into(),
+                );
             }
             // 2) Splat: acumula o tuning (cada chamada passa só o que muda)
             //    e re-cozinha os planos sobre a grid retida.
@@ -4785,23 +4911,23 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             if let Some(v) = vale_soft {
                 tuning.vale_soft = v.clamp(0.0, 1.0);
             }
-            let rebaked = crate::terrain::runtime::rebake_chunk_splats(world, tuning);
+            // O re-bake custa ~1 s num mundo grande: só corre quando um
+            // campo de SPLAT mudou. Antes, `ground{moss=…}` (só paredes)
+            // re-cozinhava os planos sem mudar um texel e bloqueava o frame.
+            let rebaked = if splat_requested {
+                crate::terrain::runtime::rebake_chunk_splats(world, tuning)
+            } else {
+                0
+            };
             world.insert_resource(GroundState { tuning });
-            if rebaked == 0
-                && (patchiness.is_some()
-                    || gravel.is_some()
-                    || dirt.is_some()
-                    || forest.is_some()
-                    || shore_width.is_some()
-                    || vale_soft.is_some())
-            {
+            if splat_requested && rebaked == 0 {
                 warnings.push(
                     "ground: splats não re-cozidos (sem terreno com `layers`?) — só as paredes \
                      (se pedidas) se aplicaram"
                         .into(),
                 );
             }
-            true
+            walls_touched || rebaked > 0
         }
         DebugOp::SetWindow { width, height } => {
             // Redimensiona a janela primária. O bevy_winit sincroniza o winit
@@ -4997,10 +5123,11 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 .unwrap_or_else(|| world.resource::<Time<Virtual>>().relative_speed());
             // A speed a restaurar é a da PRIMEIRA chamada da cadeia — um
             // `step` a seguir a outro não a clobber (ficaria 0 e o `play`
-            // não despausava).
+            // não despausava). `None` (recurso recém-criado pelo plugin) =
+            // ainda não houve cadeia: a speed actual é a de referência.
             let restore = world
                 .get_resource::<super::FrameStepper>()
-                .map(|stepper| stepper.restore)
+                .and_then(|stepper| stepper.restore)
                 .unwrap_or(current);
             // O handler corre em RemoteLast, DEPOIS do PostUpdate deste frame.
             // `skip: true` comia o PostUpdate do frame seguinte (n+1 Updates)
@@ -5009,7 +5136,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             // só pausa.
             world.insert_resource(super::FrameStepper {
                 remaining: frames,
-                restore,
+                restore: Some(restore),
                 skip: false,
                 active: frames > 0,
             });
@@ -5018,21 +5145,37 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
         }
         DebugOp::ResumePlay => {
             if let Some(stepper) = world.remove_resource::<super::FrameStepper>() {
-                set_time_scale_value(world, stepper.restore);
+                // `None` = nunca houve `step` nesta sessão: não há speed a
+                // restaurar (pôr 0 aqui era o bug que congelava o mundo no
+                // primeiro `viber debug play`).
+                if let Some(restore) = stepper.restore {
+                    set_time_scale_value(world, restore);
+                }
             }
             true
         }
         DebugOp::TeleportTo(name) => {
             // Resolve por nome contra o MUNDO (não o snapshot — o alvo pode
-            // ter nascido de um spawn recente).
+            // ter nascido de um spawn recente). Exato PRIMEIRO: um
+            // `teleport_to("poço")` não pode cair no `poço_velho` só porque
+            // esse nome aparece antes na iteração das entidades.
+            let exact = world.iter_entities().find_map(|e| {
+                let n = e.get::<Name>()?;
+                n.as_str().eq_ignore_ascii_case(&name).then_some(e.id())
+            });
             let needle = name.to_ascii_lowercase();
-            let target = world
-                .iter_entities()
-                .filter_map(|e| {
-                    let n = e.get::<Name>()?.to_string().to_ascii_lowercase();
-                    (n == needle || n.contains(&needle)).then_some(e.id())
-                })
-                .next();
+            let target = exact.or_else(|| {
+                world
+                    .iter_entities()
+                    .filter_map(|e| {
+                        let n = e.get::<Name>()?;
+                        n.as_str()
+                            .to_ascii_lowercase()
+                            .contains(&needle)
+                            .then_some(e.id())
+                    })
+                    .next()
+            });
             let Some(target) = target else {
                 warnings.push(format!("teleport_to: '{name}' não encontrado"));
                 return false;
@@ -5072,6 +5215,7 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
             set_translation(world, player, pos, warnings)
         }
         DebugOp::Spawn {
+            name,
             url,
             mut pos,
             yaw,
@@ -5091,9 +5235,6 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 rotation: Quat::from_rotation_y(yaw.unwrap_or(0.0).to_radians()),
                 scale: Vec3::splat(scale.unwrap_or(1.0).max(0.001)),
             };
-            static NEXT_SPAWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            let n = NEXT_SPAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let name = format!("debug:spawn:{n}");
             if let Some(shape) = parse_primitive(&url) {
                 spawn_primitive(world, shape, name, transform, color, collider, warnings)
             } else {
@@ -5160,13 +5301,52 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                 );
                 return false;
             };
+            // Clone-on-write: o material do GLB é PARTILHADO por todas as
+            // instâncias. Mutar o asset original pintava todos os props do
+            // mundo (e ficava no pool após a cena). A entidade passa a
+            // apontar para uma cópia própria, reutilizada nas chamadas
+            // seguintes.
+            let existing = world
+                .get_resource::<DebugMaterialOverrides>()
+                .and_then(|overrides| overrides.0.get(&entity).cloned())
+                .filter(|override_handle| *override_handle == handle);
+            let target = match existing {
+                Some(override_handle) => override_handle,
+                None => {
+                    let Some(mut assets) =
+                        world.get_resource_mut::<bevy::asset::Assets<StandardMaterial>>()
+                    else {
+                        warnings.push("Assets<StandardMaterial> indisponível".into());
+                        return false;
+                    };
+                    let Some(original) = assets.get(&handle).cloned() else {
+                        warnings.push("material já não existe nos assets".into());
+                        return false;
+                    };
+                    let clone = assets.add(original);
+                    drop(assets);
+                    if !world.contains_resource::<DebugMaterialOverrides>() {
+                        world.insert_resource(DebugMaterialOverrides::default());
+                    }
+                    world
+                        .resource_mut::<DebugMaterialOverrides>()
+                        .0
+                        .insert(entity, clone.clone());
+                    if let Some(mut slot) =
+                        world.get_mut::<bevy::pbr::MeshMaterial3d<StandardMaterial>>(entity)
+                    {
+                        slot.0 = clone.clone();
+                    }
+                    clone
+                }
+            };
             let Some(mut assets) =
                 world.get_resource_mut::<bevy::asset::Assets<StandardMaterial>>()
             else {
                 warnings.push("Assets<StandardMaterial> indisponível".into());
                 return false;
             };
-            let Some(mut mat) = assets.get_mut(&handle) else {
+            let Some(mut mat) = assets.get_mut(&target) else {
                 warnings.push("material já não existe nos assets".into());
                 return false;
             };
@@ -5313,6 +5493,17 @@ enum PrimitiveShape {
     Box(Vec3),
     Sphere(f32),
     Cylinder(f32, f32),
+}
+
+/// Nome único do próximo `viber.debug.spawn` (`debug:spawn:N`) — alocado na
+/// CLOSURE (o chunk devolve-o) para o agente o poder usar em `find`/`info` na
+/// chamada seguinte; o contador é do processo, como o dos markers.
+fn next_spawn_name() -> String {
+    static NEXT_SPAWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "debug:spawn:{}",
+        NEXT_SPAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 fn parse_primitive(url: &str) -> Option<PrimitiveShape> {
@@ -5710,6 +5901,12 @@ fn info_table(lua: &Lua, info: &EntityInfo) -> mlua::Result<Value> {
                     "aggro_radius": ai.aggro_radius,
                     "attack_radius": ai.attack_radius,
                     "home": ai.home,
+                    // `desired`/`velocity` também aqui: o `ai(id)` já os
+                    // trazia e o `info(id).ai` (a tabela "tudo") omitia-os —
+                    // "a criatura está a andar?" não se respondia pela via
+                    // agregada.
+                    "desired": ai.desired,
+                    "velocity": ai.velocity,
                     "goal": ai.goal,
                     "nav_profile": ai.nav_profile,
                 }),

@@ -247,6 +247,13 @@ impl BurstStore {
         let Some(cell) = burst.collected.get_mut(slot as usize) else {
             return Err(format!("burst {id}: slot {slot} fora da folha"));
         };
+        // Depósito DUPLICADO do mesmo slot (observer re-disparado) somava
+        // outra vez no `collected_count`: o burst ficava "completo" com um
+        // slot ainda vazio e o `.expect` do `take_cells` panicava dentro do
+        // sistema Update (engine abaixo). Ignora a repetição.
+        if cell.is_some() {
+            return Ok(false);
+        }
         // Estatística POR FRAME no momento do readback (luma média + desvio):
         // é o veredicto numérico do flicker — dois frames do mesmo mundo
         // parado devem ter mean≈ igual e std≈ igual; oscilação entre células

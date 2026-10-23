@@ -124,12 +124,22 @@ pub struct LuauRuntimeLocals<'w, 's> {
     /// nome próprio não pode depender de nunca truncar: repro histórica dos
     /// portais do simple-rpg, 20 portais em ~79k nomes com cap 4096).
     pub entity_names: Query<'w, 's, &'static Name>,
+    /// `GlobalTransform` de QUALQUER entidade — fallback do `origin_of` dos
+    /// timers. Um timer registado num `on_spawned` pertence à entidade NOVA,
+    /// que pode não ter script: a query `scripts` não a vê e o dono era
+    /// tratado como morto (o timer era descartado no 1.º tick, em silêncio).
+    pub all_globals: Query<'w, 's, &'static GlobalTransform>,
     /// Grupos (`groups=`) — snapshot `ctx.groups` por frame.
     pub groups: Query<'w, 's, (Entity, &'static crate::luau::Groups)>,
     /// Conexões de sinal dos emissores (`connect-*`).
     pub connections: Query<'w, 's, &'static crate::luau::SignalConnections>,
     /// Cinemática a tocar (`viber.cinematic_playing`).
     pub cinematic: Option<bevy::ecs::system::Res<'w, crate::cinematic::CinematicPlayback>>,
+    /// Câmara de jogo conduzida por script (`viber.camera_free`/
+    /// `camera_pose`). `Option` pelas apps mínimas de teste.
+    pub script_camera: Option<bevy::ecs::system::ResMut<'w, crate::camera::ScriptCameraFree>>,
+    /// Pose viva da câmara para `viber.camera_state()`.
+    pub camera_snapshot: Option<bevy::ecs::system::Res<'w, crate::camera::CameraSnapshot>>,
     /// Menus que roubam input (`viber.menu_open`). `Option`: apps mínimas.
     pub menus: Option<bevy::ecs::system::Res<'w, crate::menus::MenusOpen>>,
     /// Snapshot de nomes semeado (a partir daí só deltas).
@@ -249,6 +259,8 @@ pub fn luau_update(
     // `Option`: apps mínimas (testes, headless) montam sistemas soltos sem o
     // recurso — sem foco, o `interacted` cai no teste de alcance de sempre.
     focus: Option<Res<crate::interact::InteractionFocus>>,
+    // Barra de fala: com um UiInput focado, as teclas são TEXTO, não acções.
+    typing: Option<Res<crate::ui::widgets::UiFocusedInput>>,
     mut host: ResMut<LuaScriptHost>,
     mut scripts: Query<
         (
@@ -340,6 +352,11 @@ pub fn luau_update(
         ctx.just_pressed = just_pressed.clone();
         ctx.keys_down = keys_down;
         ctx.keys_released = keys_released;
+        // Com um `UiInput` focado as teclas são TEXTO: semeia-se aqui, com o
+        // resto do estado do frame, porque os timers (e os contactos) correm
+        // fora do loop dos `on_update` — liam o valor do frame anterior e o
+        // primeiro frame da barra de fala disparava [E]/hotbar.
+        ctx.ui_typing = typing.as_deref().is_some_and(|focused| focused.0.is_some());
         // Relógio, herói e ações do frame, semeados ANTES de qualquer hook:
         // timers, sinais, contactos e o aggro-chain correm fora do
         // `run_update`, e sem isto `viber.time()` ficava no instante do último
@@ -434,6 +451,12 @@ pub fn luau_update(
         .to_string();
         // Forward do herói (modelo olha +Z) para `viber.player_forward`.
         ctx.player_forward = player_forward;
+        // Pose da câmara de jogo (frame anterior — o snapshot é publicado
+        // depois do rig de terceira pessoa, no `script_camera`).
+        ctx.camera = locals
+            .camera_snapshot
+            .as_deref()
+            .map(|snap| (snap.pos, snap.yaw_deg, snap.pitch_deg));
         ctx.cinematic = locals
             .cinematic
             .as_deref()
@@ -600,6 +623,16 @@ pub fn luau_update(
                             .map(GlobalTransform::translation)
                             .or_else(|| transform.map(|t| t.translation))
                     })
+                    .or_else(|| {
+                        // Dono sem `LuaScriptRef` (ex.: prop criado por
+                        // `viber.spawn_prototype` cujo `on_spawned` armou um
+                        // timer): vivo se tem `GlobalTransform`.
+                        locals
+                            .all_globals
+                            .get(owner)
+                            .ok()
+                            .map(GlobalTransform::translation)
+                    })
             }),
             name_of: Box::new(|owner| locals.entity_names.get(owner).ok().map(Name::to_string)),
             props_of: Box::new(|owner| {
@@ -608,6 +641,12 @@ pub fn luau_update(
                     .get(owner)
                     .ok()
                     .map(|(_, props)| props.0.clone())
+            }),
+            range_of: Box::new(|owner| {
+                scripts
+                    .get(owner)
+                    .ok()
+                    .and_then(|(_, _, _, _, _, interaction)| interaction.map(|i| i.range))
             }),
         },
     );
@@ -914,19 +953,39 @@ pub fn luau_update(
                     }
                 });
             }
-            ScriptCommand::TeleportPlayer(pos) => {
-                if let Some((entity, Some(transform), _)) = player_components.as_mut() {
+            ScriptCommand::TeleportPlayer { pos, exclude } => {
+                if let Some((entity, _, _)) = player_components.as_ref() {
+                    let entity = *entity;
                     // ASSENTA no destino em vez de largar o herói no ar: as
                     // colunas do destino podem estar por assar (vinha de uma
                     // bolsa de interior a 2,6 km) e, sem collider, o herói
                     // caía pelo mundo fora antes de o streaming o apanhar.
-                    // A superfície analítica existe sempre — é a mesma que o
-                    // `player_movement` usa como chão de último recurso.
-                    let landed = crate::player::landing_position(terrain.as_deref(), pos);
-                    transform.translation = landed;
-                    commands
-                        .entity(*entity)
-                        .try_insert(crate::player::TeleportSettle::default());
+                    //
+                    // O Y vem de um RAIO DE FÍSICA (props/plataformas/pontes)
+                    // com o terreno analítico como plano B — resolvido num
+                    // comando diferido porque precisa do `&mut World` do
+                    // Rapier, que os SystemParams deste sistema não expõem.
+                    commands.queue(move |world: &mut World| {
+                        // Exclui o herói E o prop pedido (marco): o raio não
+                        // pode pousá-lo por cima do próprio destino.
+                        let mut skip = vec![entity];
+                        if let Some(prop) = exclude {
+                            skip.push(prop);
+                        }
+                        let landed = crate::player::teleport_landing(world, pos, &skip);
+                        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                            transform.translation = landed;
+                        }
+                        if let Some(mut player) = world.get_mut::<Player>(entity) {
+                            player.vel_x = 0.0;
+                            player.vel_y = 0.0;
+                            player.vel_z = 0.0;
+                        }
+                        if let Ok(mut hero) = world.get_entity_mut(entity) {
+                            hero.remove::<crate::physics_fx::Knockback>();
+                            hero.insert(crate::player::TeleportSettle::default());
+                        }
+                    });
                 }
             }
             ScriptCommand::PushPlayer { velocity } => {
@@ -974,14 +1033,22 @@ pub fn luau_update(
                 range,
             } => {
                 if let Some(code) = key_code_from_str(&key) {
-                    commands.entity(entity).try_insert(ScriptInteraction {
-                        label,
-                        key: code,
-                        // ÚNICO sítio onde o alcance autorado vira alcance
-                        // efetivo: daqui para a frente (prompt, foco,
-                        // `interacted`, colheita) todos leem o mesmo número.
-                        range: crate::interact::scaled_range(range),
-                    });
+                    // Label vazio = sem interação (o script quer esconder o
+                    // prompt). Sem o remover a entidade continuava a GANHAR o
+                    // foco da tecla (distância 0, sem prompt nenhum) e calava
+                    // o NPC real ao lado.
+                    if label.trim().is_empty() {
+                        commands.entity(entity).try_remove::<ScriptInteraction>();
+                    } else {
+                        commands.entity(entity).try_insert(ScriptInteraction {
+                            label,
+                            key: code,
+                            // ÚNICO sítio onde o alcance autorado vira alcance
+                            // efetivo: daqui para a frente (prompt, foco,
+                            // `interacted`, colheita) todos leem o mesmo número.
+                            range: crate::interact::scaled_range(range),
+                        });
+                    }
                 }
             }
             ScriptCommand::Despawn(entity) => {
@@ -1395,6 +1462,31 @@ pub fn luau_update(
                 if let Some(owners) = locals.system_owners.as_deref_mut() {
                     owners.0.insert(name);
                 }
+            }
+            ScriptCommand::ReleaseSystem(name) => {
+                if let Some(owners) = locals.system_owners.as_deref_mut() {
+                    owners.0.remove(&name);
+                }
+            }
+            ScriptCommand::CameraFree(active) => {
+                if let Some(state) = locals.script_camera.as_deref_mut() {
+                    state.active = active;
+                }
+            }
+            ScriptCommand::CameraPose { pos, look } => {
+                if let Some(state) = locals.script_camera.as_deref_mut() {
+                    state.pos = pos;
+                    state.look = look;
+                }
+            }
+            ScriptCommand::SetVisible { entity, visible } => {
+                // `Inherited` (e não `Visible`) para a entidade voltar a
+                // respeitar o pai escondido quando é uma subárvore.
+                commands.entity(entity).insert(if visible {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                });
             }
             ScriptCommand::Say { text, secs } => {
                 let text = locals

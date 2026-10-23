@@ -114,13 +114,23 @@ pub fn select_method(params: In<Option<Value>>, world: &mut World) -> BrpResult 
     }
     let params: Params = serde_json::from_value(params.0.unwrap_or(Value::Null))
         .map_err(|error| invalid(format!("select: {error}")))?;
-    // Resolver ANTES do resource_mut (borrow do World).
-    let selected = params
-        .entity
-        .as_deref()
-        .and_then(entity_string_to_bits)
-        .and_then(Entity::try_from_bits)
-        .filter(|entity| world.get_entity(*entity).is_ok());
+    // Resolver ANTES do resource_mut (borrow do World). Um `entity` presente
+    // mas ilegível/desaparecido era tratado como "limpa a seleção": o editor
+    // (ou um agente com um id stale) achava que tinha desselecionado em vez
+    // de saber que o alvo já não existe. Sem `entity` continua a limpar.
+    let selected = match params.entity.as_deref() {
+        None => None,
+        Some(text) => {
+            let entity = entity_string_to_bits(text)
+                .and_then(Entity::try_from_bits)
+                .filter(|entity| world.get_entity(*entity).is_ok());
+            Some(entity.ok_or_else(|| {
+                invalid(format!(
+                    "select: entidade `{text}` inválida ou já não existe (formato \"indexvgeneration\")"
+                ))
+            })?)
+        }
+    };
     world.resource_mut::<SelectedEntity>().0 = selected;
     let name = selected.and_then(|entity| world.get::<Name>(entity).map(|name| name.to_string()));
     Ok(json!({

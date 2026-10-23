@@ -68,7 +68,9 @@ pub fn diff_files(
     }
     let (width, height) = img_a.dimensions();
     let (x0, y0, rw, rh) = roi.unwrap_or((0, 0, width, height));
-    if x0 + rw > width || y0 + rh > height {
+    // Sem `x0 + rw > width`: a soma estoura u32 (panic em debug, wrap em
+    // release) para uma ROI com valores grandes — comparações por subtração.
+    if x0 > width || y0 > height || rw > width - x0 || rh > height - y0 {
         return Err(format!(
             "roi {x0},{y0},{rw},{rh} fora da imagem {width}×{height}"
         ));

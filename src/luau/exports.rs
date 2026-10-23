@@ -373,6 +373,11 @@ impl ExportDef {
 
 /// Lê as anotações `--@export` de um script.
 pub fn parse_exports(source: &str) -> ScriptExports {
+    // Um BOM UTF-8 (editores Windows) à frente do primeiro `--@export`
+    // deixava a linha a começar em `\u{feff}` e a anotação caía em silêncio
+    // (o prop ficava só com o default; um `--@signal` na 1.ª linha dava
+    // "não é um sinal" no `viber.emit`).
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut out = ScriptExports::default();
     // Grupo corrente para os `--@export` seguintes (`--@group Nome`).
     let mut group: Option<String> = None;
@@ -504,17 +509,28 @@ fn parse_annotation(text: &str, line: usize, group: Option<String>) -> Result<Ex
     })
 }
 
-/// Separa a descrição (`-- …` fora de aspas) do resto da anotação.
+/// Separa a descrição (`-- …` fora de aspas) do resto da anotação. Aceita
+/// aspas simples e duplas (as duas formas de string do Lua) e ignora `\"`/
+/// `\'` dentro delas — `= 'Falar -- já'` tem um `--` que NÃO abre a doc.
 fn split_doc(text: &str) -> (&str, &str) {
-    let mut quoted = false;
-    let bytes = text.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'"' => quoted = !quoted,
-            b'-' if !quoted && bytes.get(i + 1) == Some(&b'-') => {
-                return (text[..i].trim(), text[i + 2..].trim());
-            }
-            _ => {}
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(_) if c == '\\' => escaped = true,
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '-' if text.as_bytes().get(i + 1) == Some(&b'-') => {
+                    return (text[..i].trim(), text[i + 2..].trim());
+                }
+                _ => {}
+            },
         }
     }
     (text.trim(), "")
@@ -526,12 +542,19 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Tira aspas `"…"` à volta de um valor (opcionais na anotação).
+/// Tira aspas à volta de um valor (opcionais na anotação; `"…"` ou `'…'`,
+/// as duas formas de string do Lua).
 fn unquote(text: &str) -> &str {
     let text = text.trim();
-    text.strip_prefix('"')
-        .and_then(|t| t.strip_suffix('"'))
-        .unwrap_or(text)
+    for quote in ['"', '\''] {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    text
 }
 
 impl PropType {
@@ -691,7 +714,7 @@ impl fmt::Display for PropType {
     }
 }
 
-fn parse_range<T: Copy>(
+fn parse_range<T: Copy + PartialOrd>(
     text: &str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<(Option<T>, Option<T>), String> {
@@ -708,7 +731,16 @@ fn parse_range<T: Copy>(
                 .ok_or_else(|| format!("limite `{s}` inválido"))
         }
     };
-    Ok((bound(min)?, bound(max)?))
+    let (min, max) = (bound(min)?, bound(max)?);
+    // Intervalo invertido (`number(5..0)`) não é um erro do autor apanhado
+    // depois: TODOS os valores caem fora e o default/instância viram `nil` em
+    // silêncio. Rejeita na anotação.
+    if let (Some(min), Some(max)) = (&min, &max)
+        && min > max
+    {
+        return Err(format!("intervalo `{text}`: mínimo acima do máximo"));
+    }
+    Ok((min, max))
 }
 
 fn check_range<T: PartialOrd + fmt::Display>(
@@ -1034,5 +1066,40 @@ function on_update(dt) end
         let v = PropValue::Vec3([1.0, 2.0, 3.0]).to_lua(&lua).unwrap();
         assert_eq!(v.as_table().unwrap().get::<f64>("y").unwrap(), 2.0);
         assert!(PropValue::Int(3).to_lua(&lua).unwrap().is_integer());
+    }
+
+    #[test]
+    fn bom_does_not_hide_the_first_annotation() {
+        // Editores Windows gravam UTF-8 com BOM: sem o remover, o primeiro
+        // `--@export`/`--@signal` caía em silêncio.
+        let exports = parse_exports("\u{feff}--@export speed: number = 1.5\n--@signal rang\n");
+        assert!(exports.errors.is_empty(), "{:?}", exports.errors);
+        assert_eq!(
+            exports.get("speed").unwrap().default,
+            Some(PropValue::Number(1.5))
+        );
+        assert!(exports.signal("rang").is_some());
+    }
+
+    #[test]
+    fn single_quoted_defaults_are_unquoted_and_do_not_open_the_doc() {
+        let exports = parse_exports(
+            "--@export prompt: string = 'Abrir -- agora'  -- ajuda\n\
+             --@export other: string = \"a \\\"--\\\" b\"",
+        );
+        assert!(exports.errors.is_empty(), "{:?}", exports.errors);
+        let prompt = exports.get("prompt").unwrap();
+        assert_eq!(
+            prompt.default,
+            Some(PropValue::Text("Abrir -- agora".into()))
+        );
+        assert_eq!(prompt.doc, "ajuda");
+        // `--` escapado dentro das aspas também não abre a doc.
+        let other = exports.get("other").unwrap();
+        assert_eq!(other.doc, "");
+        assert!(matches!(
+            &other.default,
+            Some(PropValue::Text(text)) if text.contains("--")
+        ));
     }
 }

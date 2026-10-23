@@ -44,8 +44,23 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
             // `scripts/`, que o loader aceita): a mesma chave em `modules` e
             // em `evict_module` (hot-reload) — senão as duas grafias criavam
             // dois módulos com estados separados e o reload não evictava.
-            let relative = path.strip_prefix("scripts/").unwrap_or(&path);
-            let key = relative.to_string();
+            // Também NORMALIZA `.`/`//` (`./lib/x.lua` era outro módulo, e o
+            // hot-reload só evictava a grafia do watcher — o estado antigo
+            // ficava preso para sempre).
+            let key: String = std::path::Path::new(path.strip_prefix("scripts/").unwrap_or(&path))
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                    // `..`/raiz já foram rejeitados acima; `.` cai.
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            if key.is_empty() {
+                return Err(mlua::Error::runtime(format!(
+                    "viber.load('{path}'): caminho sem ficheiro"
+                )));
+            }
             let modules: Table = lua.named_registry_value("viber_modules")?;
             if let Ok(cached) = modules.raw_get::<mlua::Value>(key.clone())
                 && !matches!(cached, mlua::Value::Nil)
@@ -56,7 +71,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 .app_data_ref::<ScriptCtx>()
                 .and_then(|ctx| ctx.scripts_dir.clone())
                 .ok_or_else(|| mlua::Error::runtime("viber.load sem scripts_dir"))?;
-            let full = dir.join(relative);
+            let full = dir.join(&key);
             let code = std::fs::read_to_string(&full)
                 .map_err(|e| mlua::Error::runtime(format!("viber.load('{path}'): {e}")))?;
             // Env sandbox próprio (mesma forma do chunk de entidade) — o

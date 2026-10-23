@@ -16,6 +16,12 @@ use super::ctx::ScriptCtx;
 
 /// Instala `viber.after`/`viber.every`/`viber.timer_cancel` na tabela `viber`.
 pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
+    // Ids que o TICK já recolheu de `viber_timers` e ainda vai executar (a
+    // callback de um deles pode cancelar outro). É o único estado em que o
+    // marcador de `viber_timer_cancelled` é necessário: uma entrada ainda na
+    // fila é removida e nunca vence, e um id já consumido/inexistente não tem
+    // o que cancelar — marcá-lo deixava a tabela a crescer para sempre.
+    lua.set_named_registry_value("viber_timer_collected", lua.create_table()?)?;
     let register = |periodic: bool| {
         lua.create_function(move |lua, (secs, func): (f64, Function)| {
             if !secs.is_finite() || secs < 0.0 {
@@ -27,10 +33,16 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 let ctx = lua
                     .app_data_ref::<ScriptCtx>()
                     .ok_or_else(|| mlua::Error::runtime("viber.after fora de script"))?;
+                // `path` só existe dentro de um script. Na REPL o dono é o
+                // herói (fora da query de scripts): o timer era aceite e
+                // descartado no primeiro tick, em silêncio — melhor erro.
+                let path = ctx.path.clone().ok_or_else(|| {
+                    mlua::Error::runtime("viber.after/every fora de um script (sem path)")
+                })?;
                 (
                     ctx.entity
                         .ok_or_else(|| mlua::Error::runtime("viber.after fora de on_update"))?,
-                    ctx.path.clone().unwrap_or_default(),
+                    path,
                     ctx.elapsed,
                 )
             };
@@ -52,18 +64,27 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
     };
     api.set("after", register(false)?)?;
     api.set("every", register(true)?)?;
-    // Cancela um handle (devolve true se a entrada existia). Marca SEMPRE no
-    // registry de cancelados: o tick pode já ter recolhido a entrada (um
-    // `viber.every` cancelado DENTRO da própria callback não renasce).
+    // Cancela um handle (devolve true se a entrada existia/estava a correr).
+    // Uma entrada ainda na fila sai e nunca vence; uma que o tick JÁ recolheu
+    // (a cancelar-se a si própria, ou `every` cancelado dentro da própria
+    // callback) leva o marcador, senão a callback re-agendava. Só esse segundo
+    // caso marca: um id já consumido/inexistente não deixa lixo na tabela.
     api.set(
         "timer_cancel",
         lua.create_function(|lua, id: i64| {
             let timers: Table = lua.named_registry_value("viber_timers")?;
-            let existed = timers.raw_get::<Table>(id).is_ok();
+            let queued = timers
+                .raw_get::<mlua::Value>(id)
+                .is_ok_and(|value| !matches!(value, mlua::Value::Nil));
             let _ = timers.raw_remove(id);
-            let cancelled: Table = lua.named_registry_value("viber_timer_cancelled")?;
-            cancelled.raw_set(id, true)?;
-            Ok(existed)
+            let collected = lua
+                .named_registry_value::<Table>("viber_timer_collected")
+                .is_ok_and(|table| table.raw_get::<bool>(id).unwrap_or(false));
+            if !queued && collected {
+                let cancelled: Table = lua.named_registry_value("viber_timer_cancelled")?;
+                cancelled.raw_set(id, true)?;
+            }
+            Ok(queued || collected)
         })?,
     )?;
     Ok(())
@@ -95,9 +116,26 @@ pub(crate) fn drop_timers(lua: &Lua, ids: &[i64]) {
     let cancelled = lua
         .named_registry_value::<Table>("viber_timer_cancelled")
         .ok();
+    let collected = lua
+        .named_registry_value::<Table>("viber_timer_collected")
+        .ok();
     for id in ids {
+        // O marcador só serve um id que o TICK já recolheu e ainda vai correr
+        // (a entrada saiu da tabela e a callback pode re-agendar). Um id
+        // ainda na fila é removido agora e nunca mais vence — marcá-lo
+        // deixava uma entrada por timer cancelado para sempre (cada
+        // despawn/hot-reload crescia a tabela sem nada a limpá-la).
+        let queued = timers
+            .raw_get::<mlua::Value>(*id)
+            .is_ok_and(|value| !matches!(value, mlua::Value::Nil));
+        let running = collected
+            .as_ref()
+            .is_some_and(|table| table.raw_get::<bool>(*id).unwrap_or(false));
         let _ = timers.raw_remove(*id);
-        if let Some(cancelled) = &cancelled {
+        if !queued
+            && running
+            && let Some(cancelled) = &cancelled
+        {
             let _ = cancelled.raw_set(*id, true);
         }
     }
@@ -117,6 +155,9 @@ pub struct TickFrame<'a> {
     /// semeia. Sem isto, um timer de um lobo lia o nome/props de OUTRO.
     pub name_of: Box<dyn Fn(Entity) -> Option<String> + 'a>,
     pub props_of: Box<dyn Fn(Entity) -> Option<std::sync::Arc<Vec<(String, String)>>> + 'a>,
+    /// Alcance de interação autorado do dono (`viber.interacted` na callback):
+    /// sem isto a callback herdava o range da última entidade do `on_update`.
+    pub range_of: Box<dyn Fn(Entity) -> Option<f32> + 'a>,
 }
 
 /// Tick (início do `luau_update`, ANTES dos `on_update`): executa os timers
@@ -131,6 +172,19 @@ pub fn tick(host: &mut super::host::LuaScriptHost, frame: TickFrame<'_>) {
     };
     let Ok(cancelled) = lua.named_registry_value::<Table>("viber_timer_cancelled") else {
         return;
+    };
+    // Ids recolhidos por ESTE tick e ainda por executar: o `timer_cancel`
+    // dentro de uma callback só os distingue de um id já consumido por estar
+    // aqui (a entrada já saiu de `viber_timers`).
+    let collected: Table = match lua.named_registry_value("viber_timer_collected") {
+        Ok(table) => table,
+        Err(_) => {
+            let Ok(table) = lua.create_table() else {
+                return;
+            };
+            let _ = lua.set_named_registry_value("viber_timer_collected", table.clone());
+            table
+        }
     };
     // Fase 1: recolhe os vencidos (a iteração `pairs` tem de acabar antes de
     // as callbacks correrem — podem registar novos timers).
@@ -149,62 +203,63 @@ pub fn tick(host: &mut super::host::LuaScriptHost, frame: TickFrame<'_>) {
         let owner: i64 = entry.raw_get("owner").unwrap_or(0);
         let path: String = entry.raw_get("path").unwrap_or_default();
         let _ = timers.raw_remove(id);
+        let _ = collected.raw_set(id, true);
         due.push((id, at, period, func, owner, path));
     }
     // Fase 2: executa (a entrada já saiu da tabela — cancelamentos posteriores
-    // não a encontram; o marker em `viber_timer_cancelled` cobre o resto).
+    // só a alcançam pelo par `collected`/`cancelled`).
     for (id, at, period, func, owner, path) in due {
+        let mut rearm = period.is_some();
         if cancelled.raw_get::<bool>(id).unwrap_or(false) {
-            let _ = cancelled.raw_remove(id);
-            continue;
-        }
-        // Dono despawnado: o timer morre com ele (um `every` órfão corria
-        // para sempre e enfileirava comandos contra uma entidade morta).
-        let Some(entity) = Entity::try_from_bits(owner as u64) else {
-            continue;
-        };
-        let Some(origin) = (frame.origin_of)(entity) else {
-            continue;
-        };
-        if let Some(mut ctx) = lua.app_data_mut::<ScriptCtx>() {
-            ctx.entity = Some(entity);
-            ctx.path = Some(path.clone());
-            ctx.origin = origin;
-            ctx.player = frame.player;
-            ctx.dt = frame.dt;
-            ctx.elapsed = elapsed;
-            ctx.self_name = (frame.name_of)(entity);
-            ctx.self_props = (frame.props_of)(entity);
-        }
-        let result = {
-            let _budget = host.budget_guard();
-            func.call::<()>(())
-        };
-        if let Err(e) = result {
-            host.warn_once(&path, &e);
-        }
-        if let Some(p) = period {
-            // Re-agenda salvo cancelado DURANTE a própria callback.
-            if cancelled.raw_get::<bool>(id).unwrap_or(false) {
-                let _ = cancelled.raw_remove(id);
-                continue;
+            rearm = false;
+        } else if let Some(entity) = Entity::try_from_bits(owner as u64)
+            && let Some(origin) = (frame.origin_of)(entity)
+        {
+            if let Some(mut ctx) = lua.app_data_mut::<ScriptCtx>() {
+                ctx.entity = Some(entity);
+                ctx.path = Some(path.clone());
+                ctx.origin = origin;
+                ctx.player = frame.player;
+                ctx.dt = frame.dt;
+                ctx.elapsed = elapsed;
+                ctx.self_name = (frame.name_of)(entity);
+                ctx.self_props = (frame.props_of)(entity);
+                ctx.interaction_range = (frame.range_of)(entity);
             }
-            // Cadência presa ao agendamento (`at + p`), não ao frame em que
-            // venceu — `elapsed + p` somava o atraso do frame a cada disparo.
-            // Depois de um engasgo longo retoma a partir de agora (sem rajada).
-            let next = if at + p > elapsed {
-                at + p
-            } else {
-                elapsed + p
+            let result = {
+                let _budget = host.budget_guard();
+                func.call::<()>(())
             };
-            if let Ok(entry) = lua.create_table() {
-                let _ = entry.raw_set("at", next);
-                let _ = entry.raw_set("period", p);
-                let _ = entry.raw_set("func", func.clone());
-                let _ = entry.raw_set("owner", owner);
-                let _ = entry.raw_set("path", path.clone());
-                let _ = timers.raw_set(id, entry);
+            if let Err(e) = result {
+                host.warn_once(&path, &e);
             }
+            // Cancelado durante a PRÓPRIA callback: não re-agenda.
+            rearm = rearm && !cancelled.raw_get::<bool>(id).unwrap_or(false);
+        } else {
+            // Dono despawnado: o timer morre com ele (um `every` órfão corria
+            // para sempre e enfileirava comandos contra uma entidade morta).
+            rearm = false;
+        }
+        let _ = collected.raw_remove(id);
+        let _ = cancelled.raw_remove(id);
+        let Some(p) = period.filter(|_| rearm) else {
+            continue;
+        };
+        // Cadência presa ao agendamento (`at + p`), não ao frame em que
+        // venceu — `elapsed + p` somava o atraso do frame a cada disparo.
+        // Depois de um engasgo longo retoma a partir de agora (sem rajada).
+        let next = if at + p > elapsed {
+            at + p
+        } else {
+            elapsed + p
+        };
+        if let Ok(entry) = lua.create_table() {
+            let _ = entry.raw_set("at", next);
+            let _ = entry.raw_set("period", p);
+            let _ = entry.raw_set("func", func.clone());
+            let _ = entry.raw_set("owner", owner);
+            let _ = entry.raw_set("path", path.clone());
+            let _ = timers.raw_set(id, entry);
         }
     }
 }

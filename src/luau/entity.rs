@@ -153,9 +153,13 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
     api.set(
         "entity_damage",
         lua.create_function(|lua, (amount, id): (f32, Option<i64>)| {
-            if !amount.is_finite() {
+            // Negativo era dano ao contrário: `apply_damage` soma-o à vida
+            // (curar). O `radial_damage` rejeita `< 0` e a cura tem função
+            // própria — uma fórmula `dano - armadura` que fica negativa
+            // estava a curar o inimigo em vez de ser um erro visível.
+            if !amount.is_finite() || amount < 0.0 {
                 return Err(mlua::Error::runtime(
-                    "viber.entity_damage: amount não finito (NaN/inf)",
+                    "viber.entity_damage: amount tem de ser finito e >= 0 (para curar use entity_heal)",
                 ));
             }
             let entity = resolve_entity(lua, id)?;
@@ -190,6 +194,13 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
     api.set(
         "find",
         lua.create_function(|lua, name: String| {
+            // Nome vazio não identifica ninguém: `contains("")` casava TODAS
+            // as entidades e devolvia a primeira por ordem alfabética — um
+            // prop vazio (`viber.find(viber.prop("home"))`) danificava ou
+            // teleportava o alvo errado em silêncio.
+            if name.is_empty() {
+                return Ok(mlua::Value::Nil);
+            }
             let ctx = lua.app_data_ref::<ScriptCtx>();
             let Some(ctx) = ctx.as_ref() else {
                 return Ok(mlua::Value::Nil);
@@ -213,6 +224,12 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, name: String| {
             let ctx = lua.app_data_ref::<ScriptCtx>();
             let out = lua.create_table()?;
+            // Nome vazio não é um filtro: devolver o mundo INTEIRO (dezenas
+            // de milhares de entidades no Vael) numa tabela Lua era um
+            // alloc/lag por chamada — e nada no contrato promete "todos".
+            if name.is_empty() {
+                return Ok(out);
+            }
             let Some(ctx) = ctx.as_ref() else {
                 return Ok(out);
             };
@@ -254,9 +271,11 @@ pub(crate) fn resolve_entity(lua: &Lua, id: Option<i64>) -> mlua::Result<bevy::p
     }
 }
 
-/// Chave exata primeiro; senão a primeira que contém (ordem de inserção —
-/// HashMap é aleatório, mas o snapshot é reconstruído por frame e o teste
-/// de proximidade do chamador decide o resto).
+/// Chave exata primeiro; senão a primeira que contém. A escolha por substring
+/// é a PRIMEIRA em ordem lexicográfica — a iteração do `HashMap` é arbitrária
+/// (e muda quando a tabela rehasha, com entidades a nascer/morrer), pelo que
+/// `viber.find("door")` devolvia portas diferentes entre frames. É a mesma
+/// ordem estável que o `find_all` já promete.
 fn exact_or_substring<'a>(
     map: &'a std::collections::HashMap<String, Vec<i64>>,
     name: &str,
@@ -264,5 +283,7 @@ fn exact_or_substring<'a>(
     if let Some(v) = map.get(name) {
         return Some(v);
     }
-    map.iter().find(|(k, _)| k.contains(name)).map(|(_, v)| v)
+    let mut keys: Vec<&String> = map.keys().filter(|key| key.contains(name)).collect();
+    keys.sort();
+    keys.first().and_then(|key| map.get(key.as_str()))
 }

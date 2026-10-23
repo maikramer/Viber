@@ -1016,3 +1016,24 @@ Armadilhas de medição desta máquina: `rustc` dos outros agentes (CPU 5×
 mais lento por igual), a janela oculta no Wayland (GPU a 0 % e spans de GPU
 inflacionados), throttle térmico da GPU (`clocks_throttle_reasons` 0x24), e
 o herói a morrer durante o levantamento (usar `viber.game().iframes`).
+
+### LODs do pool refeitos (2026-10-22) — revertido em parte
+
+`Vael/assets/fix_lods.py` refez 237 tiers de 143 assets com `gltfpack -sa`.
+Os números de GPU baixaram (centro do vale 13,6–15 → 6,3–7,5 ms; pior
+direção 19–25 → 7,7 ms), mas **o `-sa` solda vértices de ilhas UV
+diferentes**: os triângulos passam a amostrar outra peça do atlas e a textura
+fica embaralhada (a casa do pastor junto ao portão oeste foi reportada).
+
+Medição: fração da área 3D cujos triângulos têm densidade UV > 4× a mediana do
+LOD0 (= o triângulo atravessa ilhas do atlas). Distribuição bimodal: 168 tiers
+com 10–75 % da superfície estragada, os restantes a 0 % (igual ao original).
+Os 168 voltaram ao original (backup); ficaram só os 77 limpos. O `fix_lods.py`
+já não usa `-sa`, e `simplify_far_indices` deixou de cair na `sloppy` (mesmo
+defeito) — só simplifica respeitando costuras
+(`test_simplify_far_never_welds_uv_islands`). Os ganhos de GPU acima ficam
+portanto só em parte; medir de novo.
+
+Os assets gerados ficam presos no piso de costuras porque o atlas do paint3d
+tem centenas de ilhas pequenas. Reduzir mais exige refazer o UV e fazer o
+re-bake da textura no LOD (não simplificar a malha pintada).
