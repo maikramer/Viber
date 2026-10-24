@@ -72,7 +72,7 @@ mod imp {
         ready: Arc<AtomicBool>,
         load_error: Arc<Mutex<Option<String>>>,
     ) {
-        let mut runtime: Option<vael_decision::Runtime> = None;
+        let mut runtime: Option<celer_decision::Runtime> = None;
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Load(dir) => {
@@ -81,7 +81,7 @@ mod imp {
                         continue;
                     }
                     let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        vael_decision::Runtime::load(&dir)
+                        celer_decision::Runtime::load(&dir)
                     }));
                     match loaded {
                         Ok(Ok(rt)) => {
@@ -299,7 +299,7 @@ mod imp {
 
         let (w_ready, w_err) = (ready.clone(), load_error.clone());
         std::thread::Builder::new()
-            .name("vael-decision".into())
+            .name("celer-decision".into())
             .spawn(move || worker(req_rx, res_tx, w_ready, w_err))
             .map_err(|e| mlua::Error::runtime(format!("viber.decision: worker: {e}")))?;
 

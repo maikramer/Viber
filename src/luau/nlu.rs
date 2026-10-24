@@ -47,7 +47,7 @@ mod imp {
 
     enum Response {
         Loaded(Result<(), String>),
-        Parsed { id: u32, result: Result<vael_nlu::Parsed, String> },
+        Parsed { id: u32, result: Result<celer_nlu::Parsed, String> },
     }
 
     #[derive(Clone)]
@@ -64,7 +64,7 @@ mod imp {
 
     fn worker(rx: Receiver<Request>, tx: Sender<Response>, ready: Arc<AtomicBool>,
               load_error: Arc<Mutex<Option<String>>>) {
-        let mut runtime: Option<vael_nlu::Runtime> = None;
+        let mut runtime: Option<celer_nlu::Runtime> = None;
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Load(dir) => {
@@ -77,7 +77,7 @@ mod imp {
                         continue;
                     }
                     let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        vael_nlu::Runtime::load(&dir)
+                        celer_nlu::Runtime::load(&dir)
                     }));
                     match loaded {
                         Ok(Ok(rt)) => {
@@ -150,7 +150,7 @@ mod imp {
             .ok_or_else(|| mlua::Error::runtime("viber.nlu: estado ausente"))
     }
 
-    fn parsed_to_table(lua: &Lua, parsed: &vael_nlu::Parsed) -> mlua::Result<Table> {
+    fn parsed_to_table(lua: &Lua, parsed: &celer_nlu::Parsed) -> mlua::Result<Table> {
         let t = lua.create_table()?;
         t.set("count", parsed.count)?;
         t.set("intent", parsed.intent.clone())?;
@@ -208,7 +208,7 @@ mod imp {
 
         let (w_ready, w_err) = (ready.clone(), load_error.clone());
         std::thread::Builder::new()
-            .name("vael-nlu".into())
+            .name("celer-nlu".into())
             .spawn(move || worker(req_rx, res_tx, w_ready, w_err))
             .map_err(|e| mlua::Error::runtime(format!("viber.nlu: worker: {e}")))?;
 
@@ -427,7 +427,7 @@ mod tests {
         let Ok(dir) = std::env::var("VAEL_NLU_DIR") else {
             return;
         };
-        let mut rt = vael_nlu::Runtime::load(dir).expect("carregar artefacto");
+        let mut rt = celer_nlu::Runtime::load(dir).expect("carregar artefacto");
         let p = rt.parse("lobos").expect("parse");
         assert!(
             p.entities.iter().any(|e| e.label == "criatura"),

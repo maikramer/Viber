@@ -12,7 +12,7 @@ categories = ["game-development"]
 [workspace]
 # A raiz (este crate) já é membro. `members = ["."]` faria o `exclude`
 # abaixo falhar: o cargo trata "." como membro explícito de toda a árvore.
-members = ["editor", "crates/nlu", "crates/decision"]
+members = ["editor"]
 # Path-deps dentro do checkout entram no workspace. Os testes e exemplos
 # destes forks não compilam com `--workspace --all-targets`.
 exclude = [
@@ -52,12 +52,11 @@ bevy = { version = "0.20", features = [
     "bevy_gizmos",
 ] }
 clap = { version = "4.6", features = ["derive"] }
-# NLU (GLiNER2) para o jogo: crate próprio, feature `nlu`. O ORT traz um
-# binário pré-construído (download-binaries); sem a feature a engine compila
-# como antes.
-vael-nlu = { path = "crates/nlu", optional = true }
-# d1-omni como IA de decisão: ONNX/ORT + embedding int8. Feature `decision`.
-vael-decision = { path = "crates/decision", optional = true }
+# NLU (GLiNER2) e d1-omni (decisão): runtimes próprios no checkout irmão
+# CelerAI (models/ + estudos lá). O ORT traz um binário pré-construído
+# (download-binaries); sem as features a engine compila como antes.
+celer-nlu = { path = "../CelerAI/crates/nlu", optional = true }
+celer-decision = { path = "../CelerAI/crates/decision", optional = true }
 
 image = { version = "0.25", default-features = false, features = ["png"] }
 roxmltree = "0.21"
@@ -141,8 +140,8 @@ tempfile = "3"
 default = ["experimental_pbr_pcss", "luau-jit", "nlu", "decision"]
 experimental_pbr_pcss = ["bevy/experimental_pbr_pcss"]
 luau-jit = ["mlua/luau-jit"]
-nlu = ["dep:vael-nlu"]
-decision = ["dep:vael-decision"]
+nlu = ["dep:celer-nlu"]
+decision = ["dep:celer-decision"]
 # DLSS Super Resolution (NVIDIA NGX, Linux/Vulkan): NÃO-default de propósito —
 # o `dlss_wgpu` precisa do SDK da NVIDIA em build (`DLSS_SDK` aponta para o
 # clone de github.com/NVIDIA/DLSS na tag v310.9.1, + `VULKAN_SDK` com headers

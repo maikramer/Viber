@@ -2411,6 +2411,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "celer-decision"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "celer-nlu",
+ "ort",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokenizers",
+]
+
+[[package]]
+name = "celer-nlu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ort",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokenizers",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7425,31 +7450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vael-decision"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ort",
- "regex",
- "serde",
- "serde_json",
- "tokenizers",
- "vael-nlu",
-]
-
-[[package]]
-name = "vael-nlu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ort",
- "regex",
- "serde",
- "serde_json",
- "tokenizers",
-]
-
-[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7495,6 +7495,8 @@ dependencies = [
  "bevy_landmass",
  "bevy_rapier3d",
  "bevy_rerecast",
+ "celer-decision",
+ "celer-nlu",
  "clap",
  "dirs",
  "flate2",
@@ -7511,8 +7513,6 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "transvoxel",
- "vael-decision",
- "vael-nlu",
  "wesl",
 ]
 
