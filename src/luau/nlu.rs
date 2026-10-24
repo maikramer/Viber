@@ -421,10 +421,10 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
 
 #[cfg(all(test, feature = "nlu"))]
 mod tests {
-    /// Integração real, gated: `VAEL_NLU_DIR=../Vael/assets/public/nlu cargo test`.
+    /// Integração real, gated: `CELER_NLU_DIR=Vael/assets/public/nlu cargo test`.
     #[test]
     fn parses_one_word_when_model_present() {
-        let Ok(dir) = std::env::var("VAEL_NLU_DIR") else {
+        let Ok(dir) = std::env::var("CELER_NLU_DIR") else {
             return;
         };
         let mut rt = celer_nlu::Runtime::load(dir).expect("carregar artefacto");
