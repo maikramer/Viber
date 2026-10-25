@@ -159,6 +159,12 @@ opt-level = 1
 # target/debug/deps, 2026-10-13). `unpacked` deixa o debuginfo nos objetos
 # (partilhados) em vez de o copiar para cada executável.
 split-debuginfo = "unpacked"
+# E o debuginfo COMPLETO do próprio crate inflava cada geração de build
+# (libviber .rlib de 783 MB, sessões incremental de 2,1 GB, .dwo a rodo — o
+# target chegou a 200+ GB mesmo com o `unpacked`). line-tables-only mantém
+# backtraces com ficheiro+linha e corta o grosso disso; perde-se só
+# inspeção de variáveis no gdb/lldb, que o fluxo (logs/bridge) não usa.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3

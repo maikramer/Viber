@@ -75,6 +75,11 @@ if [[ "$build" == 1 ]]; then
       # compilação muda-o e o próximo arranque recompila.
       echo "$fp" >"$ok_fp_file"
       rm -f "$fail_fp_file"
+      # O cargo nunca apaga gerações velhas em deps/ — sem isto o target só
+      # cresce (chegou a 200+ GB). VIBER_TARGET_GC=0 salta.
+      if [[ "${VIBER_TARGET_GC:-1}" != 0 ]]; then
+        "$checkout/scripts/target-gc.sh" "$checkout/target" "$checkout" >&2 || true
+      fi
     else
       mkdir -p "$store"
       # Fingerprint de DEPOIS: o próprio cargo pode reescrever o Cargo.lock,
