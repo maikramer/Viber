@@ -93,9 +93,11 @@ pub struct SceneDoc {
     pub terrain: Option<super::terrain::TerrainDoc>,
 }
 
-/// Escrita atómica com backup: escreve num `.tmp` ao lado, roda o `.bak`
-/// anterior e faz rename — um crash nunca deixa um ficheiro a meio.
+/// Escrita atómica com backup: escreve num `.tmp` ao lado (com `sync_all` —
+/// o mesmo padrão do save e do lease de sessão), roda o `.bak` anterior e faz
+/// rename — um crash nunca deixa um ficheiro a meio.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
     // Sufixo no NOME COMPLETO, não `with_extension`: `world.xml` e
     // `world.json` na mesma pasta partilhavam `world.tmp`/`world.bak` e uma
     // escrita podia pisar a outra.
@@ -108,12 +110,32 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
         path.with_file_name(name)
     };
     let tmp = with_suffix(".tmp");
-    std::fs::write(&tmp, bytes)?;
+    // `std::fs::write` não sincroniza: o rename podia ser durável com o
+    // conteúdo ainda só em cache de página — a queda a seguir deixava o
+    // ficheiro novo truncado/zero com o .bak bom. Um crash durante a escrita
+    // do `.tmp` também não pode o deixar órfão a meio.
+    let write_tmp = || -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("a criar {}", tmp.display()))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("a escrever {}", tmp.display()))?;
+        Ok(())
+    };
+    if let Err(error) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     let bak = with_suffix(".bak");
     if path.exists() {
         let _ = std::fs::rename(path, &bak);
     }
-    std::fs::rename(&tmp, path)?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error).with_context(|| {
+            format!("a promover {} → {}", tmp.display(), path.display())
+        });
+    }
     Ok(())
 }
 

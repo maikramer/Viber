@@ -667,7 +667,15 @@ pub fn swap_scene(world: &mut World, request: &ChangeScene) -> Result<()> {
     });
     match crate::scene::doc::SceneDoc::load(&path) {
         Ok(doc) => world.insert_resource(doc),
-        Err(error) => warn!("documento de edição de {}: {error:#}", path.display()),
+        Err(error) => {
+            // Sem documento novo, o ANTIGO (da cena anterior) ficava inserto:
+            // uma edição viva (`viber.scene.*`, editor) ia gravar no ficheiro
+            // e despawnar pelas origens da cena ERRADA. Fica sem documento —
+            // as edições avisam "sem documento carregado" — em vez de editar
+            // a cena errada em silêncio.
+            warn!("documento de edição de {}: {error:#}", path.display());
+            world.remove_resource::<crate::scene::doc::SceneDoc>();
+        }
     }
     world.insert_resource(crate::scene::ops::History::default());
     // A época sobe ANTES do carregamento: o `spawn::startup` lê-a para saber que isto é
@@ -905,6 +913,15 @@ pub fn reset_scene_resources(world: &mut World) {
     // Falhas de sync da cena anterior (o badge "recarregar" do editor) não
     // sobrevivem à troca: a cena nova pode ser perfeitamente sync-ável.
     reset_default::<crate::scene::sync::SceneSyncStatus>(world);
+    // Edições PENDENTES da cena anterior também não: uma `SceneEdited` escrita
+    // depois do PostUpdate sobrevivia à troca e o sync aplicava o
+    // `Change::Removed/Attrs` — que referencia ficheiros/origens da cena VELHA
+    // — às entidades da nova (despawns e shifts errados).
+    if let Some(mut edits) = world
+        .get_resource_mut::<bevy::ecs::message::Messages<crate::scene::live::SceneEdited>>()
+    {
+        edits.clear();
+    }
     crate::nav::reset_for_scene(world);
 }
 
