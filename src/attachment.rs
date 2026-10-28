@@ -79,19 +79,26 @@ pub fn apply_attachments(
             continue;
         };
         let key = (owner, request.slot);
+        // O osso resolve-se ANTES de trocar o slot: falhar o osso não pode
+        // deixar o dono sem o attachment ANTIGO — remover antes deixava a
+        // troca de "mão para cabeça" (osso inexistente no rig) a despir a
+        // tocha viva e não pôr nada em vez dela. Um detach (`url = None`)
+        // continua a remover só o slot.
+        let placement = request.url.as_ref().and_then(|url| {
+            find_bone(owner, &request.bone, &children, &names).map(|bone| (bone, url.clone()))
+        });
+        if request.url.is_some() && placement.is_none() {
+            warn!(
+                target: "viber::attachment",
+                "osso '{}' não encontrado — '{}' não anexado (o anterior fica)",
+                request.bone,
+                request.url.as_deref().unwrap_or("?")
+            );
+        }
         if let Some(old) = slots.0.remove(&key) {
             commands.entity(old).try_despawn();
         }
-        let Some(url) = request.url else {
-            continue;
-        };
-        let Some(bone) = find_bone(owner, &request.bone, &children, &names) else {
-            warn!(
-                target: "viber::attachment",
-                "osso '{}' não encontrado — '{}' não anexado",
-                request.bone,
-                url
-            );
+        let Some((bone, url)) = placement else {
             continue;
         };
         let handle = crate::meshopt::load_gltf(&asset_server, url);
