@@ -125,7 +125,24 @@ pub fn physics_ground_below(
     // Sensores (triggers/volumes) não são chão. `exclude_collider`/
     // `exclude_rigid_body` só guardam UM par, por isso as exclusões extra
     // (herói + prop do destino) vão por predicado.
-    let skip = exclude.to_vec();
+    //
+    // O predicado recebe a entidade DO COLLIDER: um collider com offset
+    // (poço, torre) ou pendente (`PendingCollider` de malha) vive numa
+    // entidade FILHA do prop, e excluir só o id do prop deixava o raio
+    // acertar naquela criança — o herói pousava EM CIMA do poço/torre que
+    // era o destino. A exclusão desce a hierarquia (filhos, netos…).
+    let mut skip = exclude.to_vec();
+    let mut stack: Vec<Entity> = exclude.to_vec();
+    while let Some(entity) = stack.pop() {
+        if let Some(children) = world.get::<Children>(entity) {
+            for child in children.iter() {
+                if !skip.contains(&child) {
+                    stack.push(child);
+                    skip.push(child);
+                }
+            }
+        }
+    }
     let keep = |entity: Entity, _collider: &bevy_rapier3d::rapier::geometry::Collider| {
         !skip.contains(&entity)
     };
