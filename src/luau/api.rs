@@ -455,6 +455,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut pitch = 1.0_f64;
             let mut volume = 1.0_f32;
             let mut position = None;
+            let origin_y = lua
+                .app_data_ref::<ScriptCtx>()
+                .map(|ctx| ctx.origin.y)
+                .unwrap_or(0.0);
             if let Some(opts) = opts {
                 if let Ok(value) = opts.get::<f64>("pitch") {
                     if !value.is_finite() || value <= 0.0 {
@@ -475,14 +479,21 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let x = opts.get::<f32>("x").ok();
                 let y = opts.get::<f32>("y").ok();
                 let z = opts.get::<f32>("z").ok();
-                if let (Some(x), Some(z)) = (x, z)
-                    && x.is_finite()
-                    && z.is_finite()
-                {
-                    let y = y.unwrap_or(0.0);
-                    if y.is_finite() {
-                        position = Some(Vec3::new(x, y, z));
+                // A mesma regra do `viber.sound`: NaN/inf são ERRO (o resto
+                // das primitivas com posição rejeita não-finitos) — aqui
+                // caíam em silêncio e o loop tocava sem posição.
+                for (axis, value) in [("x", x), ("y", y), ("z", z)] {
+                    if value.is_some_and(|v| !v.is_finite()) {
+                        return Err(mlua::Error::runtime(format!(
+                            "viber.sound_loop: {axis} tem de ser finito (NaN/inf)"
+                        )));
                     }
+                }
+                if let (Some(x), Some(z)) = (x, z) {
+                    // Sem `y` = a cota da entidade (0 enterrava o loop nas
+                    // colinas — o `viber.sound` já usava a origem).
+                    let y = y.unwrap_or(origin_y);
+                    position = Some(Vec3::new(x, y, z));
                 }
             }
             let owner = lua
@@ -855,8 +866,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let state: Table = states
                 .raw_get::<Table>(key)
                 .map_err(|_| mlua::Error::runtime("viber.wander_target antes de viber.state()"))?;
-            let home: Table = state.raw_get("home")?;
-            let home = Vec2::new(home.raw_get("x")?, home.raw_get("z")?);
+            let home: Table = state.raw_get("home").map_err(|_| {
+                mlua::Error::runtime(
+                    "viber.wander_target: o estado não tem 'home' (o top-level grava-o; o script apagou-o?)",
+                )
+            })?;
+            let home = Vec2::new(
+                home.raw_get("x").map_err(|_| {
+                    mlua::Error::runtime("viber.wander_target: 'home' sem 'x'")
+                })?,
+                home.raw_get("z").map_err(|_| {
+                    mlua::Error::runtime("viber.wander_target: 'home' sem 'z'")
+                })?,
+            );
             let picks: u64 = state.raw_get("picks").unwrap_or(0u64);
             state.raw_set("picks", picks + 1)?;
             let seed = crate::ai::enemy_seed(entity.to_bits() as u32, picks);
@@ -896,9 +918,16 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     api.set(
         "action",
         lua.create_function(|lua, name: String| {
+            // Array fixo de chaves estáticas semeado pelo frame — procura
+            // linear em 6 entradas, sem mapas realoçados por frame.
             let pressed = lua
                 .app_data_ref::<ScriptCtx>()
-                .and_then(|ctx| ctx.action_pressed.get(&name).copied())
+                .and_then(|ctx| {
+                    ctx.action_pressed
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, pressed)| *pressed)
+                })
                 .unwrap_or(false);
             Ok(pressed)
         })?,
@@ -2044,8 +2073,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             Ok(lua
                 .app_data_ref::<ScriptCtx>()
-                .map(|ctx| ctx.net_role.clone())
-                .unwrap_or_else(|| "off".to_string()))
+                .map(|ctx| ctx.net_role)
+                .unwrap_or("off"))
         })?,
     )?;
 

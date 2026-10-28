@@ -349,7 +349,7 @@ pub fn luau_update(
     // tem de ver as teclas pressionadas NESTE frame (semear só no fim
     // fazia os scripts lerem o snapshot do frame anterior).
     if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
-        ctx.just_pressed = just_pressed.clone();
+        ctx.just_pressed = just_pressed;
         ctx.keys_down = keys_down;
         ctx.keys_released = keys_released;
         // Com um `UiInput` focado as teclas são TEXTO: semeia-se aqui, com o
@@ -367,6 +367,8 @@ pub fn luau_update(
         ctx.player = player_pos;
         // Sentidos do frame por entidade: `viber.sense()` resolve pelo
         // `ctx.entity` de cada hook, sem herdar o pulso de outra entidade.
+        // As chaves são ESTÁTICAS (`SenseKind::as_str`) — sem `to_string`
+        // por pulso por frame.
         ctx.sense_by_entity = locals
             .sense
             .as_deref()
@@ -374,27 +376,24 @@ pub fn luau_update(
                 inbox
                     .pulses
                     .iter()
-                    .map(|(entity, kind)| (entity.to_bits() as i64, kind.as_str().to_string()))
+                    .map(|(entity, kind)| (entity.to_bits() as i64, kind.as_str()))
                     .collect()
             })
             .unwrap_or_default();
-        ctx.action_pressed = locals
-            .actions
-            .as_deref()
-            .map(|state| {
-                [
-                    crate::input_map::Action::Jump,
-                    crate::input_map::Action::Sprint,
-                    crate::input_map::Action::Attack,
-                    crate::input_map::Action::Interact,
-                    crate::input_map::Action::Lock,
-                    crate::input_map::Action::Menu,
-                ]
-                .into_iter()
-                .map(|action| (action.as_str().to_string(), state.pressed(action)))
-                .collect()
-            })
-            .unwrap_or_default();
+        // Ações do frame: array FIXO de chaves estáticas (o
+        // `HashMap<String, bool>` realocava o mapa e seis strings por frame).
+        let action_state = locals.actions.as_deref();
+        let pressed =
+            |action: crate::input_map::Action| action_state.is_some_and(|state| state.pressed(action));
+        use crate::input_map::Action;
+        ctx.action_pressed = [
+            (Action::Jump.as_str(), pressed(Action::Jump)),
+            (Action::Sprint.as_str(), pressed(Action::Sprint)),
+            (Action::Attack.as_str(), pressed(Action::Attack)),
+            (Action::Interact.as_str(), pressed(Action::Interact)),
+            (Action::Lock.as_str(), pressed(Action::Lock)),
+            (Action::Menu.as_str(), pressed(Action::Menu)),
+        ];
         match locals.mouse.as_deref() {
             Some(mouse) => {
                 ctx.mouse_pressed = mouse.get_just_pressed().copied().collect();
@@ -447,8 +446,7 @@ pub fn luau_update(
             Some(crate::netplay::NetRole::Host { .. }) => "host",
             Some(crate::netplay::NetRole::Join { .. }) => "join",
             _ => "off",
-        }
-        .to_string();
+        };
         // Forward do herói (modelo olha +Z) para `viber.player_forward`.
         ctx.player_forward = player_forward;
         // Pose da câmara de jogo (frame anterior — o snapshot é publicado
@@ -589,7 +587,13 @@ pub fn luau_update(
                     forward: Vec2::new(forward.x, forward.z),
                 });
             }
-            if let Some(lib) = locals.prototypes.as_deref() {
+            // A biblioteca é imutável pós-arranque: só re-semeia quando muda
+            // (ou na 1.ª vez) — clonar todos os nomes em TODOS os frames era
+            // lixo puro. `as_ref` e não `as_deref` para manter o `Res` (a
+            // detecção de mudança vive nele).
+            if let Some(lib) = locals.prototypes.as_ref()
+                && (lib.is_changed() || ctx.prototype_names.is_empty())
+            {
                 ctx.prototype_names = lib.0.keys().cloned().collect();
             }
         }
@@ -673,8 +677,8 @@ pub fn luau_update(
         if let Some(mut ctx) = host.lua.app_data_mut::<ScriptCtx>() {
             ctx.interaction_range = interaction.map(|i| i.range);
             // Nome PRÓPRIO da entidade que vai correr (fora do snapshot com
-            // cap — ver `entity_names`).
-            ctx.self_name = locals.entity_names.get(entity).ok().map(Name::to_string);
+            // cap — ver `entity_names`), com o buffer reaproveitado.
+            ctx.set_self_name(locals.entity_names.get(entity).ok());
             ctx.self_props = locals
                 .script_props
                 .get(entity)
@@ -785,7 +789,9 @@ pub fn luau_update(
                 }
                 continue;
             };
-            let path = lref.path.clone();
+            // Empréstimo, não clone: o `path` do script é lido (e não
+            // guardado) na entrega — um `String` novo por handler por vaga.
+            let path: &str = &lref.path;
             let origin = global
                 .map(GlobalTransform::translation)
                 .or_else(|| transform.as_ref().map(|t| t.translation))
@@ -801,7 +807,7 @@ pub fn luau_update(
             }
             match host.run_method(
                 target,
-                &path,
+                path,
                 origin,
                 &method,
                 super::signals::unpack(&args),
@@ -1014,7 +1020,9 @@ pub fn luau_update(
             }
             ScriptCommand::HealPlayer(amount) => {
                 if let Some((_, _, Some(health))) = player_components.as_mut() {
-                    health.current = (health.current + amount).min(health.max);
+                    // O mesmo contrato de `entity_heal`: negativo não tira vida
+                    // e um NaN do produtor não envenena o HP para sempre.
+                    health.current = apply_heal(health.current, health.max, amount);
                 }
             }
             ScriptCommand::Toast(msg) => {

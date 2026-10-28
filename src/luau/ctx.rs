@@ -14,6 +14,8 @@ pub struct ScriptCtx {
     /// Entity currently running `on_update` (None outside script calls).
     pub entity: Option<Entity>,
     /// Path do script em execução (`viber.events` subscreve por path).
+    /// Semeado por [`ScriptCtx::set_path`], que reaproveita o buffer — o
+    /// `run_update` semeia-o para CADA script activo em TODOS os frames.
     pub path: Option<String>,
     /// Position snapshot of the current entity (start of frame).
     pub origin: Vec3,
@@ -81,10 +83,13 @@ pub struct ScriptCtx {
     /// Pulsos de sentido DESTE frame, por entidade (bits → `"see"`/`"hear"`).
     /// `viber.sense()` resolve pelo `ctx.entity` corrente: um `Option<String>`
     /// semeado por chamada ficava pendurado nos hooks (um timer/sinal de uma
-    /// entidade lia o sentido de OUTRA, do último `on_update`).
-    pub sense_by_entity: std::collections::HashMap<i64, String>,
+    /// entidade lia o sentido de OUTRA, do último `on_update`). A chave é
+    /// `'static` (`SenseKind::as_str`) — sem `to_string` por pulso por frame.
+    pub sense_by_entity: std::collections::HashMap<i64, &'static str>,
     /// Ações do mapa de input que dispararam neste frame (`viber.action`).
-    pub action_pressed: std::collections::HashMap<String, bool>,
+    /// Array FIXO de chaves estáticas: o `HashMap<String, bool>` antigo
+    /// realçava o mapa e seis strings em TODOS os frames.
+    pub action_pressed: [(&'static str, bool); 6],
     /// `MenusOpen::any()` neste frame (`viber.menu_open`): menu, mapa,
     /// viagem rápida ou cinemática estão a roubar o input.
     pub menu_open: bool,
@@ -133,8 +138,10 @@ pub struct ScriptCtx {
     /// Acessibilidade (`viber.a11y`): escala de legendas, shake, hit-stop e
     /// [E] por hold.
     pub a11y: A11ySnap,
-    /// Papel de netplay (`viber.net_role`): "off" | "host" | "join".
-    pub net_role: String,
+    /// Papel de netplay (`viber.net_role`): "off" | "host" | "join". Semeados
+    /// TODOS os frames a partir do [`crate::netplay::NetRole`] — estáticos,
+    /// sem realocar a string.
+    pub net_role: &'static str,
     /// Handle de leitura partilhado do terreno (`viber.ground_below`) —
     /// dois `Arc` clones; o terreno não muda pós-bootstrap, portanto o
     /// snapshot É o terreno (não nasce segunda fonte de altura).
@@ -212,12 +219,17 @@ impl SurfaceRegistries {
     }
 
     /// Ponto na estrada mais longa a `s` metros de arco (`viber.road_at`).
+    /// O comprimento é INVARIÁVEL pós-bootstrap: computá-lo dentro do
+    /// `max_by` percorria as estações de cada estrada em CADA comparação
+    /// (a IA de perseguição chama isto todos os frames).
     pub fn road_at(&self, s: f32) -> Option<crate::terrain::roads::RoadSample> {
-        let road = self.roads.iter().max_by(|a, b| {
-            crate::terrain::paths::path_length(&a.stations)
-                .total_cmp(&crate::terrain::paths::path_length(&b.stations))
-        })?;
-        road.point_at_arc(s)
+        let (index, _) = self
+            .roads
+            .iter()
+            .enumerate()
+            .map(|(index, road)| (index, crate::terrain::paths::path_length(&road.stations)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        self.roads[index].point_at_arc(s)
     }
 
     /// Ponto dentro de uma zona de carve de água.
@@ -235,6 +247,30 @@ impl SurfaceRegistries {
 pub type SurfaceCache = Option<std::sync::Arc<SurfaceRegistries>>;
 
 impl ScriptCtx {
+    /// Semeia o path do script em execução REAPROVEITANDO o buffer anterior:
+    /// um `String` novo por entidade activa por frame era alocação pura (o
+    /// path repet-se entre frames e entre entidades que partilham script).
+    pub(crate) fn set_path(&mut self, path: &str) {
+        let mut slot = self.path.take().unwrap_or_default();
+        slot.clear();
+        slot.push_str(path);
+        self.path = Some(slot);
+    }
+
+    /// Semeia o nome próprio da entidade que vai correr (`None` = sem `Name`)
+    /// com o mesmo reaproveitamento de buffer do [`ScriptCtx::set_path`] — o
+    /// loop de `on_update` faz isto por entidade activa em TODOS os frames.
+    pub(crate) fn set_self_name(&mut self, name: Option<&Name>) {
+        let Some(name) = name else {
+            self.self_name = None;
+            return;
+        };
+        let mut slot = self.self_name.take().unwrap_or_default();
+        slot.clear();
+        slot.push_str(name.as_str());
+        self.self_name = Some(slot);
+    }
+
     const LOG_CAP: usize = 256;
     /// Cap por linha: um `viber.log` gigante não pode reter dezenas de MB
     /// no ring de 256 linhas (trunca em char boundary, igual ao bridge).

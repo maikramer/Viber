@@ -302,6 +302,10 @@ impl LuaScriptHost {
                 ran: false,
             },
         );
+        // NOTA: os timers do chunk antigo NÃO morrem aqui. No reload o
+        // `crate::hot_reload::reload_script` deita-os só DEPOIS de o novo
+        // top-level correr bem (num erro o chunk antigo é reposto COM os
+        // seus timers). Um drop aqui matava-os nesse caminho de falha.
         Ok(())
     }
 
@@ -357,7 +361,7 @@ impl LuaScriptHost {
         // Refresh the per-call ctx so top-level viber calls don't panic.
         let origin = if let Some(mut ctx) = self.lua.app_data_mut::<ScriptCtx>() {
             ctx.entity = Some(entity);
-            ctx.path = Some(path.to_string());
+            ctx.set_path(path);
             ctx.origin = origin;
             // Nome/props são POR ENTIDADE e só existem depois de um hook ou
             // do snapshot do frame; o top-level de uma instância nova lia o
@@ -365,6 +369,9 @@ impl LuaScriptHost {
             // hooks já não têm). Sem dados, nil — nunca o vizinho.
             ctx.self_name = None;
             ctx.self_props = None;
+            // O mesmo para o alcance de interação: sem reset, o top-level
+            // via o range da última entidade do `on_update` anterior.
+            ctx.interaction_range = None;
             ctx.origin
         } else {
             Vec3::ZERO
@@ -458,7 +465,7 @@ impl LuaScriptHost {
                 .app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new");
             ctx.entity = Some(entity);
-            ctx.path = Some(path.to_string());
+            ctx.set_path(path);
             ctx.origin = origin;
             ctx.player = player;
             ctx.dt = dt;
@@ -489,7 +496,7 @@ impl LuaScriptHost {
                 .app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new");
             ctx.entity = Some(entity);
-            ctx.path = Some(path.to_string());
+            ctx.set_path(path);
             // Sem isto, on_player_attack corria com origin/dt/elapsed da
             // ÚLTIMA entidade do frame — position()/move_towards/damage_player
             // calculavam a partir de outra criatura.
@@ -535,7 +542,7 @@ impl LuaScriptHost {
                 .app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new");
             ctx.entity = Some(entity);
-            ctx.path = Some(path.to_string());
+            ctx.set_path(path);
             ctx.origin = origin;
             ctx.dt = dt;
             // Um hook de `tree.lua` partilhado lia o `self_name`/props do
@@ -597,7 +604,7 @@ impl LuaScriptHost {
                 .app_data_mut::<ScriptCtx>()
                 .expect("ScriptCtx app data seeded in LuaScriptHost::new");
             ctx.entity = Some(entity);
-            ctx.path = Some(path.to_string());
+            ctx.set_path(path);
             ctx.origin = origin;
             ctx.sender = sender;
         }

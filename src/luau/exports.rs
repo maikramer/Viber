@@ -298,30 +298,19 @@ impl ScriptExports {
     pub fn resolve<'a>(&'a self, props: &[(String, String)]) -> Vec<ResolvedProp<'a>> {
         self.defs
             .iter()
-            .map(|def| {
-                let raw = props.iter().rev().find(|(name, _)| *name == def.name);
-                match raw.map(|(_, raw)| def.ty.parse_value(raw)) {
-                    Some(Ok(value)) => ResolvedProp {
-                        def,
-                        value: Some(value),
-                        source: PropSource::Instance,
-                        error: None,
-                    },
-                    Some(Err(error)) => ResolvedProp {
-                        def,
-                        value: def.default.clone(),
-                        source: PropSource::Default,
-                        error: Some(error),
-                    },
-                    None => ResolvedProp {
-                        def,
-                        value: def.default.clone(),
-                        source: PropSource::Default,
-                        error: None,
-                    },
-                }
-            })
+            .map(|def| resolve_def(def, props))
             .collect()
+    }
+
+    /// O valor efetivo de UM prop (`viber.prop(nome)`): o mesmo contrato do
+    /// [`Self::resolve`], sem materializar todas as defs — o getter corre por
+    /// frame por entidade.
+    pub fn resolve_one<'a>(
+        &'a self,
+        props: &[(String, String)],
+        name: &str,
+    ) -> Option<ResolvedProp<'a>> {
+        self.get(name).map(|def| resolve_def(def, props))
     }
 
     /// Props da instância que o script não exporta (typos, props órfãos).
@@ -341,6 +330,32 @@ impl ScriptExports {
             "methods": self.methods,
             "errors": self.errors.iter().map(|e| json!({"line": e.line, "message": e.message})).collect::<Vec<_>>(),
         })
+    }
+}
+
+/// O valor efetivo de UMA def contra os props crus da instância (o corpo
+/// partilhado de [`ScriptExports::resolve`] e [`ScriptExports::resolve_one`]).
+fn resolve_def<'a>(def: &'a ExportDef, props: &[(String, String)]) -> ResolvedProp<'a> {
+    let raw = props.iter().rev().find(|(name, _)| *name == def.name);
+    match raw.map(|(_, raw)| def.ty.parse_value(raw)) {
+        Some(Ok(value)) => ResolvedProp {
+            def,
+            value: Some(value),
+            source: PropSource::Instance,
+            error: None,
+        },
+        Some(Err(error)) => ResolvedProp {
+            def,
+            value: def.default.clone(),
+            source: PropSource::Default,
+            error: Some(error),
+        },
+        None => ResolvedProp {
+            def,
+            value: def.default.clone(),
+            source: PropSource::Default,
+            error: None,
+        },
     }
 }
 

@@ -305,7 +305,7 @@ de script.
 | `viber.camera_free(ativo)` | a câmara de JOGO passa a ser escrita por script (`camera_pose`). `false` devolve a pose ao rig de terceira pessoa no frame seguinte; post-FX/tone mapping/HUD mantêm-se (é a MESMA `Camera3d`) |
 | `viber.camera_pose(x, y, z, alvo_x, alvo_y, alvo_z)` | pose do modo livre: olho + ponto olhado (look-at). Inerte sem `camera_free(true)` |
 | `viber.camera_state()` | `{x,y,z,yaw,pitch}` da câmara de jogo — **direção de vista** em graus (`forward = (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)`), a convenção do `camera_pose`; `nil` sem câmara. Atualizado no frame anterior |
-| `viber.sound_loop(id, clip [, {pitch, volume, x, y, z}])` | loop no bus de SFX; `clip` = registry ou caminho sob `sfx_dir` |
+| `viber.sound_loop(id, clip [, {pitch, volume, x, y, z}])` | loop no bus de SFX; `clip` = registry ou caminho sob `sfx_dir`; `{x=, z=}` posiciona no mundo (sem `y`, usa a cota da entidade; NaN/inf são erro) |
 | `viber.sound_stop(id)` | pára esse loop |
 | `viber.music.layer(nome)` | força a layer de BGM; `nil` devolve a zona automática |
 | `viber.music.combat(active [, boss])` | liga/desliga a música de combate; `boss=true` promove para a layer `boss`. A engine expira o hold de 8 s sozinha |

@@ -156,11 +156,11 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
             let queues: Table = lua.named_registry_value("viber_events")?;
             // 1.ª chamada CRIA a fila (a presença da chave É a subscrição) —
             // erro aqui era o script nunca subscrever e nunca receber nada.
-            let queue: Table = match queues.raw_get::<Table>(path.clone()) {
+            let queue: Table = match queues.raw_get::<Table>(path.as_str()) {
                 Ok(q) => q,
                 Err(_) => {
                     let fresh = lua.create_table()?;
-                    queues.raw_set(path.clone(), fresh.clone())?;
+                    queues.raw_set(path.as_str(), fresh.clone())?;
                     fresh
                 }
             };
@@ -170,7 +170,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                 out.raw_set(i, queue.raw_get::<mlua::Value>(i)?)?;
             }
             let fresh = lua.create_table()?;
-            queues.raw_set(path, fresh)?;
+            queues.raw_set(path.as_str(), fresh)?;
             Ok(out)
         })?,
     )?;

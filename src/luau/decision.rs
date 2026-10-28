@@ -86,18 +86,29 @@ mod imp {
                     match loaded {
                         Ok(Ok(rt)) => {
                             runtime = Some(rt);
-                            *load_error.lock().unwrap() = None;
+                            // Padrão da casa (bridge/profiler): um mutex
+                            // envenenado não pode deixar a worker cega — o
+                            // valor por detrás vale mais que o panic.
+                            *load_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                             ready.store(true, Ordering::Release);
                             let _ = tx.send(Response::Loaded(Ok(())));
                         }
                         Ok(Err(e)) => {
                             let msg = format!("{e:#}");
-                            *load_error.lock().unwrap() = Some(msg.clone());
+                            *load_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(msg.clone());
                             let _ = tx.send(Response::Loaded(Err(msg)));
                         }
                         Err(_) => {
                             let msg = "viber.decision: panic ao carregar o modelo".to_string();
-                            *load_error.lock().unwrap() = Some(msg.clone());
+                            *load_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(msg.clone());
                             let _ = tx.send(Response::Loaded(Err(msg)));
                         }
                     }
@@ -255,15 +266,28 @@ mod imp {
                 Ok(mlua::Value::Table(t))
             }
             Response::Decided { id, result: Ok(s) } => {
-                let v: Value = serde_json::from_str(&s)
-                    .map_err(|e| mlua::Error::runtime(format!("viber.decision: JSON: {e}")))?;
-                let t = match json_to_lua(lua, &v)? {
-                    mlua::Value::Table(t) => t,
-                    _ => lua.create_table()?,
-                };
-                t.set("kind", "decided")?;
-                t.set("id", id)?;
-                Ok(mlua::Value::Table(t))
+                // JSON malformado do modelo DEGRADA com graça — o mesmo
+                // contrato do braço `Err`: `{kind="error", id, error}`.
+                // Um `?` aqui lançava erro Lua ao script de jogo por culpa
+                // do modelo, em vez de uma resposta legível no `poll`.
+                match serde_json::from_str::<Value>(&s) {
+                    Ok(v) => {
+                        let t = match json_to_lua(lua, &v)? {
+                            mlua::Value::Table(t) => t,
+                            _ => lua.create_table()?,
+                        };
+                        t.set("kind", "decided")?;
+                        t.set("id", id)?;
+                        Ok(mlua::Value::Table(t))
+                    }
+                    Err(e) => {
+                        let t = lua.create_table()?;
+                        t.set("kind", "error")?;
+                        t.set("id", id)?;
+                        t.set("error", format!("viber.decision: JSON: {e}"))?;
+                        Ok(mlua::Value::Table(t))
+                    }
+                }
             }
             Response::Decided { id, result: Err(e) } => {
                 let t = lua.create_table()?;

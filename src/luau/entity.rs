@@ -275,7 +275,8 @@ pub(crate) fn resolve_entity(lua: &Lua, id: Option<i64>) -> mlua::Result<bevy::p
 /// é a PRIMEIRA em ordem lexicográfica — a iteração do `HashMap` é arbitrária
 /// (e muda quando a tabela rehasha, com entidades a nascer/morrer), pelo que
 /// `viber.find("door")` devolvia portas diferentes entre frames. É a mesma
-/// ordem estável que o `find_all` já promete.
+/// ordem estável que o `find_all` já promete. `min()` (e não um Vec ordenado):
+/// mesmo resultado, sem materializar todas as chaves casadas por chamada.
 fn exact_or_substring<'a>(
     map: &'a std::collections::HashMap<String, Vec<i64>>,
     name: &str,
@@ -283,7 +284,6 @@ fn exact_or_substring<'a>(
     if let Some(v) = map.get(name) {
         return Some(v);
     }
-    let mut keys: Vec<&String> = map.keys().filter(|key| key.contains(name)).collect();
-    keys.sort();
-    keys.first().and_then(|key| map.get(key.as_str()))
+    let best = map.keys().filter(|key| key.contains(name)).min()?;
+    map.get(best)
 }

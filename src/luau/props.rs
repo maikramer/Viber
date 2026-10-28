@@ -25,8 +25,10 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
                     "viber.prop: '{name}' não é exportado por {path} (declare `--@export {name}: <tipo> = <default>`)"
                 )));
             }
-            let resolved = exports.resolve(&props);
-            let Some(prop) = resolved.into_iter().find(|r| r.def.name == name) else {
+            // Resolve SÓ o prop pedido: o `resolve` inteiro materializava
+            // todas as defs (e um Vec) em cada leitura — o getter corre por
+            // frame por entidade.
+            let Some(prop) = exports.resolve_one(&props, &name) else {
                 return Ok(mlua::Value::Nil);
             };
             warn_invalid(lua, &path, &prop);

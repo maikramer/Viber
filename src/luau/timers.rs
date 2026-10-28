@@ -57,7 +57,7 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
             }
             entry.raw_set("func", func)?;
             entry.raw_set("owner", owner.to_bits() as i64)?;
-            entry.raw_set("path", path)?;
+            entry.raw_set("path", path.as_str())?;
             timers.raw_set(id, entry)?;
             Ok(id)
         })
@@ -217,7 +217,7 @@ pub fn tick(host: &mut super::host::LuaScriptHost, frame: TickFrame<'_>) {
         {
             if let Some(mut ctx) = lua.app_data_mut::<ScriptCtx>() {
                 ctx.entity = Some(entity);
-                ctx.path = Some(path.clone());
+                ctx.set_path(&path);
                 ctx.origin = origin;
                 ctx.player = frame.player;
                 ctx.dt = frame.dt;
