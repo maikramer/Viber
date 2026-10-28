@@ -361,7 +361,6 @@ impl BurstStore {
     }
 }
 
-/// Grid √N — `4`→2, `9`→3, `16`→4; `None` fora da lista aceite.
 /// Luma média + desvio-padrão (0..255) de uma imagem RGBA — subamostragem
 /// de 1 em 4 píxeis em x e y (a estatística de flicker não precisa do
 /// frame inteiro; ¼×¼ mantém o custo de deposit irrelevante).
@@ -391,6 +390,7 @@ pub fn image_luma_stats(image: &RgbaImage) -> (f32, f32) {
     (mean, std)
 }
 
+/// Grid √N — `4`→2, `9`→3, `16`→4; `None` fora da lista aceite.
 pub fn grid_for(frames: u32) -> Option<u32> {
     if !ALLOWED_FRAMES.contains(&frames) {
         return None;

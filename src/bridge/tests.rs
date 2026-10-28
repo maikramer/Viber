@@ -9,6 +9,170 @@ use std::thread::JoinHandle;
 
 const TEST_PORT: u16 = 35702;
 
+// ── Input sintético: logical_key, newline/tab e press+release no mesmo lote ──
+
+/// `send_key` tem de preencher o `logical_key` que os consumidores de UI lêem
+/// (a barra de fala `<UiInput>` despacha por `Key::Backspace`/`Character`/
+/// `Enter|Escape` — `ui/widgets.rs`): só o `key_code` não chega. Um
+/// `viber debug key backspace` chegava `Unidentified` e a barra não apagava.
+#[test]
+fn test_send_key_maps_logical_keys_for_text_inputs() {
+    let mut world = World::new();
+    world.init_resource::<Messages<KeyboardInput>>();
+    world.init_resource::<ButtonInput<KeyCode>>();
+
+    let last_logical = |world: &World| {
+        world
+            .resource::<Messages<KeyboardInput>>()
+            .iter_current_update_messages()
+            .last()
+            .map(|event| event.logical_key.clone())
+            .expect("evento de tecla")
+    };
+
+    send_key(&mut world, KeyCode::Backspace, ButtonState::Pressed, None);
+    assert!(matches!(last_logical(&world), Key::Backspace), "backspace");
+    send_key(&mut world, KeyCode::ArrowUp, ButtonState::Pressed, None);
+    assert!(matches!(last_logical(&world), Key::ArrowUp), "seta");
+    send_key(&mut world, KeyCode::Delete, ButtonState::Pressed, None);
+    assert!(matches!(last_logical(&world), Key::Delete), "delete");
+    send_key(&mut world, KeyCode::ShiftLeft, ButtonState::Pressed, None);
+    assert!(matches!(last_logical(&world), Key::Shift), "modificador");
+    // Com `text`, o carácter manda (é o caminho do `viber.input.text`).
+    send_key(
+        &mut world,
+        KeyCode::KeyA,
+        ButtonState::Pressed,
+        Some("A".into()),
+    );
+    assert!(
+        matches!(&last_logical(&world), Key::Character(chars) if chars == "A"),
+        "texto manda: {:?}",
+        last_logical(&world)
+    );
+    assert!(
+        world
+            .resource::<ButtonInput<KeyCode>>()
+            .pressed(KeyCode::Backspace),
+        "ButtonInput<KeyCode> continua a ser actualizado"
+    );
+}
+
+/// `\n` em `viber.input.text` tem de chegar como `Key::Enter` SEM texto (a
+/// barra de fala submete no Enter): como `Character("\n")` era INSERTADO no
+/// campo em vez de submeter. O mesmo para `\t` → `Key::Tab`.
+#[test]
+fn test_input_text_maps_newline_and_tab_to_named_keys() {
+    let mut world = World::new();
+    world.init_resource::<Messages<KeyboardInput>>();
+    world.init_resource::<ButtonInput<KeyCode>>();
+
+    input_text(In(Some(json!({ "text": "a\n" }))), &mut world).unwrap();
+    let events: Vec<&KeyboardInput> = world
+        .resource::<Messages<KeyboardInput>>()
+        .iter_current_update_messages()
+        .collect();
+    assert_eq!(events.len(), 4, "a(press+release) + Enter(press+release)");
+    assert!(
+        matches!(&events[0].logical_key, Key::Character(chars) if chars == "a"),
+        "'a' é carácter: {:?}",
+        events[0].logical_key
+    );
+    assert!(
+        matches!(events[2].logical_key, Key::Enter),
+        "\\n é Enter (press)"
+    );
+    assert!(
+        events[2].text.is_none(),
+        "enter sem texto — submete em vez de inserir"
+    );
+    assert!(
+        matches!(events[3].logical_key, Key::Enter),
+        "\\n é Enter (release)"
+    );
+
+    input_text(In(Some(json!({ "text": "\t" }))), &mut world).unwrap();
+    let events: Vec<&KeyboardInput> = world
+        .resource::<Messages<KeyboardInput>>()
+        .iter_current_update_messages()
+        .collect();
+    assert!(
+        matches!(events.last().unwrap().logical_key, Key::Tab),
+        "\\t é Tab: {:?}",
+        events.last().unwrap().logical_key
+    );
+}
+
+/// `press` + `release` no MESMO lote de pedidos (RemoteLast, antes do
+/// PreUpdate seguinte): o press (hold) consumia o release como "previous" e
+/// injectava-o ANTES do press — `Released` fantasma (winit nunca solta sem
+/// ter premido) e o botão ficava preso até a um novo release. O par tem de
+/// acabar num CLIQUE: press primeiro, release no frame seguinte, solto.
+const SAME_BATCH_TEST_PORT: u16 = 35716;
+
+#[test]
+fn test_click_press_then_release_same_batch_makes_a_click() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(bevy::input::InputPlugin)
+        .add_plugins(BridgePlugin {
+            port: SAME_BATCH_TEST_PORT,
+        });
+    app.add_message::<CursorMoved>();
+    app.update(); // Startup: liga o servidor (os handlers vão ser chamados à mão)
+
+    input_click(
+        In(Some(json!({ "x": 1.0, "y": 2.0, "state": "press" }))),
+        app.world_mut(),
+    )
+    .unwrap();
+    input_click(
+        In(Some(json!({ "x": 3.0, "y": 4.0, "state": "release" }))),
+        app.world_mut(),
+    )
+    .unwrap();
+    {
+        let pending = app.world().resource::<PendingMouseClick>();
+        assert!(!pending.hold, "release no mesmo lote converte em clique");
+        assert!(pending.release.is_some(), "release espera o press injectar");
+    }
+
+    app.update(); // press injectado no PreUpdate
+    {
+        let seen: Vec<ButtonState> = app
+            .world()
+            .resource::<Messages<MouseButtonInput>>()
+            .iter_current_update_messages()
+            .map(|event| event.state)
+            .collect();
+        assert_eq!(
+            seen.first(),
+            Some(&ButtonState::Pressed),
+            "o press é o PRIMEIRO evento — sem release fantasma: {seen:?}"
+        );
+    }
+    app.update(); // release injectado
+    assert!(
+        !app
+            .world()
+            .resource::<ButtonInput<MouseButton>>()
+            .pressed(MouseButton::Left),
+        "o par no mesmo lote acaba solto (clique, não botão preso)"
+    );
+}
+
+/// `--port 0` não é uma porta (mesmo contrato do `viber run --bridge 0`):
+/// sem a validação, o cliente girava 20× a ligar à porta 0 até falhar com um
+/// erro de socket sem dizer o que se passou.
+#[test]
+fn test_resolve_target_rejects_port_zero() {
+    let error = match client::resolve_target(Some(0), None) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("--port 0 devia falhar"),
+    };
+    assert!(error.contains("--port 0"), "{error}");
+}
+
 /// Bombeia frames até a chamada responder (a resposta só é escrita quando
 /// `app.update()` processa o pedido em RemoteLast).
 fn settle(app: &mut App, handle: JoinHandle<Result<Value, String>>) -> Value {
@@ -1772,4 +1936,32 @@ fn test_bridge_registry_schema_headless() {
         names.contains(&METHOD_LUA),
         "rpc.discover inclui {METHOD_LUA}: {names:?}"
     );
+}
+
+/// Depois de uma chamada `viber.lua`, o snapshot é REMOVIDO (não substituído
+/// por um vazio): uma closure FORA da REPL (script de jogo) tem de levar o
+/// erro "sem snapshot" em vez de ler dados ociosos em silêncio (lista de
+/// entidades vazia, player nil).
+const LUA7_TEST_PORT: u16 = 35717;
+
+#[test]
+fn test_debug_snapshot_is_removed_after_eval() {
+    let mut app = lua_app(LUA7_TEST_PORT);
+    let r = lua_call(
+        &mut app,
+        LUA7_TEST_PORT,
+        "return #viber.debug.entities() > 0",
+    );
+    assert_eq!(r["ok"], serde_json::json!(true), "{r}");
+
+    // Caminho do SCRIPT DE JOGO: chunk fora do handler da REPL.
+    let host = app.world().resource::<crate::luau::LuaScriptHost>();
+    let error = host
+        .lua
+        .load("return #viber.debug.entities()")
+        .set_name("=game-script")
+        .eval::<mlua::Value>()
+        .expect_err("fora da REPL viber.debug devia falhar")
+        .to_string();
+    assert!(error.contains("sem snapshot"), "{error}");
 }

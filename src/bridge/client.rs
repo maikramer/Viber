@@ -420,12 +420,27 @@ impl BridgeClient {
     }
 
     pub fn key(&self, key: &str, text: Option<String>, shift: bool) -> Result<Value> {
+        self.key_state(key, text, shift, None)
+    }
+
+    /// `state`: `click` (press+release), `press` (fica em baixo) ou
+    /// `release`. A bridge já aceitava estados; o CLI só expunha o click.
+    pub fn key_state(
+        &self,
+        key: &str,
+        text: Option<String>,
+        shift: bool,
+        state: Option<&str>,
+    ) -> Result<Value> {
         let mut params = json!({ "key": normalize_key(key) });
         if let Some(text) = text {
             params["text"] = json!(text);
         }
         if shift {
             params["shift"] = json!(true);
+        }
+        if let Some(state) = state {
+            params["state"] = json!(state);
         }
         self.call("viber.input.key", params)
     }
@@ -700,6 +715,12 @@ pub enum TargetResolution {
 /// env `VIBER_BRIDGE_PORT` → descoberta implícita → default.
 pub fn resolve_target(flag: Option<u16>, world: Option<&Path>) -> Result<TargetResolution> {
     if let Some(port) = flag {
+        // Mesmo contrato do `viber run --bridge 0` (main.rs): porta 0 não é
+        // uma porta. Sem isto o cliente girava 20× a ligar à porta 0 até
+        // falhar com um erro de socket sem contar o que se passou.
+        if port == 0 {
+            anyhow::bail!("--port 0: porta inválida (1..=65535)");
+        }
         return Ok(TargetResolution::Port(port));
     }
     if let Some(world) = world {
@@ -707,6 +728,7 @@ pub fn resolve_target(flag: Option<u16>, world: Option<&Path>) -> Result<TargetR
     }
     if let Ok(raw) = std::env::var("VIBER_BRIDGE_PORT") {
         match raw.parse::<u16>() {
+            Ok(0) => anyhow::bail!("VIBER_BRIDGE_PORT=0: porta inválida (1..=65535)"),
             Ok(port) => return Ok(TargetResolution::Port(port)),
             // Um typo não pode cair noutra engine em silêncio (mutaria o
             // mundo errado) — avisa e segue para a descoberta.

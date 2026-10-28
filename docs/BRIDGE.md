@@ -174,6 +174,10 @@ Destaque para o que não existia noutra engine de QA:
   gameplay real (ou `toast`, que escreve `ScriptToast`).
 - Snapshot 4096 entidades; dumps `colliders/lights` cap 256, `around` 128;
   `events` devolve a cauda de 256 do snapshot.
+- Com um modal do jogo aberto (death/title/region-map/travel), o movimento
+  do herói fica bloqueado: `viber.input.down("w")` pode ler `true` e o herói
+  não andar. Fecha o modal (`viber.ui.open("death", false)`, …) antes de
+  testar locomoção ou voo.
 - `stats()` percorre o mundo inteiro (~100 ms a 60k entidades) — não poluir
   as medições com ela; `prof`/ping são baratos.
 - Sem guard de instruções na REPL: `while true do end` congela o frame
@@ -196,6 +200,17 @@ viber debug lua 'return viber.debug.nav().census'
 # mexer e construir
 viber debug lua 'viber.debug.spawn("box:2,2,2", 120, 0, 40, {color="#ffaa00"}) return true'
 viber debug lua 'viber.debug.postfx{bloom=false, motion_blur=false} return true'
+# scripts longos sem quoting: lê o ficheiro
+viber debug lua --file qa/inspect.lua
+# teclas: o click dura <1 frame; para andar/voar segura
+viber debug key w --hold-ms 1200
+viber debug key f1                      # voo (dev mode do jogo)
+viber debug key w --state press         # fica em baixo…
+viber debug key w --state release       # …e larga quando quiseres
+# esperar pela engine (compilação/boot) sem sleep cego no shell
+viber debug wait --timeout-ms 90000
+# dar tempo à câmara orbital de assentar antes do frame
+viber debug screenshot -o gold.png --delay-ms 2000
 # provar
 viber debug step 3 && viber debug burst -o b.png --frames 9 --stats
 viber debug screenshot -o gold.png && viber debug diff gold.png novo.png --threshold 0.5

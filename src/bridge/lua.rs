@@ -2081,7 +2081,11 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
         host.lua.remove_app_data::<DebugOps>();
         // Limpa o snapshot: uma closure de SCRIPT DE JOGO que chamasse
         // viber.debug veria dados podres da última REPL — melhor falhar.
-        host.lua.set_app_data(DebugView::default());
+        // REMOVER (e não substituir por `DebugView::default()`): com um
+        // snapshot VAZIO presente, `app_data_ref` tinha Some e as leituras
+        // devolviam dados ocos (lista de entidades vazia, player nil) em vez
+        // do erro "sem snapshot — só dentro de viber.lua".
+        host.lua.remove_app_data::<DebugView>();
         (ok, result, error, ops)
     };
 
@@ -2377,7 +2381,7 @@ pub const DEBUG_API_DOCS: &[(&str, &str, &str)] = &[
     (
         "ai_state",
         "ai_state(id, s)",
-        "força wander|chase (a FSM reavalia por distância)",
+        "força wander|alert|chase|search (a FSM reavalia por distância)",
     ),
     (
         "ai_aggro",

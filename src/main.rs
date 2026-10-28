@@ -208,6 +208,20 @@ enum DebugCommand {
         #[arg(long)]
         world: Option<PathBuf>,
     },
+    /// Espera até a bridge responder (o engine ainda está a arrancar, a
+    /// compilar ou a carregar o mundo) — evita o ciclo de boot com `sleep`
+    /// no shell.
+    Wait {
+        #[arg(long, default_value_t = 90_000)]
+        timeout_ms: u64,
+        /// Intervalo entre tentativas, milissegundos.
+        #[arg(long, default_value_t = 250)]
+        interval_ms: u64,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        world: Option<PathBuf>,
+    },
     /// Capture a screenshot of the running window
     Screenshot {
         #[arg(short, long, default_value = "screenshot.png")]
@@ -220,6 +234,11 @@ enum DebugCommand {
         world: Option<PathBuf>,
         #[arg(long, default_value_t = 10_000)]
         timeout_ms: u64,
+        /// Espera N ms antes de pedir o frame — dá tempo à câmara orbital de
+        /// assentar depois de um `set_camera`/teleporte (o primeiro frame saía
+        /// com o herói minúsculo ou o mundo ainda por tesselar).
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
     },
     /// Captura N frames seguidos e compõe-nos numa ÚNICA folha (grid √N,
     /// row-major, índice carimbado em cada célula, células com o formato do
@@ -558,7 +577,15 @@ enum DebugCommand {
         text: Option<String>,
         #[arg(long)]
         shift: bool,
-        #[arg(long)]
+        /// Estado do evento: `click` (omissão, press+release), `press` (fica
+        /// em baixo) ou `release`. Para segurar uma tecla e andar/voar usa
+        /// `--hold-ms` ou `--state press` + `--state release`.
+        #[arg(long, value_parser = ["click", "press", "release"])]
+        state: Option<String>,
+        /// Segura a tecla durante N ms e larga-a (equivale a press, espera,
+        /// release) — o `click` de um só frame perdia-se e o herói não andava.
+        #[arg(long, conflicts_with = "state")]
+        hold_ms: Option<u64>,        #[arg(long)]
         port: Option<u16>,
         /// Mundo que identifica a engine alvo (caminho, nome de ficheiro ou
         /// stem) — resolve a porta pelo engine.json da sessão desse mundo.
@@ -2955,14 +2982,52 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
                 }
             }
         }
+        DebugCommand::Wait {
+            timeout_ms,
+            interval_ms,
+            port,
+            world,
+        } => {
+            // `resolve_port` falha enquanto a sessão/engine.json não existe
+            // (boot/compilação). Repetir até a bridge responder evita o
+            // `sleep` cego no shell e permite arrancar o run em paralelo.
+            let started = std::time::Instant::now();
+            let deadline = std::time::Duration::from_millis(timeout_ms.max(1));
+            let interval = std::time::Duration::from_millis(interval_ms.max(10));
+            let world = merge_world(&world, &parent_world).map(std::path::Path::to_path_buf);
+            loop {
+                if let Ok(port) = bridge::client::resolve_port(port, world.as_deref()) {
+                    let client = BridgeClient::localhost(port);
+                    if client.probe().is_ok() {
+                        println!(
+                            "✓ bridge :{port} respondeu em {:.1}s",
+                            started.elapsed().as_secs_f32()
+                        );
+                        break;
+                    }
+                }
+                if started.elapsed() >= deadline {
+                    bail!(
+                        "bridge não respondeu em {:.1}s — vê o log do `viber run` \
+                         (engine a compilar, crash no arranque ou mundo ainda a carregar)",
+                        started.elapsed().as_secs_f32()
+                    );
+                }
+                std::thread::sleep(interval);
+            }
+        }
         DebugCommand::Screenshot {
             output,
             port,
             world,
             timeout_ms,
+            delay_ms,
         } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             let source = client.screenshot_to_file(&output, timeout_ms)?;
             println!("✓ screenshot → {} (fonte: {source})", output.display());
         }
@@ -3293,12 +3358,23 @@ fn run_debug(command: DebugCommand, parent_world: Option<PathBuf>) -> Result<()>
             key,
             text,
             shift,
+            state,
+            hold_ms,
             port,
             world,
         } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;
             let client = BridgeClient::localhost(port);
-            client.key(&key, text, shift)?;
+            if let Some(ms) = hold_ms {
+                // Segurar de verdade: um `click` dura menos de um frame e o
+                // movimento (andar/voar) não chega a ler a tecla.
+                client.key_state(&key, text.clone(), shift, Some("press"))?;
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                client.key_state(&key, text, shift, Some("release"))?;
+                println!("✓ {key} segurada {ms} ms");
+            } else {
+                client.key_state(&key, text, shift, state.as_deref())?;
+            }
         }
         DebugCommand::Text { text, port, world } => {
             let port = bridge::client::resolve_port(port, merge_world(&world, &parent_world))?;

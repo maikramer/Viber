@@ -390,8 +390,14 @@ fn deferred_mouse_release(
     if let Some((x, y, button)) = pending.press.take() {
         // RELEASE atrasado do clique ANTERIOR sai PRIMEIRO (e no mesmo frame):
         // o press tinha prioridade e um único slot de release — cliques rápidos
-        // em sequência deixavam o botão antigo "preso" (o release nunca corria)
-        if let Some(previous) = pending.release.take() {
+        // em sequência deixavam o botão antigo "preso" (o release nunca corria).
+        // Só solta o que está MESMO em baixo: um release órfão (par
+        // press+release consumido fora de ordem, botão já solto) era injectado
+        // como `Released` fantasma — winit nunca emite Released sem Pressed e
+        // o `just_released` da UI disparava sem causa.
+        if let Some(previous) = pending.release.take()
+            && input.pressed(previous)
+        {
             let entity = windows
                 .single()
                 .map(|(e, _)| e)
@@ -453,7 +459,10 @@ fn deferred_mouse_release(
     }
     // 2) RELEASE no frame seguinte: sem isto, `just_released` no mesmo frame
     //    fazia o focus descartar o Pressed antes de o script o ler.
-    if let Some(button) = pending.release.take() {
+    //    Mesma defesa do ramo 1: sem botão em baixo não há release (fantasma).
+    if let Some(button) = pending.release.take()
+        && input.pressed(button)
+    {
         let entity = windows
             .single()
             .map(|(e, _)| e)
@@ -1357,12 +1366,38 @@ fn camera_pose(_params: In<Option<Value>>, world: &mut World) -> BrpResult {
 /// Envia um `KeyboardInput` sintético + actualiza `ButtonInput<KeyCode>`.
 fn send_key(world: &mut World, key_code: KeyCode, state: ButtonState, text: Option<String>) {
     let window = primary_window(world).unwrap_or(Entity::PLACEHOLDER);
+    // O `logical_key` é o que os consumidores de UI lêem (a barra de fala
+    // `<UiInput>` despacha por `Key::Backspace`/`Key::Character`/
+    // `Key::Enter|Escape` — `ui/widgets.rs`): só o `key_code` não chega. Um
+    // `viber debug key backspace` chegava como `Unidentified` e a barra
+    // não apagava; setas/Home/End também não tinham representação.
     let logical_key = match (&text, key_code) {
         (Some(t), _) => Key::Character(t.as_str().into()),
         (None, KeyCode::Space) => Key::Space,
         (None, KeyCode::Enter) => Key::Enter,
         (None, KeyCode::Escape) => Key::Escape,
         (None, KeyCode::Tab) => Key::Tab,
+        (None, KeyCode::Backspace) => Key::Backspace,
+        (None, KeyCode::Delete) => Key::Delete,
+        (None, KeyCode::Insert) => Key::Insert,
+        (None, KeyCode::Home) => Key::Home,
+        (None, KeyCode::End) => Key::End,
+        (None, KeyCode::PageUp) => Key::PageUp,
+        (None, KeyCode::PageDown) => Key::PageDown,
+        (None, KeyCode::ArrowUp) => Key::ArrowUp,
+        (None, KeyCode::ArrowDown) => Key::ArrowDown,
+        (None, KeyCode::ArrowLeft) => Key::ArrowLeft,
+        (None, KeyCode::ArrowRight) => Key::ArrowRight,
+        (None, KeyCode::CapsLock) => Key::CapsLock,
+        (None, KeyCode::NumLock) => Key::NumLock,
+        (None, KeyCode::ScrollLock) => Key::ScrollLock,
+        (None, KeyCode::Pause) => Key::Pause,
+        (None, KeyCode::ContextMenu) => Key::ContextMenu,
+        (None, KeyCode::PrintScreen) => Key::PrintScreen,
+        (None, KeyCode::ShiftLeft | KeyCode::ShiftRight) => Key::Shift,
+        (None, KeyCode::ControlLeft | KeyCode::ControlRight) => Key::Control,
+        (None, KeyCode::AltLeft | KeyCode::AltRight) => Key::Alt,
+        (None, KeyCode::SuperLeft | KeyCode::SuperRight) => Key::Super,
         _ => Key::Unidentified(NativeKey::Unidentified),
     };
     let text: Option<_> = text.map(|t| t.into());
@@ -1463,6 +1498,20 @@ fn input_text(params: In<Option<Value>>, world: &mut World) -> BrpResult {
         return Err(invalid("text demasiado longo (cap 4096 chars)".into()));
     }
     for char in params.text.chars() {
+        // Controlo com significado próprio: um `\n`/`\r` tem de chegar como
+        // `Key::Enter` (a barra de fala submete no Enter) e o tab como
+        // `Key::Tab`. Com `text: Some("\n")` o `logical_key` era
+        // `Character("\n")` — a barra INSERTAVA o newline em vez de submeter.
+        if char == '\n' || char == '\r' {
+            send_key(world, KeyCode::Enter, ButtonState::Pressed, None);
+            send_key(world, KeyCode::Enter, ButtonState::Released, None);
+            continue;
+        }
+        if char == '\t' {
+            send_key(world, KeyCode::Tab, ButtonState::Pressed, None);
+            send_key(world, KeyCode::Tab, ButtonState::Released, None);
+            continue;
+        }
         let (key_code, shift) = keycode_for_char(char);
         if shift {
             send_key(world, KeyCode::ShiftLeft, ButtonState::Pressed, None);
@@ -1509,7 +1558,17 @@ fn input_click(params: In<Option<Value>>, world: &mut World) -> BrpResult {
         }
         "release" => {
             send_cursor(world, Vec2::new(params.x, params.y));
-            world.resource_mut::<PendingMouseClick>().release = Some(button);
+            let mut pending = world.resource_mut::<PendingMouseClick>();
+            // Release que chega ANTES de o press pendente ser injectado (um
+            // `press`+`release` no mesmo lote de pedidos RemoteLast): o press
+            // (hold) ia CONSUMIR este release como "previous" e injectá-lo
+            // antes do press — mensagem Released fantasma + botão preso até
+            // um novo release. Converter o par num clique (o press sai no
+            // PreUpdate e o release automático no frame seguinte).
+            if pending.press.is_some() {
+                pending.hold = false;
+            }
+            pending.release = Some(button);
         }
         other => {
             return Err(invalid(format!(
