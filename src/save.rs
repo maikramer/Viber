@@ -335,8 +335,49 @@ impl Plugin for SavePlugin {
         app.init_resource::<OptionsRows>()
             .init_resource::<WorldSaveKey>()
             .init_resource::<SaveRequest>()
-            .add_systems(Update, options_system);
+            .init_resource::<PendingSavePatches>()
+            .add_systems(Update, options_system)
+            // DEPOIS do driver da troca (Last): um pedido aplicado por commands
+            // no Update só existe no `SceneLoader` a partir do schedule
+            // seguinte — importar antes podia cair no runtime da cena VELHA no
+            // próprio frame do load (o loader ainda parecia Idle).
+            .add_systems(
+                bevy::app::Last,
+                apply_pending_save_patches.after(crate::scene_loader::drive_scene_loader),
+            );
     }
+}
+
+/// Recortes de terreno de um save à espera do `TerrainRuntime` certo.
+///
+/// Importar logo no load punha-os no runtime da cena VELHA: num load que
+/// troca de cena, a troca substitui o `TerrainRuntime` e os recortes
+/// perdiam-se — ou caíam no terreno PEQUENO da cena errada (o menu tem o seu
+/// próprio campo). Ficam pendentes; [`apply_pending_save_patches`] importa-os
+/// no primeiro runtime vivo fora de uma troca (na mesma cena: no fim do
+/// próprio frame do load).
+#[derive(Debug, Default, Resource)]
+pub struct PendingSavePatches(pub Vec<crate::terrain::delta::DeltaPatch>);
+
+/// Consome [`PendingSavePatches`] assim que haja terreno vivo e nenhuma troca
+/// em curso (`import_patches` sobe a revisão — o mesher volta a cozer as
+/// colunas tocadas, valha importar cedo ou tarde).
+pub fn apply_pending_save_patches(
+    mut pending: ResMut<PendingSavePatches>,
+    mut runtime: Option<ResMut<crate::terrain::runtime::TerrainRuntime>>,
+    loader: Option<Res<crate::scene_loader::SceneLoader>>,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+    let Some(runtime) = runtime.as_deref_mut() else {
+        return; // sala sem terreno: espera pela volta ao campo principal
+    };
+    if loader.as_deref().is_some_and(crate::scene_loader::SceneLoader::busy) {
+        return;
+    }
+    std::sync::Arc::make_mut(&mut runtime.deltas).import_patches(&pending.0);
+    pending.0.clear();
 }
 
 /// Pedido de save/load vindo de SCRIPT (`viber.save()` / `viber.load()`) —
@@ -466,9 +507,13 @@ fn options_system(
         .and_then(|d| d.0.as_deref());
     let mut host = world_save_host_request.2.as_deref_mut();
     if (on_system_tab && keys.just_pressed(KeyCode::KeyJ)) || save_requested {
+        // O 1.º herói e não `single_mut()`: com 2+ heróis (co-op/mundos de QA)
+        // o save recusava-se INTEIRO com "sem herói para gravar" — o resto da
+        // engine (interact, attachment, projéteis, nav) já usa o primeiro
+        // nessa situação.
         let hero_state = heroes
-            .single_mut()
-            .ok()
+            .iter_mut()
+            .next()
             .map(|(_, t, _player)| [t.translation.x, t.translation.y, t.translation.z]);
         if let Some(position) = hero_state {
             let mut game = capture(position, (mixer.master, mixer.music, mixer.sfx));
@@ -578,6 +623,10 @@ fn options_system(
                 let patches = game.terrain_patches.clone();
                 let keys = game.action_keys.clone();
                 world_save_host_request.4.queue(move |world: &mut World| {
+                    // Recortes de terreno PENDENTES (ver `PendingSavePatches`):
+                    // importá-los aqui punha-os no runtime da cena velha, que a
+                    // troca (se houver) substitui.
+                    world.insert_resource(PendingSavePatches(patches));
                     if let Some(mut map) = world.get_resource_mut::<crate::input_map::ActionMap>() {
                         for (name, key) in keys {
                             if let Some(action) = crate::input_map::Action::parse(&name) {
@@ -585,16 +634,13 @@ fn options_system(
                             }
                         }
                     }
-                    if let Some(mut terrain) =
-                        world.get_resource_mut::<crate::terrain::runtime::TerrainRuntime>()
-                    {
-                        std::sync::Arc::make_mut(&mut terrain.deltas).import_patches(&patches);
-                    }
                 });
                 if let Some(host) = host.as_mut() {
                     crate::luau::game::json_to_game(&host.lua, &game.world_kv);
                 }
-                if let Ok((entity, mut transform, mut player)) = heroes.single_mut() {
+                // 1.º herói (ver o save): com 2+ heróis o load morria em
+                // silêncio — "Jogo carregado." sem herói nenhum reposicionado.
+                if let Some((entity, mut transform, mut player)) = heroes.iter_mut().next() {
                     let position = game.position.filter(|p| p.iter().all(|v| v.is_finite()));
                     let current = world_save_host_request
                         .5
@@ -929,5 +975,81 @@ mod tests {
         assert_eq!(loaded.gold, 250);
         assert_eq!(loaded.world_kv.get("score"), Some(&serde_json::json!(9)));
         assert!((mixer.master - 0.5).abs() < 1e-6);
+    }
+
+    /// Os recortes de terreno de um load ESPERAM por terreno vivo: importá-los
+    /// no runtime da cena velha perdia-os na troca (ou caía no campo pequeno
+    /// da cena errada). Sem `TerrainRuntime` fica pendente; com um, importa e
+    /// limpa.
+    #[test]
+    fn test_pending_save_patches_wait_for_a_live_terrain() {
+        use bevy::ecs::system::RunSystemOnce as _;
+
+        fn small_runtime() -> crate::terrain::runtime::TerrainRuntime {
+            let spec = crate::terrain::spec::TerrainSpec {
+                world_size: 128.0,
+                max_height: 40.0,
+                seed: 5,
+                ..crate::terrain::spec::TerrainSpec::default()
+            };
+            let map = crate::terrain::heightmap::HeightMapU16::procedural(
+                &spec,
+                spec.resolution.max(1) as usize,
+            );
+            let grid = crate::terrain::brush::BrushGrid::from_height_map(
+                &map,
+                spec.world_size,
+                spec.max_height,
+                spec.height_smoothing,
+            )
+            .expect("grid builds");
+            crate::terrain::runtime::TerrainRuntime {
+                spec,
+                grid: std::sync::Arc::new(grid),
+                water: vec![],
+                roads: vec![],
+                pads: vec![],
+                voxel: std::sync::Arc::new(crate::terrain::voxel::VoxelField::default()),
+                deltas: std::sync::Arc::new(crate::terrain::delta::DeltaGrid::default()),
+                paint: std::sync::Arc::new(crate::terrain::paint::PaintGrid::default()),
+                splat_tuning: Default::default(),
+            }
+        }
+
+        let mut app = App::new();
+        app.init_resource::<PendingSavePatches>();
+        app.world_mut()
+            .resource_mut::<PendingSavePatches>()
+            .0
+            .push(crate::terrain::delta::DeltaPatch {
+                min: [0.0, 0.0],
+                step: [1.0, 1.0],
+                cols: 2,
+                rows: 2,
+                data: vec![1.0, 2.0, 3.0, 4.0],
+            });
+        // Sem terreno vivo (interior/menu à espera): fica pendente.
+        app.world_mut()
+            .run_system_once(apply_pending_save_patches)
+            .unwrap();
+        assert_eq!(
+            app.world().resource::<PendingSavePatches>().0.len(),
+            1,
+            "sem terreno os recortes esperam"
+        );
+        // Terreno vivo: importa e limpa o pendente.
+        app.insert_resource(small_runtime());
+        app.world_mut()
+            .run_system_once(apply_pending_save_patches)
+            .unwrap();
+        assert!(app.world().resource::<PendingSavePatches>().0.is_empty());
+        let runtime = app
+            .world()
+            .resource::<crate::terrain::runtime::TerrainRuntime>();
+        assert_eq!(
+            runtime.deltas.export_patches().len(),
+            1,
+            "o recorte entrou no runtime vivo"
+        );
     }
 }
