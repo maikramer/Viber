@@ -270,15 +270,18 @@ impl CaveSpec {
                 let mouth = stations[end];
                 let inward = (stations[from] - mouth).normalize_or_zero();
                 let ground = base.sample(mouth.x, mouth.y);
-                // A FACE é o plano da boca; o monte cresce para DENTRO. Assim
-                // não há rocha à frente da entrada (que a taparia) e o tubo
-                // corta um arco na face vertical.
+                // A FACE é o plano da boca, mas inclinada para dentro (~15°):
+                // uma parede exactamente vertical lê-se como muro e estica a
+                // UV do splat em riscas. O monte cresce para DENTRO; o tubo
+                // corta o arco na face.
+                let outward = Vec3::new(-inward.x, 0.0, -inward.y);
+                let face = (outward + Vec3::Y * 0.26).normalize_or_zero();
                 mods.push(Box::new(HalfEllipsoidMod::new(
                     format!("{label}:mound:{end}"),
                     Vec3::new(mouth.x, ground, mouth.y),
                     Vec3::new(r_mound, self.mound_height, r_mound),
-                    Vec3::new(-inward.x, 0.0, -inward.y),
-                    (r_mound * 0.06).clamp(0.4, 1.2),
+                    face,
+                    (r_mound * 0.08).clamp(0.6, 1.4),
                 )));
             }
         }
@@ -345,6 +348,38 @@ impl CaveSpec {
                 shaft.radius,
                 ModOp::Subtract,
             )));
+        }
+
+        // Ombro do arco: blocos `Union` DEPOIS dos tubos subtractivos, para
+        // comerem um pouco do arco perfeitamente circular. O buraco deixa de
+        // ser um círculo de compasso: ganha uma pedra de fecho em cima e dois
+        // contrafortes nos ombros, como uma boca de gruta de verdade.
+        if self.open_ends && self.mound_height > 0.0 && self.mound_height.is_finite() {
+            for (end, from) in [(0usize, 1usize), (stations.len() - 1, stations.len() - 2)] {
+                let mouth = stations[end];
+                let inward = (stations[from] - mouth).normalize_or_zero();
+                let ground = base.sample(mouth.x, mouth.y);
+                let r = self.radius_at(0.0);
+                let at = mouth + inward * (r * 0.55);
+                mods.push(Box::new(EllipsoidMod::new(
+                    format!("{label}:rim:{end}:top"),
+                    Vec3::new(at.x, ground + 2.0 * r + 0.1, at.y),
+                    Vec3::new(r * 0.55, r * 0.34, r * 0.55),
+                    0.0,
+                    ModOp::Union,
+                )));
+                let lateral = Vec2::new(-inward.y, inward.x);
+                for (side, s) in [("a", -1.0f32), ("b", 1.0f32)] {
+                    let p = at + lateral * (s * r * 0.78);
+                    mods.push(Box::new(EllipsoidMod::new(
+                        format!("{label}:rim:{end}:{side}"),
+                        Vec3::new(p.x, ground + r * 1.52, p.y),
+                        Vec3::splat(r * 0.24),
+                        0.0,
+                        ModOp::Union,
+                    )));
+                }
+            }
         }
         mods
     }
@@ -607,12 +642,12 @@ mod tests {
         s.mound_height = 10.0;
         s.mound_radius = 16.0;
         let mods = s.build(&base);
-        // O monte existe logo atrás da face e fora do tubo.
+        // O monte existe logo atrás da face inclinada e fora do tubo.
         assert!(
-            density(&mods, &base, Vec3::new(-39.0, 4.0, 0.0)) < 0.0,
+            density(&mods, &base, Vec3::new(-37.0, 4.0, 0.0)) < 0.0,
             "o monte devia cobrir a boca"
         );
-        // A face é vertical: 2 m à frente dela é céu, não rocha a tapar a entrada.
+        // A face recolhe para dentro com a altura: 2 m à frente da base é céu.
         assert!(
             density(&mods, &base, Vec3::new(-42.0, 4.0, 0.0)) > 0.0,
             "o monte não pode avançar para fora da boca"
