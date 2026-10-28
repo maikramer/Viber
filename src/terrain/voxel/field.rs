@@ -332,6 +332,55 @@ impl VoxelField {
         }
         spans
     }
+
+    /// `column(...)` dá `spans.len() >= 2 && spans[0].thickness() < max_thickness`?
+    ///
+    /// Mesma resposta do [`Self::column`], sem construir os spans todos nem
+    /// alocar: o march PARA no fecho do primeiro span quando ele é grosso —
+    /// a única resposta que os consumidores querem é sobre o span de TOPO,
+    /// e numa coluna de 200 m de relevo percorrer o resto (a 0,5 m, com
+    /// densidades) por candidato de relva/por sonda de colocação era o custo
+    /// do mesh sem a geometria.
+    pub fn has_thin_roof(
+        &self,
+        base: &dyn HeightField,
+        x: f32,
+        z: f32,
+        max_thickness: f32,
+    ) -> bool {
+        let Some((lo, hi)) = self.column_range(base, x, z) else {
+            return false; // coluna flat: um span só, nunca fino
+        };
+        let mut y = hi;
+        let mut inside = self.density(base, Vec3::new(x, y, z)) < 0.0;
+        let mut top = if inside { hi } else { f32::NAN };
+        // `Some` = o primeiro span já fechou (e diz se foi fino). Um SEGUNDO
+        // fecho, ou o fundo da coluna apanhado ainda dentro de rocha depois
+        // dele, é o ≥ 2 spans da resposta.
+        let mut first_closed_thin: Option<bool> = None;
+        while y > lo {
+            let next = (y - COLUMN_STEP).max(lo);
+            let solid = self.density(base, Vec3::new(x, next, z)) < 0.0;
+            if solid != inside {
+                if solid {
+                    top = self.bisect(base, x, z, next, y);
+                } else if first_closed_thin.is_none() {
+                    let bottom = self.bisect(base, x, z, y, next);
+                    if top - bottom >= max_thickness {
+                        return false; // span[0] grosso: a resposta é NÃO, já está
+                    }
+                    first_closed_thin = Some(true);
+                } else {
+                    return true; // span[1] fechou: ≥ 2 spans sobre laje fina
+                }
+                inside = solid;
+            }
+            y = next;
+        }
+        // Fim da coluna ainda dentro de rocha DEPOIS do primeiro span fechado
+        // é o span de fundo (`bottom = −inf`): conta. Antes dele, não.
+        first_closed_thin.is_some() && inside
+    }
 }
 
 impl Default for VoxelField {
@@ -475,6 +524,45 @@ mod tests {
             (spans[0].bottom - spans[1].top) > 15.0,
             "there must be walkable air under the shelf"
         );
+    }
+
+    /// `has_thin_roof` responde o MESMO que ler `column()` em todas as
+    /// formas de coluna — é o contrato do early-exit (parar no fecho do
+    /// primeiro span grosso não pode mudar a resposta).
+    #[test]
+    fn test_has_thin_roof_matches_the_column_read() {
+        let base = Flat(0.0);
+        let shelf = |min_y: f32, max_y: f32| {
+            VoxelField::new(
+                vec![union_box(
+                    "shelf",
+                    Vec3::new(-10.0, min_y, -10.0),
+                    Vec3::new(10.0, max_y, 10.0),
+                )],
+                512.0,
+                64.0,
+            )
+        };
+        let expected = |field: &VoxelField| {
+            let spans = field.column(&base, 0.0, 0.0);
+            spans.len() >= 2 && spans[0].thickness() < 4.0
+        };
+        // Laje FINA (banda de arco, 3 m) sobre vão: SIM.
+        let thin = shelf(2.0, 5.0);
+        assert!(expected(&thin));
+        assert!(thin.has_thin_roof(&base, 0.0, 0.0, 4.0));
+        // Laje GROSSA sobre vão: NÃO (e o early-exit corta aqui).
+        let thick = shelf(20.0, 40.0);
+        assert!(!expected(&thick));
+        assert!(!thick.has_thin_roof(&base, 0.0, 0.0, 4.0));
+        // Colina sólida sem vão (span único até −inf): NÃO.
+        let solid = shelf(-100.0, 30.0);
+        assert!(!expected(&solid));
+        assert!(!solid.has_thin_roof(&base, 0.0, 0.0, 4.0));
+        // Falso chão: nenhum sólido (poço aberto por subtract a toda a
+        // profundidade). Um subtract não existe aqui (union só), logo é a
+        // coluna flat: NÃO.
+        assert!(!VoxelField::flat(512.0, 64.0).has_thin_roof(&base, 0.0, 0.0, 4.0));
     }
 
     #[test]

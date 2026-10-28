@@ -683,6 +683,24 @@ pub struct RoadPath {
     /// Bridge roads: no carve, flat deck at `deck_y`.
     pub bridge: bool,
     pub deck_y: Option<f32>,
+    /// AABB (min, max) das estações com a maior meia-largura da fita
+    /// somada — o envelope exato da fita. `is_on_road`/`within` rejeitam
+    /// fora dele em O(1): o `nearest_on_path` é O(estações) e a relva paga-o
+    /// por célula de lattice a cada bake, os scripts por frame.
+    pub bounds: (Vec2, Vec2),
+}
+
+/// AABB das estações com a maior meia-largura da fita somada — o envelope da
+/// fita (ver [`RoadPath::bounds`]).
+fn road_fit_bounds(stations: &[Vec2], half_width: &[f32]) -> (Vec2, Vec2) {
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for s in stations {
+        min = min.min(*s);
+        max = max.max(*s);
+    }
+    let pad = Vec2::splat(half_width.iter().copied().fold(0.0f32, f32::max));
+    (min - pad, max + pad)
 }
 
 impl RoadPath {
@@ -698,9 +716,25 @@ impl RoadPath {
         hit.point.distance(p) - hw
     }
 
+    /// `distance_to_road(p) <= within`, com rejeição O(1) pelo envelope
+    /// ([`RoadPath::bounds`]) antes do scan O(estações). Exato: um ponto a
+    /// `≤ within` da fita está dentro do AABB das estações expandido pela
+    /// maior meia-largura + `within`.
+    pub fn within(&self, p: Vec2, within: f32) -> bool {
+        let (min, max) = self.bounds;
+        if p.x < min.x - within
+            || p.x > max.x + within
+            || p.y < min.y - within
+            || p.y > max.y + within
+        {
+            return false;
+        }
+        self.distance_to_road(p) <= within
+    }
+
     /// Point is on the road ribbon (`isPointOnRoad`).
     pub fn is_on_road(&self, p: Vec2) -> bool {
-        self.distance_to_road(p) <= 0.0
+        self.within(p, 0.0)
     }
 
     pub(crate) fn deck_weight(&self, hit: &PathHit) -> f32 {
@@ -974,6 +1008,7 @@ pub fn carve_road(
             (None, None) => natural_profile(grid, &stations),
         };
         let deck = vec![spec.profile == RoadProfile::Bridge; stations.len()];
+        let bounds = road_fit_bounds(&stations, &half_widths);
         return Some(RoadPath {
             name: spec.name.clone(),
             half_width: half_widths,
@@ -983,6 +1018,7 @@ pub fn carve_road(
             deck,
             bridge: spec.profile == RoadProfile::Bridge,
             deck_y,
+            bounds,
         });
     }
 
@@ -1131,6 +1167,7 @@ pub fn carve_road(
     });
     grid.commit_stroke();
 
+    let bounds = road_fit_bounds(&stations, &half_widths);
     Some(RoadPath {
         name: spec.name.clone(),
         half_width: half_widths,
@@ -1140,6 +1177,7 @@ pub fn carve_road(
         deck,
         bridge: false,
         deck_y: None,
+        bounds,
     })
 }
 
@@ -2594,6 +2632,10 @@ mod tests {
             half_width: vec![2.0, 2.0],
             surface: vec![6.0, 6.0],
             deck: vec![false, false],
+            bounds: (
+                Vec2::new(28.0, 62.0),
+                Vec2::new(42.0, 66.0),
+            ),
         };
         let spec = road_spec();
         let mesh = road_ribbon_mesh(&grid, &path, &spec, &[], 0);
@@ -2632,6 +2674,7 @@ mod tests {
             half_width: vec![2.0; 5],
             surface: vec![6.0; 5],
             deck: vec![false; 5],
+            bounds: (Vec2::new(18.0, 62.0), Vec2::new(66.0, 110.0)),
         };
         let spec = road_spec();
         let mesh = road_ribbon_mesh(&grid, &path, &spec, &[], 0);
@@ -2871,6 +2914,7 @@ mod tests {
             half_width: vec![4.0, 4.0],
             surface: vec![16.0, 16.0],
             deck: vec![true, true],
+            bounds: (Vec2::new(26.0, 60.0), Vec2::new(94.0, 68.0)),
         };
         let spec = road_spec();
         let mesh = road_ribbon_mesh(&grid, &path, &spec, &[], 0);
@@ -2928,6 +2972,7 @@ mod tests {
             half_width: vec![4.0, 4.0],
             surface: vec![16.0, 16.0],
             deck: vec![true, true],
+            bounds: (Vec2::new(16.0, 60.0), Vec2::new(114.0, 68.0)),
         };
         let under = RoadPath {
             name: None,
@@ -2938,6 +2983,7 @@ mod tests {
             half_width: vec![10.0, 10.0],
             surface: vec![6.0, 6.0],
             deck: vec![false, false],
+            bounds: (Vec2::new(50.0, 14.0), Vec2::new(70.0, 114.0)),
         };
         let spec = road_spec();
         // Contrato do runtime: `others` = TODAS as estradas do mundo,
@@ -2984,6 +3030,7 @@ mod road_sample_tests {
             deck: vec![false, false],
             bridge: false,
             deck_y: None,
+            bounds: (Vec2::new(-2.0, -2.0), Vec2::new(2.0, 12.0)),
         }
     }
 

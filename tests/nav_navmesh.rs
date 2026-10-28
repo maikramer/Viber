@@ -48,6 +48,7 @@ fn world_with_a_road() -> TerrainRuntime {
             deck: vec![false; (-30..=30).count()],
             bridge: false,
             deck_y: None,
+            bounds: (Vec2::new(-60.0, -2.4), Vec2::new(60.0, 2.4)),
         }],
         pads: vec![],
         voxel: Arc::new(viber::terrain::voxel::VoxelField::default()),
@@ -96,6 +97,9 @@ fn ground_lattice_leaves_holes_where_the_world_is_not_walkable() {
         half_width: vec![],
         depths: vec![],
         cascades: vec![],
+        // Corpo construído à mão: casco 0 desliga o rejeite O(1) e o
+        // teste fino (`radius`) decide.
+        hull: 0.0,
     }];
     let wet = viber::nav::backend::ground_lattice(
         &flooded,

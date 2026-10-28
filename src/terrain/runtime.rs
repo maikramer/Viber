@@ -617,8 +617,12 @@ impl TerrainRuntime {
         if self.voxel.is_flat() {
             return false;
         }
-        let spans = self.voxel.column(&self.base(), x, z);
-        spans.len() >= 2 && spans[0].thickness() < MIN_STAND_THICKNESS
+        // Early-exit no campo (para no fecho do span de topo quando ele é
+        // grosso): a leitura por `column()` construía TODOS os spans —
+        // alocação + percurso vertical inteiro da coluna — e a relva chama
+        // isto por célula de lattice e por candidato em cada bake de tile.
+        self.voxel
+            .has_thin_roof(&self.base(), x, z, MIN_STAND_THICKNESS)
     }
     /// O XZ cai dentro da pegada do heightmap?
     ///
@@ -699,6 +703,14 @@ impl TerrainRuntime {
         let p = Vec2::new(x, z);
         let mut best: Option<(f32, PathHit, usize)> = None;
         for (ri, road) in self.roads.iter().enumerate() {
+            // Rejeição O(1) pelo envelope da fita: fora dele não há ponto
+            // NA fita (o AABB já inclui a maior meia-largura) — o kart
+            // perguntava por frame a cada estrada e pagava o caminho inteiro
+            // de cada uma.
+            let (bmin, bmax) = road.bounds;
+            if p.x < bmin.x || p.x > bmax.x || p.y < bmin.y || p.y > bmax.y {
+                continue;
+            }
             let Some(hit) = nearest_on_path(&road.stations, p) else {
                 continue;
             };

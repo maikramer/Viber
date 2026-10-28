@@ -1529,6 +1529,7 @@ mod tests {
             at: Vec2::new(0.0, 0.0),
             radius: 10.0,
             carve_radius: 12.5,
+            hull: 0.0,
             water_y: 40.0,
             mirror_reach: 1.0,
             shape: LakeShape::default(),
@@ -1640,6 +1641,7 @@ mod tests {
             deck,
             bridge: false,
             deck_y: None,
+            bounds: (Vec2::new(-12.0, -2.0), Vec2::new(12.0, 2.0)),
         };
         let boxes_r = vec![(road_bounds(&road, 4.4), &road)];
         let boxes_w: Vec<(Bounds, &WaterBody)> = Vec::new();

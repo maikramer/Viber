@@ -940,10 +940,13 @@ fn build_tile(
                 .is_some_and(|surface| y <= surface + 0.25)
                 || terrain.in_water(x, z);
             wet_cells[iz * LATTICE + ix] = wet;
+            // `within` rejeita pelo envelope da fita em O(1) antes do scan
+            // O(estações) — 289 células × estradas pagavam o caminho inteiro
+            // de cada estrada a cada bake de tile.
             let paved = terrain
                 .roads
                 .iter()
-                .any(|road| road.distance_to_road(Vec2::new(x, z)) <= ROAD_CLEARANCE);
+                .any(|road| road.within(Vec2::new(x, z), ROAD_CLEARANCE));
             let paved = paved || in_pad_core(terrain, x, z);
             // Slab standing surface (arch band, tight overhang brow): blades
             // would root on floating rock or interpolate across its vertical

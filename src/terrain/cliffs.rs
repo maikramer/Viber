@@ -1168,6 +1168,7 @@ mod tests {
             at: Vec2::new(10.0, 0.0),
             radius: 300.0,
             carve_radius: 300.0,
+            hull: 0.0,
             water_y: 30.0,
             mirror_reach: 1.0,
             shape: super::super::water::LakeShape::default(),

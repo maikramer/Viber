@@ -228,18 +228,30 @@ fn body_bounds(body: &super::water::WaterBody) -> (Vec2, Vec2) {
             if body.stations.is_empty() {
                 return (body.at, body.at);
             }
-            let half = body
-                .half_width
-                .iter()
-                .copied()
-                .fold(body.carve_radius, f32::max);
-            let mut min = body.stations[0];
-            let mut max = body.stations[0];
-            for station in &body.stations {
-                min = min.min(*station);
-                max = max.max(*station);
+            // Quadrado do CASCO (`WaterBody::hull` = distância máxima das
+            // estações ao centroide + maior meia-largura) + carve: contém a
+            // caixa de estações expandida e custa O(1) por corpo por frame —
+            // a versão antiga voltava a caminhar TODAS as estações de TODOS
+            // os rios TODOS os frames para medir a mesma caixa imutável.
+            // Corpo construído à mão sem casco (`hull <= 0`): cai no cálculo
+            // exato em vez de encolher a caixa.
+            if body.hull > 0.0 {
+                let reach = body.hull + body.carve_radius;
+                (body.at - Vec2::splat(reach), body.at + Vec2::splat(reach))
+            } else {
+                let half = body
+                    .half_width
+                    .iter()
+                    .copied()
+                    .fold(body.carve_radius, f32::max);
+                let mut min = body.stations[0];
+                let mut max = body.stations[0];
+                for station in &body.stations {
+                    min = min.min(*station);
+                    max = max.max(*station);
+                }
+                (min - Vec2::splat(half), max + Vec2::splat(half))
             }
-            (min - Vec2::splat(half), max + Vec2::splat(half))
         }
     }
 }

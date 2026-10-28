@@ -709,6 +709,8 @@ mod tests {
             at: Vec2::new(0.0, 0.0),
             radius: 0.0,
             carve_radius: 6.0,
+            // Casco das queries: estações a ±300 do centro + meia-largura 4.
+            hull: 304.0,
             water_y: 0.0,
             mirror_reach: 1.0,
             shape: LakeShape::default(),

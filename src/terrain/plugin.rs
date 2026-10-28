@@ -453,6 +453,13 @@ fn update_voxel_columns(
     lod_field.clamp_two_to_one(max_lod);
 
     // 2. Cull + re-select + construção staged.
+    //
+    // A drenagem ORÇAMENTADA (pass B) corre MAIS PERTO PRIMEIRO: a ordem da
+    // query é a da grelha e, num teleporte, as primeiras colunas do quadrante
+    // −X/−Z levavam as 4 caixas do frame enquanto o chão sob os pés esperava
+    // passos. Esta passagem só decide (cull, LOD, enfileirar — tudo barato);
+    // quem gasta orçamento é a passagem ordenada a seguir.
+    let mut draining: Vec<(f32, Entity)> = Vec::new();
     for (entity, mut chunk, mut build) in columns.iter_mut() {
         let dist = center_of(chunk.coords).distance(cam_xz);
         if chunk_aabb_distance(dist, edge) > render_distance {
@@ -513,100 +520,7 @@ fn update_voxel_columns(
                 b.bake = crate::physics::ColumnColliderBake::new();
                 state.pending = true;
             }
-            Some(b) => {
-                let material = published
-                    .as_ref()
-                    .and_then(|p| p.layer.as_ref())
-                    .and_then(|m| m.get(chunk.coords.x, chunk.coords.y).cloned())
-                    .map(ChunkMaterialHandle::Layer)
-                    .or_else(|| standard.clone().map(ChunkMaterialHandle::Standard));
-                let Some(material) = material else {
-                    continue;
-                };
-                while budget > 0 {
-                    // Teto de tempo: uma caixa refinada pode custar 5 ms; não
-                    // começar outra quando o frame já gastou o orçamento.
-                    if Instant::now() >= deadline {
-                        state.pending = true;
-                        break;
-                    }
-                    let Some(box_spec) = b.remaining.pop() else {
-                        break;
-                    };
-                    let Some(data) = super::voxel::build_box_mesh(
-                        spec,
-                        &base,
-                        voxel,
-                        &box_spec,
-                        matches!(
-                            material,
-                            crate::terrain::runtime::ChunkMaterialHandle::Layer(_)
-                        ),
-                    ) else {
-                        // Provou-se vazio depois de tudo — sem custo de
-                        // orçamento, segue para a próxima caixa.
-                        continue;
-                    };
-                    b.bake.add_mesh_data(box_spec.origin, &data);
-                    b.staged.push(super::voxel::spawn_box_entity(
-                        &mut commands,
-                        &mut meshes,
-                        entity,
-                        &box_spec,
-                        data,
-                        &material,
-                        false,
-                    ));
-                    // Caixa REFINADA: 8× as amostras do transvoxel — consome
-                    // a frame inteira de orçamento (uma por frame no máximo).
-                    budget = if box_spec.refined { 0 } else { budget - 1 };
-                }
-                if b.remaining.is_empty() {
-                    // Swap atómico: caixas do LOD velho morrem, staged ficam
-                    // visíveis, a coluna aponta o LOD construído.
-                    if let Ok(kids) = children_q.get(entity) {
-                        for kid in kids.iter() {
-                            if boxes.get(kid).is_ok() && !b.staged.contains(&kid) {
-                                commands.entity(kid).despawn();
-                            }
-                        }
-                    }
-                    for e in &b.staged {
-                        commands.entity(*e).insert(Visibility::Inherited);
-                    }
-                    // O collider da coluna troca com o mesh, no MESMO frame:
-                    // o trimesh novo substitui o velho. Sem geometria nova
-                    // (coluna provou-se vazia), o collider velho sai — nunca
-                    // fica chão invisível.
-                    if spec.collision_resolution > 0 {
-                        match b.bake.bake() {
-                            Some(collider) => {
-                                commands.entity(entity).try_insert((
-                                    collider,
-                                    bevy_rapier3d::prelude::RigidBody::Fixed,
-                                    crate::physics::VoxelCollider,
-                                ));
-                            }
-                            None => {
-                                commands
-                                    .entity(entity)
-                                    .try_remove::<bevy_rapier3d::prelude::Collider>()
-                                    .try_remove::<bevy_rapier3d::prelude::RigidBody>()
-                                    .try_remove::<crate::physics::VoxelCollider>();
-                            }
-                        }
-                    }
-                    chunk.built_lod = b.target;
-                    chunk.built_neighbours = b.neighbours;
-                    chunk.built_edit_rev = b.edit_rev;
-                    if b.edit_rev != edit_rev {
-                        // Editada a meio: o passe seguinte decide se re-mesha.
-                        state.pending = true;
-                    }
-
-                    commands.entity(entity).remove::<ColumnBuild>();
-                }
-            }
+            Some(_) => draining.push((dist, entity)),
             None if stale => {
                 let remaining = super::voxel::column_boxes(
                     spec,
@@ -634,24 +548,126 @@ fn update_voxel_columns(
             None => {}
         }
     }
+    // 2.b Drenagem orçamentada, mais perto primeiro.
+    draining.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, entity) in &draining {
+        let Ok((_, mut chunk, mut build)) = columns.get_mut(*entity) else {
+            continue;
+        };
+        let Some(b) = build.as_mut() else {
+            continue;
+        };
+        let material = published
+            .as_ref()
+            .and_then(|p| p.layer.as_ref())
+            .and_then(|m| m.get(chunk.coords.x, chunk.coords.y).cloned())
+            .map(ChunkMaterialHandle::Layer)
+            .or_else(|| standard.clone().map(ChunkMaterialHandle::Standard));
+        let Some(material) = material else {
+            continue;
+        };
+        while budget > 0 {
+            // Teto de tempo: uma caixa refinada pode custar 5 ms; não
+            // começar outra quando o frame já gastou o orçamento.
+            if Instant::now() >= deadline {
+                state.pending = true;
+                break;
+            }
+            let Some(box_spec) = b.remaining.pop() else {
+                break;
+            };
+            let Some(data) = super::voxel::build_box_mesh(
+                spec,
+                &base,
+                voxel,
+                &box_spec,
+                matches!(
+                    material,
+                    crate::terrain::runtime::ChunkMaterialHandle::Layer(_)
+                ),
+            ) else {
+                // Provou-se vazio depois de tudo — sem custo de
+                // orçamento, segue para a próxima caixa.
+                continue;
+            };
+            b.bake.add_mesh_data(box_spec.origin, &data);
+            b.staged.push(super::voxel::spawn_box_entity(
+                &mut commands,
+                &mut meshes,
+                *entity,
+                &box_spec,
+                data,
+                &material,
+                false,
+            ));
+            // Caixa REFINADA: 8× as amostras do transvoxel — consome
+            // a frame inteira de orçamento (uma por frame no máximo).
+            budget = if box_spec.refined { 0 } else { budget - 1 };
+        }
+        if b.remaining.is_empty() {
+            // Swap atómico: caixas do LOD velho morrem, staged ficam
+            // visíveis, a coluna aponta o LOD construído.
+            if let Ok(kids) = children_q.get(*entity) {
+                for kid in kids.iter() {
+                    if boxes.get(kid).is_ok() && !b.staged.contains(&kid) {
+                        commands.entity(kid).despawn();
+                    }
+                }
+            }
+            for e in &b.staged {
+                commands.entity(*e).insert(Visibility::Inherited);
+            }
+            // O collider da coluna troca com o mesh, no MESMO frame:
+            // o trimesh novo substitui o velho. Sem geometria nova
+            // (coluna provou-se vazia), o collider velho sai — nunca
+            // fica chão invisível.
+            if spec.collision_resolution > 0 {
+                match b.bake.bake() {
+                    Some(collider) => {
+                        commands.entity(*entity).try_insert((
+                            collider,
+                            bevy_rapier3d::prelude::RigidBody::Fixed,
+                            crate::physics::VoxelCollider,
+                        ));
+                    }
+                    None => {
+                        commands
+                            .entity(*entity)
+                            .try_remove::<bevy_rapier3d::prelude::Collider>()
+                            .try_remove::<bevy_rapier3d::prelude::RigidBody>()
+                            .try_remove::<crate::physics::VoxelCollider>();
+                    }
+                }
+            }
+            chunk.built_lod = b.target;
+            chunk.built_neighbours = b.neighbours;
+            chunk.built_edit_rev = b.edit_rev;
+            if b.edit_rev != edit_rev {
+                // Editada a meio: o passe seguinte decide se re-mesha.
+                state.pending = true;
+            }
+
+            commands.entity(*entity).remove::<ColumnBuild>();
+        }
+    }
     if budget == 0 || Instant::now() >= deadline {
         state.pending = true;
     }
 
     // 2. Respawn de colunas em falta (culled antes, ou fora do raio no
     //    bootstrap) — sem skip volumétrico: TODA a grelha é voxel agora.
+    //    MAIS PERTO PRIMEIRO: a varredura cz/cx ascendente começava no canto
+    //    −X/−Z da janela e, com o orçamento a esgotar lá, o chão sob o herói
+    //    (que entrou pelo lado oposto) era dos últimos a nascer.
     let Some(root) = state.root else {
         return;
     };
     if published.as_ref().and_then(|p| p.layer.as_ref()).is_none() && standard.is_none() {
         return;
     }
+    let mut missing: Vec<(f32, UVec2)> = Vec::new();
     for cz in min_cz..=max_cz {
         for cx in min_cx..=max_cx {
-            if budget == 0 || Instant::now() >= deadline {
-                state.pending = true;
-                return;
-            }
             let coords = UVec2::new(cx, cz);
             if state.chunks.contains_key(&coords) {
                 continue;
@@ -660,50 +676,59 @@ fn update_voxel_columns(
             if chunk_aabb_distance(dist, edge) > render_distance {
                 continue;
             }
-            let Some(material) = published
-                .as_ref()
-                .and_then(|p| p.layer.as_ref())
-                .and_then(|m| m.get(cx, cz).cloned())
-                .map(ChunkMaterialHandle::Layer)
-                .or_else(|| standard.clone().map(ChunkMaterialHandle::Standard))
-            else {
-                continue;
-            };
-            // Respawn já no LOD cru da distância (sem histerese — coluna nova
-            // não tem histórico). As caixas da coluna constroem TODAS neste
-            // frame: um chão a meio é pior do que ultrapassar o orçamento
-            // uma vez; o `saturating_sub` limita a uma coluna destes por
-            // frame.
-            let lod = lod_field
-                .get(coords)
-                .unwrap_or_else(|| raw_lod(dist, spec.lod_distance(), max_lod));
-            let neighbours = lod_field.neighbours(coords);
-            let refined =
-                super::voxel::spawn::refined_neighbours(&lod_field, voxel, spec, edge, coords);
-            let column_boxes = super::voxel::column_boxes(
-                spec, &base, voxel, edge, lod0_cell, lod, coords, neighbours, refined,
-            );
-            budget = budget.saturating_sub(column_boxes.len() as u32);
-            let (entity, built) = super::voxel::spawn_column(
-                &mut commands,
-                &mut meshes,
-                root,
-                coords,
-                lod,
-                &material,
-                &column_boxes,
-                &base,
-                voxel,
-                spec,
-                std::array::from_fn(|i| neighbours[i] | ((refined[i] as u8) << 7)),
-                edit_rev,
-                Some(cam_xz),
-            );
-            if built > 0 {
-                state.chunks.insert(coords, entity);
-            } else {
-                commands.entity(entity).despawn();
-            }
+            missing.push((dist, coords));
+        }
+    }
+    missing.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, coords) in missing {
+        if budget == 0 || Instant::now() >= deadline {
+            state.pending = true;
+            return;
+        }
+        let (cx, cz) = (coords.x, coords.y);
+        let Some(material) = published
+            .as_ref()
+            .and_then(|p| p.layer.as_ref())
+            .and_then(|m| m.get(cx, cz).cloned())
+            .map(ChunkMaterialHandle::Layer)
+            .or_else(|| standard.clone().map(ChunkMaterialHandle::Standard))
+        else {
+            continue;
+        };
+        // Respawn já no LOD cru da distância (sem histerese — coluna nova
+        // não tem histórico). As caixas da coluna constroem TODAS neste
+        // frame: um chão a meio é pior do que ultrapassar o orçamento
+        // uma vez; o `saturating_sub` limita a uma coluna destes por
+        // frame.
+        let lod = lod_field
+            .get(coords)
+            .unwrap_or_else(|| raw_lod(center_of(coords).distance(cam_xz), spec.lod_distance(), max_lod));
+        let neighbours = lod_field.neighbours(coords);
+        let refined =
+            super::voxel::spawn::refined_neighbours(&lod_field, voxel, spec, edge, coords);
+        let column_boxes = super::voxel::column_boxes(
+            spec, &base, voxel, edge, lod0_cell, lod, coords, neighbours, refined,
+        );
+        budget = budget.saturating_sub(column_boxes.len() as u32);
+        let (entity, built) = super::voxel::spawn_column(
+            &mut commands,
+            &mut meshes,
+            root,
+            coords,
+            lod,
+            &material,
+            &column_boxes,
+            &base,
+            voxel,
+            spec,
+            std::array::from_fn(|i| neighbours[i] | ((refined[i] as u8) << 7)),
+            edit_rev,
+            Some(cam_xz),
+        );
+        if built > 0 {
+            state.chunks.insert(coords, entity);
+        } else {
+            commands.entity(entity).despawn();
         }
     }
 }

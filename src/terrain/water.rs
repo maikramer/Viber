@@ -569,6 +569,14 @@ pub struct WaterBody {
     pub radius: f32,
     /// Avoid-zone radius (lake: carve radius; river: half carve width).
     pub carve_radius: f32,
+    /// Raio O(1) de rejeição das queries de rio: distância máxima das
+    /// estações ao `at` MAIS a maior meia-largura. O ponto mais próximo do
+    /// caminho vive num segmento entre estações (casco convexo — fica tão
+    /// perto do centro como as estações), pelo que `|p − at| > hull`
+    /// garante ponto seco, e o +meia-largura estende a garantia à lâmina
+    /// (e a `blend_surface_y` soma a margem fora). Lagos não o usam (as
+    /// queries deles já são O(1)): `0.0`.
+    pub hull: f32,
     /// Lake mirror height (rivers: mean surface height).
     pub water_y: f32,
     /// Lake: reach do ESPELHO sobre o contorno nominal — o MESMO fator
@@ -644,6 +652,15 @@ impl WaterBody {
             WaterKind::Lake => p.distance(self.at) <= self.carve_radius,
             WaterKind::River => {
                 !self.stations.is_empty()
+                    // Rejeição O(1) pelo casco antes do scan O(estações): um
+                    // ponto a 200 m de um rio de 2 km não paga 2 000 segmentos
+                    // — e quem paga são a relva (por célula de lattice) e os
+                    // scripts (por frame). `hull <= 0` (corpo construído à
+                    // mão que não computou o casco) desliga o rejeite em vez
+                    // de negar tudo.
+                    && (self.hull <= 0.0
+                        || (p - self.at).length_squared()
+                            <= (self.hull + self.carve_radius).powi(2))
                     && distance_to_path(&self.stations, p) <= self.carve_radius
             }
         }
@@ -655,6 +672,9 @@ impl WaterBody {
             WaterKind::Lake => p.distance(self.at) <= self.carve_radius + margin,
             WaterKind::River => {
                 !self.stations.is_empty()
+                    && (self.hull <= 0.0
+                        || (p - self.at).length_squared()
+                            <= (self.hull + self.carve_radius + margin).powi(2))
                     && distance_to_path(&self.stations, p) <= self.carve_radius + margin
             }
         }
@@ -675,6 +695,12 @@ impl WaterBody {
                 (delta.length() <= contour).then_some(self.water_y)
             }
             WaterKind::River => {
+                // Mesma rejeição O(1) do casco (`contains`): além do hull não
+                // há lâmina — o teste fino só corre perto do rio. `hull <= 0`
+                // (corpo à mão) desliga o rejeite.
+                if self.hull > 0.0 && (p - self.at).length_squared() > self.hull.powi(2) {
+                    return None;
+                }
                 let hit = nearest_on_path(&self.stations, p)?;
                 let d = hit.point.distance(p);
                 // Meia-largura EFETIVA da estação — a ribbon acaba em
@@ -727,6 +753,13 @@ impl WaterBody {
                 (delta.length() <= contour + margin).then_some(self.water_y)
             }
             WaterKind::River => {
+                // Mesma rejeição O(1) do casco, +margem (`blend_surface_y`);
+                // `hull <= 0` (corpo à mão) desliga o rejeite.
+                if self.hull > 0.0
+                    && (p - self.at).length_squared() > (self.hull + margin).powi(2)
+                {
+                    return None;
+                }
                 let hit = nearest_on_path(&self.stations, p)?;
                 let d = hit.point.distance(p);
                 // Meia-largura EFETIVA + margem (mesma métrica de
@@ -1073,6 +1106,7 @@ pub fn carve_lake(grid: &mut BrushGrid, spec: &LakeSpec, index: usize) -> Option
         at: spec.at,
         radius: spec.radius,
         carve_radius: carve_r,
+        hull: 0.0,
         water_y,
         mirror_reach,
         shape,
@@ -1507,11 +1541,25 @@ pub fn carve_river_with_falls(
         .iter()
         .map(|&d| waterline_reach(d, spec.water_offset).clamp(0.4, 1.0))
         .collect();
+    // Casco O(1) das queries (`WaterBody::hull`): distância máxima das
+    // estações ao centroide + a maior meia-largura EFETIVA.
+    let body_at = centroid(&stations);
+    let max_half = halfs
+        .iter()
+        .zip(&reaches)
+        .map(|(&h, &r)| h * r)
+        .fold(0.0f32, f32::max);
+    let hull = stations
+        .iter()
+        .map(|s| s.distance(body_at))
+        .fold(0.0f32, f32::max)
+        + max_half;
     Some(WaterBody {
         kind: WaterKind::River,
-        at: centroid(&stations),
+        at: body_at,
         radius: 0.0,
         carve_radius: reach,
+        hull,
         water_y,
         mirror_reach: 1.0,
         shape: LakeShape::default(),
@@ -2289,6 +2337,49 @@ mod tests {
         assert!(!river.contains(Vec2::new(48.0, 22.0)), "off the river");
         assert!(river.surface_y_at(Vec2::new(48.0, 0.5)).is_some());
         assert!(river.surface_y_at(Vec2::new(48.0, 22.0)).is_none());
+    }
+
+    /// A rejeição O(1) do casco (`WaterBody::hull`) não muda NENHUMA
+    /// resposta: um ponto dentro do casco passa ao teste fino (mesmos
+    /// resultados), um ponto fora devolve seco/margem-negada sem pagar o
+    /// scan — e o hull cobre de facto as estações (o carve o computa).
+    #[test]
+    fn test_river_hull_reject_is_exact() {
+        let mut grid = test_grid();
+        let river = carve_river(&mut grid, &river_spec(), 1, &[]).expect("river");
+        let hull = river.hull;
+        assert!(hull > 0.0, "o carve de rio computa o casco: {hull}");
+        // Toda a estação fica dentro do casco — o reject não pode esconder
+        // o caminho.
+        for s in &river.stations {
+            assert!(
+                s.distance(river.at) <= hull,
+                "estação {s:?} fora do casco {hull}"
+            );
+        }
+        // Longe (fora do casco): as queries de resposta booleana são secas —
+        // e baratas, é o ponto do fix.
+        let far = river.at + Vec2::new(hull + 50.0, 0.0);
+        assert!(!river.contains(far));
+        assert!(!river.is_near(far, 10.0));
+        assert!(river.surface_y_at(far).is_none());
+        assert!(river.blend_surface_y(far, 4.0).is_none());
+        // Dentro do casco: o reject não interfere (passa ao teste fino) —
+        // um ponto seco continua seco e húmido continua húmido.
+        for s in river.stations.iter().step_by((river.stations.len() / 8).max(1)) {
+            let side = Vec2::new(s.x, s.y + river.half_width_at(0) * 4.0);
+            assert_eq!(
+                river.contains(side),
+                distance_to_path(&river.stations, side) <= river.carve_radius,
+                "contains diverge do teste fino em {side:?}"
+            );
+            assert_eq!(
+                river.surface_y_at(side).is_some(),
+                distance_to_path(&river.stations, side)
+                    <= river.half_width_lerp(&nearest_on_path(&river.stations, side).expect("hit")),
+                "surface_y_at diverge do teste fino em {side:?}"
+            );
+        }
     }
 
     #[test]
