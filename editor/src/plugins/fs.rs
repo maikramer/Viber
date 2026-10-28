@@ -115,6 +115,24 @@ impl ProjectFs {
 
     pub fn mkdir(&self, path: &str) -> Result<()> {
         let joined = self.relative(path)?;
+        // Validar a cadeia de pais ANTES de criar: criar primeiro deixava uma
+        // pasta NOVA do lado de fora quando um ancestral era um symlink que
+        // escapa à raiz — o `canonicalize` a seguir falhava, mas o
+        // `create_dir_all` já tinha escrito lá fora.
+        let mut parent = joined
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("caminho sem pasta-pai: {path}"))?;
+        while !parent.exists() {
+            parent = parent
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("caminho sem ancestral existente: {path}"))?;
+        }
+        let parent = parent
+            .canonicalize()
+            .with_context(|| format!("não consegui resolver a pasta de {path}"))?;
+        if !parent.starts_with(&self.root) {
+            bail!("caminho fora da raiz do projeto: {path}");
+        }
         fs::create_dir_all(&joined).with_context(|| format!("a criar {path}"))?;
         let canonical = joined.canonicalize()?;
         if !canonical.starts_with(&self.root) {
@@ -216,12 +234,26 @@ mod tests {
         assert!(!list.iter().any(|entry| entry.name == "link.txt"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_does_not_create_through_a_symlink_that_escapes() {
+        let dir = project();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("quests/link")).unwrap();
+        let fs = ProjectFs::new(dir.path());
+        assert!(fs.mkdir("quests/link/nova").is_err());
+        // O erro sem a validação prévia já tinha criado a pasta lá fora.
+        assert!(!outside.path().join("nova").exists());
+    }
+
     #[test]
     fn write_is_atomic_and_keeps_a_backup() {
         let dir = project();
         let fs = ProjectFs::new(dir.path());
         fs.write("quests/q.json", "[2]").unwrap();
-        assert!(dir.path().join("quests/q.bak").is_file());
+        // O backup é `write_atomic` da engine: sufixo no NOME COMPLETO
+        // (`q.json.bak`), para `q.xml` e `q.json` não partilharem `.bak`.
+        assert!(dir.path().join("quests/q.json.bak").is_file());
         assert_eq!(fs.read("quests/q.json").unwrap(), "[2]");
     }
 

@@ -1503,6 +1503,26 @@ fn collect_events(node: &UiNode, panel: &str, out: &mut Vec<SmokeEvent>) {
 mod tests {
     use super::*;
 
+    /// Total de quests em `quests/index.json` + ficheiros, lido do disco.
+    fn count_quests_on_disk(root: &Path) -> u64 {
+        let Ok(text) = std::fs::read_to_string(root.join("quests/index.json")) else {
+            return 0;
+        };
+        let Ok(names) = serde_json::from_str::<Vec<String>>(&text) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for name in names {
+            let Ok(list_text) = std::fs::read_to_string(root.join("quests").join(&name)) else {
+                continue;
+            };
+            if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&list_text) {
+                total += list.len() as u64;
+            }
+        }
+        total
+    }
+
     fn spec(code: &str) -> mlua::Result<AttachmentSpec> {
         let lua = Lua::new();
         let table: Table = lua.load(code).eval()?;
@@ -1682,7 +1702,15 @@ mod tests {
             .unwrap()
             .call(())
             .unwrap();
-        assert_eq!(quests.raw_len(), 28, "quests/index.json + ficheiros");
+        // O total segue o DISCO (quests/index.json + ficheiros): um número
+        // fixo ficava velho a cada quest nova (28 vs 31) e falhava sempre.
+        let expected_quests = count_quests_on_disk(&root);
+        assert!(expected_quests > 0, "quests/index.json + ficheiros");
+        assert_eq!(
+            quests.raw_len() as u64,
+            expected_quests,
+            "quests/index.json + ficheiros"
+        );
         let skills: Table = rules.get::<Function>("skills").unwrap().call(()).unwrap();
         assert_eq!(skills.raw_len(), 8, "data/progression.json");
         let boss: i64 = rules
