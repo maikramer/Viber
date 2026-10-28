@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -78,6 +79,10 @@ pub fn decode(line: &str) -> Option<NetMsg> {
 struct Shared {
     inbound: Mutex<Vec<NetMsg>>,
     outbound: Mutex<Vec<NetMsg>>,
+    /// A ligação morreu (par desligou/erro de rede): o `net_sync` deixa de
+    /// empilhar mensagens — sem isto o `outbound` crescia para sempre
+    /// (poses a 20 Hz) e cada `act` ia para um tubo morto.
+    closed: AtomicBool,
 }
 
 #[derive(Resource)]
@@ -124,12 +129,14 @@ fn pump(shared: Arc<Shared>, stream: TcpStream) {
             Err(_) => break,
         }
     }
+    shared.closed.store(true, Ordering::Relaxed);
 }
 
 fn start(role: NetRole) -> Option<NetLink> {
     let shared = Arc::new(Shared {
         inbound: Mutex::new(Vec::new()),
         outbound: Mutex::new(Vec::new()),
+        closed: AtomicBool::new(false),
     });
     match &role {
         NetRole::Off => return None,
@@ -166,6 +173,10 @@ pub fn net_sync(
     mut actions: Option<ResMut<crate::input_map::ActionState>>,
 ) {
     let Some(link) = link else { return };
+    // Tubo morto (par desligou): não empilhar poses/ações para sempre.
+    if link.shared.closed.load(Ordering::Relaxed) {
+        return;
+    }
     let (attack_just, interact_just) = actions
         .as_deref()
         .map(|a| (a.attack_just, a.interact_just))
