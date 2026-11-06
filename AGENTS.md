@@ -60,7 +60,11 @@ pela CLI, pelo bridge e pelo editor.
   editado (estático = poses finais).
 * **Mais ferramentas (paridade com o editor):** `viber tool settle SEL` (assenta no terreno
   atual — depois de pincéis; um grupo assenta os filhos; tolerância 2 cm, silencioso num
-  estático acabado de bakear), `viber tool canonicalize [SEL]` (poses canónicas sem mudar a
+  estático acabado de bakear). A categoria do `*_precompute.json` decide o modo: **building/
+  terrain** desce até a base INTEIRA tocar (min da pegada − 3 cm), **prop/furniture/vegetation**
+  inclina pela normal MÉDIA da pegada (preserva a pose autoral), **humanoid/creature** e assets
+  sem sidecar ficam verticais; `settle="keep"` no nó (pontes, arcos, docas) não toca.
+  `viber tool canonicalize [SEL]` (poses canónicas sem mudar a
   pose; idempotente), `viber scene catalog|add TAG|drop GLB --at "x y z"` (o Add Node e o
   drag-drop do editor; `--at` é MUNDO, convertido para o pai com `scene::pose::world_frame`),
   `viber terrain paint` (camada do pool, sidecar `.paint`). Bridge: `viber.tool.settle|

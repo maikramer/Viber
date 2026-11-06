@@ -61,7 +61,7 @@ chamada.
 | `viber.scene.files` | a pasta do mundo em árvore JSON (world/scene/lua/glb/…) |
 | `viber.tool.list` | enumera as receitas `<Scatter>` (geradores) do mundo |
 | `viber.tool.scatter` | recalcula o grupo `generated-by` de um gerador sobre o terreno ATUAL (transação desfazível) |
-| `viber.tool.settle` | assenta entidades/grupo no terreno atual (útil depois de pincéis) |
+| `viber.tool.settle` | assenta no terreno atual (útil depois de pincéis): edifícios descem até a base inteira tocar, props inclinam pela normal média da pegada, `settle="keep"` não toca |
 | `viber.tool.canonicalize` | reescreve poses na forma canónica sem as mudar (diffs estáveis) |
 
 ## As quatro capacidades

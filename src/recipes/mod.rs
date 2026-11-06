@@ -1558,6 +1558,10 @@ fn parse_common(node: &XmlNode, ctx: &mut ParseCtx) -> Result<(Common, Vec<(Stri
             // id de uma receita — sem efeito no runtime.
             "generated-by" | "id"
                 if matches!(node.tag.to_ascii_lowercase().as_str(), "group" | "scatter") => {}
+            // `settle="sink|tilt|upright|keep"` é uma DICA do
+            // `scene::tools::settle` (como assentar o nó). A pose já vem assada
+            // do documento e o runtime não corre a ferramenta: sem efeito aqui.
+            "settle" => {}
             "resource-yield" => common
                 .props
                 .push(("resource-yield".into(), value.trim().to_string())),

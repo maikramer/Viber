@@ -28,6 +28,23 @@ use crate::xml::NodeOrigin;
 /// Diferença de cota (m) abaixo da qual `settle` não reescreve um nó.
 const SETTLE_TOLERANCE: f32 = 0.02;
 
+/// Abaixo deste ângulo (rad, ~1,5°) o tilt de um prop é ruído de diff.
+const SETTLE_MIN_TILT: f32 = 0.026;
+
+/// Acima deste declive (rad, ~60°) o prop está numa parede: não inclina.
+const SETTLE_MAX_SLOPE: f32 = 1.05;
+
+/// Edifícios descem este tanto abaixo do ponto MAIS BAIXO da base: a amostragem
+/// é bilinear (não exata) e sem a folga aparece uma lâmina de ar no lado baixo.
+const SETTLE_BUILDING_SINK: f32 = 0.03;
+
+/// Queda da base (m) a partir da qual o sink de um edifício merece aviso — pode
+/// ser uma encosta a sério ou uma base que paira sobre um vão.
+const SETTLE_SINK_WARN: f32 = 1.5;
+
+/// Declive (rad, ~35°) a partir do qual o tilt de um prop merece aviso.
+const SETTLE_WARN_SLOPE: f32 = 0.61;
+
 /// Raio de ocupação de uma instância já existente quando o template não declara pegada.
 const DEFAULT_FOOTPRINT: f32 = 0.8;
 
@@ -511,10 +528,209 @@ fn footprint_for(
     radius
 }
 
+/// Categoria de um asset lida do sidecar `<stem>_precompute.json` (ao lado do GLB).
+/// `None` = sem sidecar (personagens antigas, composições): o `settle` mantém o
+/// comportamento antigo — vertical, só o Y do pivô.
+fn category_for(
+    roots: &[PathBuf],
+    url: &str,
+    cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(hit) = cache.get(url) {
+        return hit.clone();
+    }
+    let rel = url.trim_start_matches('/');
+    let category = roots
+        .iter()
+        .map(|root| root.join(rel))
+        .find(|path| path.is_file())
+        .and_then(|path| {
+            let stem = path.file_stem()?.to_str()?;
+            let base = stem
+                .strip_suffix("_lod0")
+                .or_else(|| stem.strip_suffix("_lod1"))
+                .or_else(|| stem.strip_suffix("_lod2"))
+                .unwrap_or(stem);
+            let sidecar = path.with_file_name(format!("{base}_precompute.json"));
+            let text = std::fs::read_to_string(sidecar).ok()?;
+            let doc: Value = serde_json::from_str(&text).ok()?;
+            doc.get("category")?.as_str().map(str::to_owned)
+        });
+    cache.insert(url.to_string(), category.clone());
+    category
+}
+
+/// AABB de cena de um GLB, lido do disco e cacheado por URL.
+fn bounds_for(
+    roots: &[PathBuf],
+    url: &str,
+    cache: &mut HashMap<String, Option<crate::glb_bounds::GlbBounds>>,
+) -> Option<crate::glb_bounds::GlbBounds> {
+    if let Some(hit) = cache.get(url) {
+        return *hit;
+    }
+    let rel = url.trim_start_matches('/');
+    let bounds = roots
+        .iter()
+        .map(|root| root.join(rel))
+        .find(|path| path.is_file())
+        .and_then(|path| crate::glb_bounds::read(&path));
+    cache.insert(url.to_string(), bounds);
+    bounds
+}
+
+/// Como `settle` assenta um nó: a categoria do asset (precompute) decide, e
+/// `settle="…"` no próprio nó manda sobre ela.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeatMode {
+    /// Edifícios/landforms: desce até a base INTEIRA tocar o chão (sem tilt).
+    Sink,
+    /// Props: inclina pela normal MÉDIA da pegada (preserva a pose autoral).
+    Tilt,
+    /// Criaturas e assets sem metadados: vertical, só o Y do pivô.
+    Upright,
+    /// `settle="keep"`: não toca (pontes, docas, arcos — a base paira sobre um vão).
+    Keep,
+}
+
+impl SeatMode {
+    fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "sink" => Some(Self::Sink),
+            "tilt" => Some(Self::Tilt),
+            "upright" => Some(Self::Upright),
+            "keep" | "none" => Some(Self::Keep),
+            _ => None,
+        }
+    }
+
+    fn from_category(category: Option<&str>) -> Self {
+        match category {
+            Some("building") | Some("terrain") => Self::Sink,
+            Some("humanoid") | Some("creature") => Self::Upright,
+            Some(_) => Self::Tilt,
+            None => Self::Upright,
+        }
+    }
+}
+
+/// Plano médio do terreno sob a base: `h(x,z) = a·x + b·z + c`.
+#[derive(Debug, Clone, Copy)]
+struct BasePlane {
+    a: f32,
+    b: f32,
+    c: f32,
+    /// Cota mais baixa amostrada — onde a base toca primeiro.
+    min_h: f32,
+}
+
+impl BasePlane {
+    fn height_at(self, x: f32, z: f32) -> f32 {
+        self.a * x + self.b * z + self.c
+    }
+
+    fn normal(self) -> Vec3 {
+        Vec3::new(-self.a, 1.0, -self.b).normalize_or_zero()
+    }
+}
+
+/// Primeiro `<GltfScene>` da subárvore (o próprio alvo conta).
+fn first_gltf(doc: &SceneDoc, node: &NodeRef) -> Option<NodeRef> {
+    if doc
+        .node(node)
+        .is_some_and(|xml| xml.tag.eq_ignore_ascii_case("gltfscene"))
+    {
+        return Some(node.clone());
+    }
+    let count = doc.children(node).map_or(0, Vec::len);
+    (0..count).find_map(|index| first_gltf(doc, &node.child(index)))
+}
+
+/// Instâncias de um gerador (`<Group generated-by>`) já saíram alinhadas no
+/// bake; reaplicar o tilt dobrava o ângulo.
+fn in_generated_group(doc: &SceneDoc, node: &NodeRef) -> bool {
+    let mut current = node.parent();
+    while let Some(at) = current {
+        if doc
+            .node(&at)
+            .is_some_and(|xml| xml.attr("generated-by").is_some())
+        {
+            return true;
+        }
+        current = at.parent();
+    }
+    false
+}
+
+/// Amostra a base (retângulo do AABB local na cota `bounds.min.y`) no mundo e
+/// ajusta o plano por mínimos quadrados. `world` transforma modelo→mundo.
+fn base_plane(
+    bounds: crate::glb_bounds::GlbBounds,
+    world: Affine3A,
+    sample: impl Fn(f32, f32) -> f32,
+) -> BasePlane {
+    let half_x = (bounds.max.x - bounds.min.x) * 0.5;
+    let half_z = (bounds.max.z - bounds.min.z) * 0.5;
+    // ~1 amostra por metro de meia-largura, 2..8 por eixo (9..81 pontos).
+    let n = (half_x.max(half_z).ceil() as usize).clamp(2, 8);
+    let mut points = Vec::with_capacity((n + 1) * (n + 1));
+    let mut min_h = f32::INFINITY;
+    for iu in 0..=n {
+        let u = iu as f32 / n as f32;
+        for iv in 0..=n {
+            let v = iv as f32 / n as f32;
+            let local = Vec3::new(
+                bounds.min.x.lerp(bounds.max.x, u),
+                bounds.min.y,
+                bounds.min.z.lerp(bounds.max.z, v),
+            );
+            let p = world.transform_point3(local);
+            let h = sample(p.x, p.z);
+            min_h = min_h.min(h);
+            points.push((p.x as f64, p.z as f64, h as f64));
+        }
+    }
+    let count = points.len() as f64;
+    let mx = points.iter().map(|p| p.0).sum::<f64>() / count;
+    let mz = points.iter().map(|p| p.1).sum::<f64>() / count;
+    let mh = points.iter().map(|p| p.2).sum::<f64>() / count;
+    let (mut sxx, mut szz, mut sxz, mut sxh, mut szh) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (x, z, h) in &points {
+        let dx = x - mx;
+        let dz = z - mz;
+        let dh = h - mh;
+        sxx += dx * dx;
+        szz += dz * dz;
+        sxz += dx * dz;
+        sxh += dx * dh;
+        szh += dz * dh;
+    }
+    // Coordenadas centradas na média: as cotas do mundo (centenas de metros)
+    // deixavam a matriz normal mal condicionada em f32.
+    let det = sxx * szz - sxz * sxz;
+    let (a, b) = if det.abs() > 1e-9 {
+        (
+            ((sxh * szz - szh * sxz) / det) as f32,
+            ((szh * sxx - sxh * sxz) / det) as f32,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    BasePlane {
+        a,
+        b,
+        c: mh as f32 - a * mx as f32 - b * mz as f32,
+        min_h,
+    }
+}
+
 /// Assenta no terreno ATUAL do documento (o heightmap com as pinceladas, gravadas ou não):
 /// aplicado a um grupo (`<Group>`, o resultado de um scatter…) assenta os filhos diretos; a
-/// outro nó, assenta-o a ele. O pivô vai para o chão em XZ mundo (+ `offset`); rotação e
-/// escala ficam. Só documento — sem engine, exato num mundo estático (poses finais).
+/// outro nó, assenta-o a ele. A categoria do asset (sidecar `_precompute.json`) decide:
+/// edifícios/landforms descem até a base inteira tocar o chão, props inclinam pela normal
+/// MÉDIA da pegada e criaturas ficam verticais. `settle="keep"` no nó (pontes, arcos, docas
+/// — a base paira sobre água/vão) não toca. Só documento — sem engine, exato num mundo
+/// estático (poses finais).
 pub fn settle(doc: &mut SceneDoc, selector: &str, offset: f32) -> Result<ToolOutput> {
     let node = doc.resolve(selector)?;
     let targets: Vec<NodeRef> = {
@@ -532,6 +748,9 @@ pub fn settle(doc: &mut SceneDoc, selector: &str, offset: f32) -> Result<ToolOut
     };
     // Carrega o heightmap uma vez (falha clara num mundo sem terreno pré-gerado).
     doc.terrain_mut()?;
+    let roots = doc_asset_roots(doc);
+    let mut bounds_cache: HashMap<String, Option<crate::glb_bounds::GlbBounds>> = HashMap::new();
+    let mut categories: HashMap<String, Option<String>> = HashMap::new();
     let mut ops = Vec::new();
     let mut warnings = Vec::new();
     for target in &targets {
@@ -543,31 +762,125 @@ pub fn settle(doc: &mut SceneDoc, selector: &str, offset: f32) -> Result<ToolOut
             warnings.push(format!("{}: pose ilegível — saltado", doc.selector(target)));
             continue;
         };
-        let frame = super::pose::world_frame(doc, &parent);
-        let world = frame.transform_point3(local.translation);
-        let ground = doc
-            .terrain
-            .as_ref()
-            .expect("carregado")
-            .sample(world.x, world.z)
-            + offset;
-        // 2 cm: o bake assenta pela superfície da MALHA, e a amostra bilinear do heightmap
-        // difere uns milímetros — abaixo disto não é desassentamento, é ruído de diff.
-        if (world.y - ground).abs() < SETTLE_TOLERANCE {
+        let explicit = xml.attr("settle").and_then(SeatMode::parse);
+        if explicit == Some(SeatMode::Keep) {
             continue;
         }
+        let frame = super::pose::world_frame(doc, &parent);
+        let world = frame.transform_point3(local.translation);
+        let terrain = doc.terrain.as_ref().expect("carregado");
+        let center_h = terrain.sample(world.x, world.z);
+
+        // Geometria do alvo: primeiro `<GltfScene>` (URL + bounds) e categoria.
+        let gltf = first_gltf(doc, target);
+        let gltf_url = gltf
+            .as_ref()
+            .and_then(|node| doc.node(node))
+            .and_then(|xml| xml.attr("url"))
+            .map(str::to_owned);
+        let bounds = gltf_url
+            .as_deref()
+            .and_then(|url| bounds_for(&roots, url, &mut bounds_cache));
+        let category = gltf_url
+            .as_deref()
+            .and_then(|url| category_for(&roots, url, &mut categories));
+        if gltf_url.is_some() && bounds.is_none() {
+            // Asset ausente do pool (ou a regenerar): sem AABB não há pegada,
+            // e assentar pela categoria seria adivinhar.
+            warnings.push(format!(
+                "{}: GLB não encontrado ({}) — só o Y do pivô",
+                doc.selector(target),
+                gltf_url.as_deref().unwrap_or("?")
+            ));
+        }
+        let mode = explicit.unwrap_or_else(|| {
+            if in_generated_group(doc, target) {
+                SeatMode::Upright
+            } else {
+                SeatMode::from_category(category.as_deref())
+            }
+        });
+
+        let (_, node_rot, _) = super::pose::world_frame(doc, target)
+            .to_scale_rotation_translation();
+        let mut new_y = center_h + offset;
+        let mut new_world_rot = node_rot;
+        if let (Some(bounds), Some(gltf_node)) = (bounds, gltf.as_ref())
+            && mode != SeatMode::Upright
+        {
+            let glb_world = super::pose::world_frame(doc, gltf_node);
+            let plane = base_plane(bounds, glb_world, |x, z| terrain.sample(x, z));
+            match mode {
+                SeatMode::Sink => {
+                    // A base inteira toca: a cota é a do ponto MAIS BAIXO da
+                    // pegada; o lado alto enterra-se (encosta), como numa
+                    // fundação escavada.
+                    new_y = plane.min_h - SETTLE_BUILDING_SINK + offset;
+                    let drop = center_h - new_y;
+                    if drop > SETTLE_SINK_WARN {
+                        warnings.push(format!(
+                            "{}: base desce {drop:.2} m para assentar (encosta ou vão)",
+                            doc.selector(target)
+                        ));
+                    }
+                }
+                SeatMode::Tilt => {
+                    new_y = plane.height_at(world.x, world.z) + offset;
+                    let normal = plane.normal();
+                    let slope = normal.y.clamp(-1.0, 1.0).acos();
+                    if slope > SETTLE_MAX_SLOPE {
+                        warnings.push(format!(
+                            "{}: declive {:.0}° — inclinação ignorada",
+                            doc.selector(target),
+                            slope.to_degrees()
+                        ));
+                    } else if slope > SETTLE_MIN_TILT {
+                        // `tilt * node_rot` preserva o yaw e a pose autoral
+                        // (um tronco deitado continua deitado, só segue a encosta).
+                        new_world_rot = Quat::from_rotation_arc(Vec3::Y, normal) * node_rot;
+                        if slope > SETTLE_WARN_SLOPE {
+                            warnings.push(format!(
+                                "{}: inclina {:.0}°",
+                                doc.selector(target),
+                                slope.to_degrees()
+                            ));
+                        }
+                    }
+                }
+                SeatMode::Upright | SeatMode::Keep => {}
+            }
+        }
+
+        let angle = node_rot.angle_between(new_world_rot).abs();
+        let rotation_changed = angle >= SETTLE_MIN_TILT;
+        // 2 cm: o bake assenta pela superfície da MALHA, e a amostra bilinear do heightmap
+        // difere uns milímetros — abaixo disto não é desassentamento, é ruído de diff.
+        if (world.y - new_y).abs() < SETTLE_TOLERANCE && !rotation_changed {
+            continue;
+        }
+        let (_, parent_rot, _) = frame.to_scale_rotation_translation();
         let settled = frame
             .inverse()
-            .transform_point3(bevy::math::Vec3::new(world.x, ground, world.z));
+            .transform_point3(bevy::math::Vec3::new(world.x, new_y, world.z));
         let pose = super::pose::Pose {
             translation: settled,
-            ..local
+            rotation: parent_rot.inverse() * new_world_rot,
+            scale: local.scale,
+        };
+        let parts = if rotation_changed {
+            super::pose::PoseParts {
+                translation: true,
+                rotation: true,
+                scale: false,
+            }
+        } else {
+            super::pose::PoseParts::TRANSLATION
         };
         ops.push(super::pose::pose_op(
             &doc.selector(target),
             &xml,
             pose,
-            super::pose::PoseParts::TRANSLATION,
+            parts,
         )?);
     }
     Ok(ToolOutput {
@@ -800,7 +1113,8 @@ pub enum ToolCommand {
         dry_run: bool,
     },
     /// Assenta no terreno atual: um grupo assenta os filhos diretos, outro nó assenta-se a si
-    /// (depois de editar o terreno, props/árvores ficam enterrados ou a flutuar)
+    /// (edifícios descem até a base tocar o chão; props inclinam pela normal média da pegada;
+    /// `settle="keep"` no nó não toca — pontes/arcos)
     Settle {
         selector: String,
         /// Metros acima do chão (pivô na base = 0)
@@ -874,3 +1188,72 @@ pub fn run_cli(world: &Path, command: ToolCommand) -> Result<Value> {
         }
     }
 }
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    #[test]
+    fn seat_mode_maps_the_precompute_categories() {
+        assert_eq!(SeatMode::from_category(Some("building")), SeatMode::Sink);
+        assert_eq!(SeatMode::from_category(Some("terrain")), SeatMode::Sink);
+        assert_eq!(SeatMode::from_category(Some("prop")), SeatMode::Tilt);
+        assert_eq!(SeatMode::from_category(Some("furniture")), SeatMode::Tilt);
+        assert_eq!(SeatMode::from_category(Some("vegetation")), SeatMode::Tilt);
+        assert_eq!(SeatMode::from_category(Some("humanoid")), SeatMode::Upright);
+        assert_eq!(SeatMode::from_category(Some("creature")), SeatMode::Upright);
+        assert_eq!(SeatMode::from_category(None), SeatMode::Upright);
+        assert_eq!(SeatMode::parse("keep"), Some(SeatMode::Keep));
+        assert_eq!(SeatMode::parse("SINK"), Some(SeatMode::Sink));
+        assert_eq!(SeatMode::parse("nada"), None);
+    }
+
+    #[test]
+    fn base_plane_fits_the_average_slope() {
+        let bounds = crate::glb_bounds::GlbBounds {
+            min: Vec3::new(-2.0, 0.0, -1.5),
+            max: Vec3::new(2.0, 3.0, 1.5),
+        };
+        let plane = base_plane(bounds, Affine3A::IDENTITY, |x, z| 10.0 + 0.1 * x + 0.05 * z);
+        assert!((plane.a - 0.1).abs() < 1e-4, "a={}", plane.a);
+        assert!((plane.b - 0.05).abs() < 1e-4, "b={}", plane.b);
+        assert!((plane.height_at(0.0, 0.0) - 10.0).abs() < 1e-4);
+        // O canto mais baixo (x=-2, z=-1.5) é o ponto onde a base toca primeiro.
+        assert!((plane.min_h - 9.725).abs() < 1e-4, "min={}", plane.min_h);
+        let n = plane.normal();
+        assert!(n.y > 0.99 && n.x < 0.0 && n.z < 0.0, "normal={n:?}");
+    }
+
+    #[test]
+    fn base_plane_on_flat_ground_has_no_slope() {
+        let bounds = crate::glb_bounds::GlbBounds {
+            min: Vec3::new(-3.0, 0.0, -3.0),
+            max: Vec3::new(3.0, 2.0, 3.0),
+        };
+        let plane = base_plane(bounds, Affine3A::IDENTITY, |_, _| 42.0);
+        assert!(plane.a.abs() < 1e-5 && plane.b.abs() < 1e-5);
+        assert!((plane.min_h - 42.0).abs() < 1e-5);
+        assert!((plane.height_at(7.0, -9.0) - 42.0).abs() < 1e-5);
+        assert!((plane.normal().y - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn base_plane_follows_a_rotated_footprint() {
+        // A mesma encosta com a pegada rodada 90°: a normal continua a apontar
+        // para o mesmo sítio (o plano é o mesmo; só a caixa roda).
+        let bounds = crate::glb_bounds::GlbBounds {
+            min: Vec3::new(-2.0, 0.0, -1.0),
+            max: Vec3::new(2.0, 2.0, 1.0),
+        };
+        let plane = base_plane(
+            bounds,
+            Affine3A::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            |_x, z| 5.0 - 0.08 * z,
+        );
+        // Rodada, a pegada longa passa a correr em Z; a normal é (0,1,+0.08)/|…|.
+        let n = plane.normal();
+        assert!((n.z - (0.08f32 / (1.0f32 + 0.08 * 0.08).sqrt())).abs() < 1e-3, "n={n:?}");
+        assert!((plane.height_at(0.0, 0.0) - 5.0).abs() < 1e-4);
+    }
+}
+
