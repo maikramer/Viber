@@ -442,8 +442,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
-    // viber.sound_loop(id, clip [, {pitch, volume, x, y, z}]) /
-    // viber.sound_stop(id). `clip` = nome do registry ou caminho sob sfx_dir.
+    // viber.sound_loop(id, clip [, {pitch, volume, x, y, z, bus}]) /
+    // viber.sound_stop(id). `clip` = nome do registry ou caminho sob sfx_dir;
+    // `bus` = "sfx" (default) | "ambience" (vento, chuva, insetos).
     api.set(
         "sound_loop",
         lua.create_function(|lua, (id, clip, opts): (String, String, Option<Table>)| {
@@ -455,6 +456,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut pitch = 1.0_f64;
             let mut volume = 1.0_f32;
             let mut position = None;
+            let mut ambience = false;
             let origin_y = lua
                 .app_data_ref::<ScriptCtx>()
                 .map(|ctx| ctx.origin.y)
@@ -475,6 +477,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         ));
                     }
                     volume = value;
+                }
+                if let Ok(bus) = opts.get::<String>("bus") {
+                    ambience = match bus.as_str() {
+                        "ambience" | "ambiente" => true,
+                        "sfx" => false,
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "viber.sound_loop: bus '{other}' inválido (sfx|ambience)"
+                            )));
+                        }
+                    };
                 }
                 let x = opts.get::<f32>("x").ok();
                 let y = opts.get::<f32>("y").ok();
@@ -508,6 +521,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     pitch,
                     volume,
                     position,
+                    ambience,
                     owner,
                 });
             Ok(())
@@ -1806,6 +1820,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(lua
                 .app_data_ref::<ScriptCtx>()
                 .and_then(|ctx| ctx.scene_entry.clone()))
+        })?,
+    )?;
+    // viber.biome() -> id do `BiomeRegion` atual (nil fora de um bioma ou
+    // dentro de uma cena de interior). A música de bioma é escolhida na
+    // engine; o script usa isto para as camadas de ambiência.
+    api.set(
+        "biome",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<ScriptCtx>()
+                .and_then(|ctx| ctx.biome.clone()))
         })?,
     )?;
     api.set(

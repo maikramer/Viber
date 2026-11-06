@@ -56,6 +56,9 @@ pub struct ScriptLoopParams {
     pub pitch: f64,
     pub volume: f32,
     pub position: Option<Vec3>,
+    /// `true` = bus de AMBIENTE (`<AudioMixer ambience>`); `false` = SFX.
+    /// Loops de vento/chuva/insetos não podem ficar presos ao slider de SFX.
+    pub ambience: bool,
     /// Entidade que pediu o loop; `None` = world-scoped (REPL/tick).
     pub owner: Option<bevy::prelude::Entity>,
 }
@@ -565,7 +568,30 @@ pub fn mixer_sync(
 
 #[derive(Debug, Default, Resource)]
 pub struct ScriptLoopPlayback {
-    live: std::collections::HashMap<String, (String, Handle<AudioInstance>)>,
+    /// `id → (url, handle, bus de ambiente?)`.
+    live: std::collections::HashMap<String, (String, Handle<AudioInstance>, bool)>,
+}
+
+/// Zona automática (sem override de script), em ordem de precedência:
+/// combate > cena > bioma (se a layer existe) > posição (`bgm_zone`).
+///
+/// O bioma é o `BiomeRegion.id` atual — a layer `<MusicLayer layer="desert">`
+/// acende por posição sem o script precisar de forçar `viber.music.layer`
+/// (que ganharia ao combate e deixaria o Vale sem música de luta).
+pub fn auto_zone(
+    combat: Option<&str>,
+    scene_zone: Option<&str>,
+    biome: Option<&str>,
+    has_layer: impl Fn(&str) -> bool,
+    x: f32,
+    z: f32,
+    scene: Option<&crate::worldsys::InteriorSceneConfig>,
+) -> String {
+    combat
+        .or(scene_zone)
+        .map(str::to_owned)
+        .or_else(|| biome.filter(|id| has_layer(id)).map(str::to_owned))
+        .unwrap_or_else(|| bgm_zone(x, z, scene).to_string())
 }
 
 /// Move each layer's volume toward its zone target every frame.
@@ -574,6 +600,7 @@ pub fn music_driver(
     players: Query<&GlobalTransform, With<crate::player::Player>>,
     scene: Option<Res<crate::worldsys::InteriorSceneConfig>>,
     current_scene: Option<Res<crate::scene_loader::CurrentScene>>,
+    biome: Option<Res<crate::ambient::CurrentBiome>>,
     mut combat: ResMut<CombatMusicState>,
     forced: Option<Res<MusicLayerOverride>>,
     mut layers: Query<(&MusicLayerTag, &LoopInstance, &mut LoopVolume)>,
@@ -595,13 +622,16 @@ pub fn music_driver(
             .and_then(|current| current.id.as_deref()),
         |id| layers.iter().any(|(tag, _, _)| tag.layer == id),
     );
-    // Script (`viber.music.layer`) ganha à zona e ao combate. Sem override,
-    // combate ativo ganha à zona (boss > battle).
-    let auto = combat
-        .active_layer(time.elapsed_secs_f64())
-        .map(str::to_owned)
-        .or_else(|| scene_zone.map(str::to_owned))
-        .unwrap_or_else(|| bgm_zone(pos.x, pos.z, scene.as_deref()).to_string());
+    let auto = auto_zone(
+        combat.active_layer(time.elapsed_secs_f64()),
+        scene_zone,
+        biome.as_ref().and_then(|b| b.id.as_deref()),
+        |id| layers.iter().any(|(tag, _, _)| tag.layer.as_str() == id),
+        pos.x,
+        pos.z,
+        scene.as_deref(),
+    );
+    // Script (`viber.music.layer`) ganha à zona e ao combate.
     let zone = forced
         .as_ref()
         .and_then(|over| over.0.clone())
@@ -624,10 +654,14 @@ pub fn music_driver(
 }
 
 /// Resolve `clip` de `viber.sound_loop`: nome do registry ou caminho relativo
-/// ao `sfx_dir`.
+/// ao `sfx_dir`. Caminho SEM extensão ganha `.ogg` (a convenção do pool) —
+/// `ambient/fire_loop` deixava de carregar e o loop ficava mudo.
 fn resolve_loop_clip(clip: &str, config: &crate::config::GameConfig) -> String {
     if let Some(known) = crate::luau::sfx::sfx_clip_from_str(clip) {
-        config.sfx_path(known.file())
+        return config.sfx_path(known.file());
+    }
+    if std::path::Path::new(clip).extension().is_none() {
+        config.sfx_path(&format!("{clip}.ogg"))
     } else {
         config.sfx_path(clip)
     }
@@ -640,6 +674,7 @@ pub fn script_sound_loops(
     server: Res<AssetServer>,
     config: Option<Res<crate::config::GameConfig>>,
     channel: Option<Res<AudioChannel<SfxBus>>>,
+    ambience_channel: Option<Res<AudioChannel<AmbienceBus>>>,
     mut instances: ResMut<Assets<AudioInstance>>,
     editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
     listeners: Query<&GlobalTransform, With<Camera3d>>,
@@ -654,7 +689,7 @@ pub fn script_sound_loops(
         .cloned()
         .collect();
     for id in stale {
-        if let Some((_, handle)) = playback.live.remove(&id)
+        if let Some((_, handle, _)) = playback.live.remove(&id)
             && let Some(mut snd) = instances.get_mut(&handle)
         {
             snd.stop(AudioTween::linear(Duration::from_millis(80)));
@@ -665,23 +700,37 @@ pub fn script_sound_loops(
     for (id, params) in &loops.wanted {
         let url = resolve_loop_clip(&params.clip, &config);
         let restart = match playback.live.get(id) {
-            Some((clip, _)) => clip != &url,
+            Some((clip, _, ambience)) => clip != &url || *ambience != params.ambience,
             None => true,
         };
         if restart {
-            if let Some((_, handle)) = playback.live.remove(id)
+            if let Some((_, handle, _)) = playback.live.remove(id)
                 && let Some(mut snd) = instances.get_mut(&handle)
             {
                 snd.stop(AudioTween::linear(Duration::from_millis(40)));
             }
-            let handle = channel
-                .play(server.load(url.clone()))
-                .looped()
-                .with_volume(DB_SILENCE)
-                .handle();
-            playback.live.insert(id.clone(), (url, handle));
+            // Vento/chuva/insetos vão pelo bus de AMBIENTE; o resto pelo SFX.
+            let handle = if params.ambience {
+                let Some(ambience_channel) = ambience_channel.as_deref() else {
+                    continue;
+                };
+                ambience_channel
+                    .play(server.load(url.clone()))
+                    .looped()
+                    .with_volume(DB_SILENCE)
+                    .handle()
+            } else {
+                channel
+                    .play(server.load(url.clone()))
+                    .looped()
+                    .with_volume(DB_SILENCE)
+                    .handle()
+            };
+            playback
+                .live
+                .insert(id.clone(), (url, handle, params.ambience));
         }
-        let Some((_, handle)) = playback.live.get(id) else {
+        let Some((_, handle, _)) = playback.live.get(id) else {
             continue;
         };
         let Some(mut snd) = instances.get_mut(handle) else {
@@ -748,6 +797,53 @@ mod tests {
     #[test]
     fn test_bgm_zone_explore_default() {
         assert_eq!(bgm_zone(300.0, 300.0, None), "explore");
+    }
+
+    /// Precedência da zona automática: combate > cena > bioma (com layer) >
+    /// posição. O bioma NUNCA pode roubar o combate — para isso existe o
+    /// `auto_zone` e não um override de script.
+    #[test]
+    fn test_auto_zone_priority() {
+        let all = |_: &str| true;
+        let only_core = |layer: &str| matches!(layer, "village" | "mountain" | "explore");
+        assert_eq!(
+            auto_zone(
+                Some("boss"),
+                Some("menu"),
+                Some("desert"),
+                all,
+                300.0,
+                300.0,
+                None
+            ),
+            "boss"
+        );
+        assert_eq!(
+            auto_zone(None, Some("menu"), Some("desert"), all, 0.0, 0.0, None),
+            "menu"
+        );
+        assert_eq!(
+            auto_zone(None, None, Some("desert"), all, 300.0, 300.0, None),
+            "desert"
+        );
+        // Bioma sem layer declarada: cai na zona de posição.
+        assert_eq!(
+            auto_zone(None, None, Some("desert"), only_core, 0.0, 0.0, None),
+            "village"
+        );
+        assert_eq!(
+            auto_zone(None, None, None, only_core, 0.0, -300.0, None),
+            "mountain"
+        );
+        let interior = crate::worldsys::InteriorSceneConfig {
+            min: [2500.0, 2500.0],
+            max: [2900.0, 2830.0],
+            ..crate::worldsys::InteriorSceneConfig::default()
+        };
+        assert_eq!(
+            auto_zone(None, None, None, only_core, 2700.0, 2700.0, Some(&interior)),
+            "dungeon"
+        );
     }
 
     /// O menu declara `layer="menu"` mas o acampamento cai na zona `village`:

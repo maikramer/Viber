@@ -158,6 +158,9 @@ pub struct ScriptCtx {
     pub scene: Option<String>,
     /// Entrada por onde se chegou (`viber.scene_entry`).
     pub scene_entry: Option<String>,
+    /// Bioma atual (`viber.biome`) — `BiomeRegion.id` do vale. `None` fora de
+    /// um bioma e dentro de cenas de interior (a bolsa fica fora do mapa).
+    pub biome: Option<String>,
     /// Ids das cenas do projeto (validação de `viber.change_scene`).
     pub scene_ids: std::sync::Arc<Vec<String>>,
 }

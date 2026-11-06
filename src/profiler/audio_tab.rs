@@ -28,7 +28,7 @@ pub struct LayerSnapshot {
     pub base_volume: f32,
     /// Volume linear CORRENTE da layer (o crossfade do `music_driver`) —
     /// é o que prova a troca por zona (vila → `village`, Picos →
-    /// `mountain`…): a layer activa lê perto do `base_volume`, as outras a
+    /// `frozen-peaks`…): a layer activa lê perto do `base_volume`, as outras a
     /// caminhar para 0.
     pub volume: f32,
     pub paused: bool,
@@ -49,10 +49,23 @@ pub struct SinkSnapshot {
 
 /// Snapshot do tab Áudio.
 #[derive(Debug, Clone, Serialize)]
+pub struct ScriptLoopSnapshot {
+    pub id: String,
+    pub clip: String,
+    pub volume: f32,
+    /// `true` = bus de ambiente; `false` = SFX.
+    pub ambience: bool,
+    pub positioned: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AudioSnapshot {
     pub buses: BusSnapshot,
     pub layers: Vec<LayerSnapshot>,
     pub sinks: Vec<SinkSnapshot>,
+    /// Loops pedidos por scripts (`viber.sound_loop`) — não são entidades com
+    /// `LoopInstance`, por isso não entram em `sinks`.
+    pub script_loops: Vec<ScriptLoopSnapshot>,
     pub total: usize,
     pub playing: usize,
     pub paused: usize,
@@ -136,6 +149,24 @@ pub fn snapshot(world: &mut World) -> AudioSnapshot {
     }
     sinks.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut script_loops: Vec<ScriptLoopSnapshot> = world
+        .get_resource::<crate::music::ScriptSoundLoops>()
+        .map(|loops| {
+            loops
+                .wanted
+                .iter()
+                .map(|(id, params)| ScriptLoopSnapshot {
+                    id: id.clone(),
+                    clip: params.clip.clone(),
+                    volume: params.volume,
+                    ambience: params.ambience,
+                    positioned: params.position.is_some(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    script_loops.sort_by(|a, b| a.id.cmp(&b.id));
+
     AudioSnapshot {
         buses,
         layers,
@@ -146,6 +177,7 @@ pub fn snapshot(world: &mut World) -> AudioSnapshot {
         spatial,
         looping,
         sinks,
+        script_loops,
     }
 }
 
@@ -194,6 +226,19 @@ pub fn window_lines(snap: &AudioSnapshot) -> Vec<String> {
     if sorted.len() > 12 {
         lines.push(format!("  … +{} mais", sorted.len() - 12));
     }
+    if !snap.script_loops.is_empty() {
+        lines.push("script loops:".into());
+        for loop_ in &snap.script_loops {
+            lines.push(format!(
+                "  {} {} v={:.2} {}{}",
+                loop_.id,
+                loop_.clip,
+                loop_.volume,
+                if loop_.ambience { "[ambiente]" } else { "[sfx]" },
+                if loop_.positioned { " [pos]" } else { "" },
+            ));
+        }
+    }
     lines
 }
 
@@ -221,17 +266,37 @@ mod tests {
             LoopVolume(0.18),
         ));
         world.spawn((LoopInstance(Handle::default()), LoopVolume(0.3)));
+        // Loop pedido por script (fogueira) — não é entidade com LoopInstance.
+        let mut wanted = crate::music::ScriptSoundLoops::default();
+        wanted.wanted.insert(
+            "campfire".to_string(),
+            crate::music::ScriptLoopParams {
+                clip: "ambient/fire_loop.ogg".to_string(),
+                pitch: 1.0,
+                volume: 0.55,
+                position: None,
+                ambience: true,
+                owner: None,
+            },
+        );
+        world.insert_resource(wanted);
 
         let snap = snapshot(&mut world);
         assert_eq!(snap.total, 2);
         assert_eq!(snap.playing, 2);
         assert_eq!(snap.looping, 2);
         assert_eq!(snap.layers.len(), 1, "a layer BGM aparece no snapshot");
+        assert_eq!(snap.script_loops.len(), 1, "o loop de script aparece");
+        assert!(snap.script_loops[0].ambience);
         assert!(snap.buses.master > 0.0);
 
         let lines = window_lines(&snap);
         assert!(lines.iter().any(|l| l.contains("2 total")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("explore")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("campfire") && l.contains("[ambiente]")),
+            "{lines:?}"
+        );
         // O crossfade lê-se: o volume CORRENTE da layer aparece ao lado do
         // base (gauntlet p1 r2 — "dumps BGM bit-idênticos sem demonstrar
         // crossfade").

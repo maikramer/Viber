@@ -300,6 +300,8 @@ pub enum ScriptCommand {
         pitch: f64,
         volume: f32,
         position: Option<Vec3>,
+        /// `true` = bus de ambiente (`<AudioMixer ambience>`); `false` = SFX.
+        ambience: bool,
         /// Entidade cujo script pediu o loop (o loop morre com ela). `None`
         /// em chamadas fora de `on_update` (tick/REPL).
         owner: Option<Entity>,

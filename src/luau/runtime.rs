@@ -74,6 +74,8 @@ pub struct LuauRuntimeLocals<'w, 's> {
     /// Cena carregada e índice de cenas (`viber.scene_name`, `viber.change_scene`).
     pub scene: Option<bevy::ecs::system::Res<'w, crate::scene_loader::CurrentScene>>,
     pub scene_index: Option<bevy::ecs::system::Res<'w, crate::scene_loader::SceneIndex>>,
+    /// Bioma atual (`viber.biome`) — escrito pelo `biome_fog_system` 4×/s.
+    pub biome: Option<bevy::ecs::system::Res<'w, crate::ambient::CurrentBiome>>,
     /// Warn 1× por entidade sem rig/clip de gesto.
     pub gesture_warned: bevy::ecs::system::Local<'s, std::collections::HashSet<Entity>>,
     /// Snapshot partilhado de estradas/água (`viber.on_road`/`in_water`).
@@ -485,6 +487,7 @@ pub fn luau_update(
         }
         ctx.scene = scene_id;
         ctx.scene_entry = locals.scene.as_deref().and_then(|s| s.entry.clone());
+        ctx.biome = locals.biome.as_ref().and_then(|b| b.id.clone());
         if let Some(index) = locals.scene_index.as_ref()
             && (index.is_changed() || ctx.scene_ids.is_empty())
         {
@@ -1615,6 +1618,7 @@ pub fn luau_update(
                 pitch,
                 volume,
                 position,
+                ambience,
                 owner,
             } => {
                 if let Some(loops) = locals.sound_loops.as_deref_mut() {
@@ -1625,6 +1629,7 @@ pub fn luau_update(
                             pitch,
                             volume,
                             position,
+                            ambience,
                             owner,
                         },
                     );
