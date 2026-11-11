@@ -406,14 +406,14 @@ fn real_crate_collision_glb_root_cause_and_fix() {
     // Valores do market_stall_collision.glb (o wooden_crate saiu do catálogo
     // na regeneração PBR do pool, 2026-09-08 — o contrato é o mesmo). Os
     // números acompanham a regen do pool de 2026-11-06 (Vael 3c711b5:
-    // 163/966/322 → 162/960/320); o contrato POSITION-only + índices u16 é o
-    // mesmo.
+    // 163/966/322 → 162/960/320) e a do toldo liso de 2026-11-11
+    // (162/960 → 161/954); o contrato POSITION-only + índices u16 é o mesmo.
     assert_eq!(
         positions.len(),
-        162,
+        161,
         "vértices do market_stall_collision.glb"
     );
-    assert_eq!(indices.len(), 960, "índices u16");
+    assert_eq!(indices.len(), 954, "índices u16");
     assert!(
         positions.iter().all(|p| p.iter().all(|c| c.is_finite())),
         "sem NaN/inf na geometria"
@@ -461,7 +461,7 @@ fn real_crate_collision_glb_root_cause_and_fix() {
 
     // E a escada resolve logo no 1.º degrau (flags de hoje).
     let (vtx, tris) = mesh_vertices_indices(&mesh_bevy).expect("extrator lê o mesh bevy");
-    assert_eq!(tris.len(), 320, "os 320 triângulos do GLB são recuperados");
+    assert_eq!(tris.len(), 318, "os 318 triângulos do GLB são recuperados");
     assert!(
         bake_trimesh_escalating(vtx, tris).is_ok(),
         "escada de flags: 1.º degrau basta para o GLB real"
