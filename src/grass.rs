@@ -929,16 +929,51 @@ fn build_tile(
     // acampamentos — terra seca a ler-se como leito.
     let mut wet_cells = [false; LATTICE * LATTICE];
     let mut any_open = false;
+    let tile_max = origin + Vec2::splat(TILE);
+    let tile_has_water = terrain.water.iter().any(|w| {
+        let r = w
+            .carve_radius
+            .max(w.radius * w.mirror_reach * crate::terrain::water::CONTOUR_PEAK)
+            .max(w.water_width);
+        match w.kind {
+            crate::terrain::water::WaterKind::Lake => {
+                w.at.x + r >= origin.x
+                    && w.at.x - r <= tile_max.x
+                    && w.at.y + r >= origin.y
+                    && w.at.y - r <= tile_max.y
+            }
+            crate::terrain::water::WaterKind::River => {
+                if w.stations.len() == 1 {
+                    let s = w.stations[0];
+                    s.x + r >= origin.x
+                        && s.x - r <= tile_max.x
+                        && s.y + r >= origin.y
+                        && s.y - r <= tile_max.y
+                } else {
+                    w.stations.windows(2).any(|pair| {
+                        let (a, b) = (pair[0], pair[1]);
+                        let smin = a.min(b) - Vec2::splat(r);
+                        let smax = a.max(b) + Vec2::splat(r);
+                        smax.x >= origin.x
+                            && smin.x <= tile_max.x
+                            && smax.y >= origin.y
+                            && smin.y <= tile_max.y
+                    })
+                }
+            }
+        }
+    });
     for iz in 0..LATTICE {
         for ix in 0..LATTICE {
             let x = origin.x + ix as f32 * step;
             let z = origin.y + iz as f32 * step;
             let y = terrain.sample_mesh_surface(x, z);
             height[iz * LATTICE + ix] = y;
-            let wet = terrain
-                .water_surface_at(x, z)
-                .is_some_and(|surface| y <= surface + 0.25)
-                || terrain.in_water(x, z);
+            let wet = tile_has_water
+                && (terrain
+                    .water_surface_at(x, z)
+                    .is_some_and(|surface| y <= surface + 0.25)
+                    || terrain.in_water(x, z));
             wet_cells[iz * LATTICE + ix] = wet;
             // `within` rejeita pelo envelope da fita em O(1) antes do scan
             // O(estações) — 289 células × estradas pagavam o caminho inteiro
@@ -1049,8 +1084,10 @@ fn build_tile(
         // Wetland bonus: reeds crowd the waterline, the way a real bank does.
         // `wet_cells` (e não `blocked`): só a água dá o bónus — estrada,
         // pad e `<SpawnExclusion>` não são margem.
-        let near_water = terrain.water_surface_at(x, z).is_some() || nearby_water(&wet_cells, fx, fz);
-        let height_boost = if near_water && biome == GrassBiome::Swamp {
+        let height_boost = if biome == GrassBiome::Swamp
+            && tile_has_water
+            && (nearby_water(&wet_cells, fx, fz) || terrain.water_surface_at(x, z).is_some())
+        {
             1.35
         } else {
             1.0

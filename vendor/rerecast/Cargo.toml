@@ -81,7 +81,7 @@ version = "1"
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = ["glam"]
 optional = true
 default-features = false

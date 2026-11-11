@@ -1579,6 +1579,8 @@ pub fn stream_voxel_colliders(
     let edge = crate::terrain::plugin::chunk_edge(&runtime.spec);
     *repairs = 0;
 
+    let mut best_repair: Option<(f32, Entity, &Children)> = None;
+
     for (entity, column, has_collider, children) in &columns {
         let distance = nearest_column_distance(&anchors, column.coords, half, edge);
         match (has_collider.is_some(), distance) {
@@ -1613,30 +1615,38 @@ pub fn stream_voxel_colliders(
                     .try_remove::<RigidBody>()
                     .try_remove::<VoxelCollider>();
             }
-            // Coluna em banda sem collider: assar dos meshes já residentes
-            // (CPU-resident, zero cópia extra). 1 coluna por frame chega —
-            // o caso é teleporte, não streaming contínuo.
-            (false, d) if d <= keep_within && *repairs < 1 => {
-                let Some(children) = children else { continue };
-                let mut bake = ColumnColliderBake::new();
-                for kid in children.iter() {
-                    if let Ok((box_chunk, mesh3d)) = boxes.get(kid)
-                        && let Some(mesh) = meshes.get(&mesh3d.0)
-                    {
-                        bake.add_bevy_mesh(box_chunk.origin, mesh);
-                    }
-                }
-                // Sem `ready` aqui: a coluna reparada pode não ser a que está
-                // sob o herói, e o insert é diferido (o Rapier só a vê no
-                // frame seguinte) — o ramo `d <= 0` acima publica-o então.
-                if let Some(collider) = bake.bake() {
-                    commands
-                        .entity(entity)
-                        .try_insert((collider, RigidBody::Fixed, VoxelCollider));
-                    *repairs += 1;
+            // Coluna em banda sem collider: escolhe a MAIS PRÓXIMA do herói
+            // para assar (1 coluna por frame no máximo).
+            (false, d) if d <= keep_within => {
+                if let Some(children) = children
+                    && best_repair.as_ref().is_none_or(|(best_d, _, _)| d < *best_d)
+                {
+                    best_repair = Some((d, entity, children));
                 }
             }
             _ => {}
+        }
+    }
+
+    if *repairs < 1
+        && let Some((_, entity, children)) = best_repair
+    {
+        let mut bake = ColumnColliderBake::new();
+        for kid in children.iter() {
+            if let Ok((box_chunk, mesh3d)) = boxes.get(kid)
+                && let Some(mesh) = meshes.get(&mesh3d.0)
+            {
+                bake.add_bevy_mesh(box_chunk.origin, mesh);
+            }
+        }
+        // Sem `ready` aqui: a coluna reparada pode não ser a que está
+        // sob o herói, e o insert é diferido (o Rapier só a vê no
+        // frame seguinte) — o ramo `d <= 0` acima publica-o então.
+        if let Some(collider) = bake.bake() {
+            commands
+                .entity(entity)
+                .try_insert((collider, RigidBody::Fixed, VoxelCollider));
+            *repairs += 1;
         }
     }
 }

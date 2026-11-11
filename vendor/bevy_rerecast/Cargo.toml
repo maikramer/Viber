@@ -56,7 +56,7 @@ name = "bevy_rerecast"
 path = "src/lib.rs"
 
 [dependencies.bevy_app]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = ["std"]
 default-features = false
 

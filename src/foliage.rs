@@ -172,6 +172,14 @@ pub fn batch_tiles(
     // 2. Agrupa por (tile, mesh, material). O material entra na chave: dois
     //    props com a mesma mesh mas materiais distintos não podem partilhar
     //    o draw (o primeiro material pintava os dois).
+    let existing: std::collections::HashSet<(
+        IVec2,
+        AssetId<Mesh>,
+        AssetId<StandardMaterial>,
+    )> = tiles
+        .iter()
+        .map(|(_, tile)| (tile.key, tile.mesh_id, tile.material_id))
+        .collect();
     let mut groups: HashMap<
         (IVec2, AssetId<Mesh>, AssetId<StandardMaterial>),
         Vec<(Entity, Mat4, Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -181,14 +189,14 @@ pub fn batch_tiles(
             continue;
         }
         let pos = xf.translation();
-        if pos.distance(eye) > BATCH_RADIUS {
+        let t_key = tile_of(pos.x, pos.z);
+        if tile_center(t_key).distance(eye_xz) > BATCH_RADIUS {
             continue;
         }
-        let key = (
-            tile_of(pos.x, pos.z),
-            simple.mesh.id(),
-            simple.material.id(),
-        );
+        let key = (t_key, simple.mesh.id(), simple.material.id());
+        if existing.contains(&key) {
+            continue;
+        }
         groups.entry(key).or_default().push((
             entity,
             xf.to_matrix(),
@@ -196,13 +204,13 @@ pub fn batch_tiles(
             simple.material.clone(),
         ));
     }
+    const MAX_BATCHES_PER_FRAME: usize = 8;
+    let mut built_this_frame = 0usize;
     for ((key, mesh_id, material_id), members) in groups {
-        if members.len() < 2 {
-            continue;
+        if built_this_frame >= MAX_BATCHES_PER_FRAME {
+            break;
         }
-        if tiles.iter().any(|(_, tile)| {
-            tile.key == key && tile.mesh_id == mesh_id && tile.material_id == material_id
-        }) {
+        if members.len() < 2 {
             continue;
         }
         let Some(src) = mesh_assets.get(&members[0].2) else {
@@ -268,6 +276,7 @@ pub fn batch_tiles(
         for entity in member_entities {
             commands.entity(entity).insert(Visibility::Hidden);
         }
+        built_this_frame += 1;
     }
 }
 

@@ -64,6 +64,50 @@ e `VertexOutput.instance_index` com `@interpolate(flat)`, como no
   `cargo update -p prettyplease --precise 0.2.37` (o falhanço sem pin é um
   `syn::file::File: ParseQuote` dentro do bindgen, só no build `--features dlss`).
 
+## Ronda de atualização 2026-11-07
+
+* **`bevy` 0.20.0 → 0.20.1** (patch, crates.io 2026-10-28) no engine e no
+  editor; `rust-version` sobe 1.96/1.97 → **1.97.1** (o MSRV real do 0.20.1).
+  Zero alterações de API no nosso código: `cargo check --workspace
+  --all-targets` limpo à primeira. O patch traz 9 fixes: `ruzstd` 0.8→0.9,
+  `UninitBufferVec` a usar o size por entrada do shader, `ReflectDefault`
+  para `Option<T>`, evicção de entidades órfãs na travessia de ancestrais,
+  unicidade nos iteradores paralelos, dependência cíclica de shaders em
+  `bevy_render` e fog volumes a desaparecer perto do near-plane.
+* Manifests vendorizados: os pins `0.20.0-rc.2` → **`0.20.1`** (38 linhas nos
+  5 forks). Era um requisito pré-release que já resolvia para 0.20.x; passa a
+  dizer a versão que testamos.
+* `cargo update` das compatíveis: 139 pacotes (`icu_*` 2.3→2.4, `toml`
+  1.1→1.2, `notify` 8.2.1, `roxmltree` 0.21.2, `flate2` 1.1.11, `uuid`
+  1.29.1, `kira` 0.12.6, `ruzstd` 0.9.1, `tokio` 1.54.1, …). As deps
+  directas já estavam na última: `bevy_rapier3d` 0.37.0,
+  `bevy_kira_audio` 0.27.1, `mlua` 0.12.2, `image` 0.25.10, `dirs` 7.0.0,
+  `clap` 4.6.7. As 4 "behind latest" que o `cargo update` reporta são
+  transitivas presas por semver (`i_float`/`i_overlay`/`i_shape` do rapier,
+  `lua-src` do mlua).
+* **`glam` ganha uma 6.ª cópia (0.34.2)** via `kira 0.12.6`: o kira subiu o
+  glam interno e bevy/`bevy_math` continuam em 0.33.12 (`bevy_math 0.20.1`
+  declara `glam ^0.33.2`). A fronteira é interna do kira (spatial audio): o
+  `bevy_kira_audio` não expõe tipos glam ao nosso código e o workspace
+  compila.
+
+### Achados da ronda (pré-existentes, não bloqueiam o upgrade)
+
+* `tests/collider_bake.rs` pinava 163 vértices / 966 índices / 322 triângulos
+  do `market_stall_collision.glb`; a regen do pool (Vael `3c711b5`,
+  2026-11-06) deixou o asset em 162/960/320. Pins actualizados para o asset
+  vigente.
+* `luau::decision::tests::lua_api_intent_pt_multi_question` falha de forma
+  intermitente (~1 em 3 corridas paralelas) com `only one environment is
+  allowed per process` do ONNX Runtime: `celer-decision` e `celer-nlu` criam
+  um `Ort::Env` por `Runtime`, e dois runtimes vivos no mesmo processo
+  colidem. O teste ainda mascarava o erro (`kind="loaded"` com `ok=false`) —
+  passou a assertar `ok` e a mostrar o erro real. Fix de raiz: env
+  partilhado (`OnceLock`) nos crates do CelerAI.
+* `bridge::tests::test_bridge_end_to_end_headless` continua flaky sob carga
+  (a evicção do duplo buffer de `Messages<CursorMoved>` corre com o
+  `click`+`move` injectados) — passa isolado e na maioria das corridas.
+
 ## Follow-ups da ronda (veredictos ao vivo, 2026-10-18)
 
 * **Luau JIT ADOTADO** — feature cargo `luau-jit` (mlua 0.12, codegen do Luau,

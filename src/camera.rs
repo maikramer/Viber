@@ -221,6 +221,10 @@ pub struct AutoCameraInput {
 ///   after releasing.
 pub fn auto_camera_yaw(yaw_deg: f32, input: AutoCameraInput, dt: f32) -> f32 {
     let steering = input.seconds_since_steer < AUTO_FOLLOW_GRACE;
+    let backpedaling = !steering
+        && input.heading.is_some()
+        && input.speed >= AUTO_FOLLOW_MIN_SPEED
+        && input.heading_alignment < AUTO_FOLLOW_ALIGN_MIN;
     match input.heading {
         // Fast follow only FORA do steering: ele persegue o heading, que é
         // relativo à câmera — somado ao steering giraria em espiral.
@@ -239,8 +243,10 @@ pub fn auto_camera_yaw(yaw_deg: f32, input: AutoCameraInput, dt: f32) -> f32 {
         }
         // Settle CONTÍNUO, inclusive DURANTE o steering: é o que mantém a
         // câmera contornando para trás das costas enquanto o player gira
-        // com A/D, em vez de só começar depois de soltar.
-        _ if input.settle_allowed => swing_yaw(
+        // com A/D, em vez de só começar depois de soltar. Durante o recuo
+        // puro (`backpedaling`), o personagem corre na direção da câmara:
+        // girar o yaw ali criaria um loop circular contínuo.
+        _ if input.settle_allowed && !backpedaling => swing_yaw(
             yaw_deg,
             input.behind_facing_yaw,
             AUTO_SETTLE_TAU,

@@ -207,121 +207,124 @@ fn walk_bones(
     }
 }
 
-fn world_of(entity: Entity, globals: &Query<&GlobalTransform>) -> Option<Vec3> {
-    globals.get(entity).ok().map(|g| g.translation())
+#[derive(Clone, Copy)]
+struct CachedFootIkBones {
+    left: (Entity, Entity, Entity),
+    right: (Entity, Entity, Entity),
 }
 
-fn apply_aim(
+/// Transform global de `entity` composto a partir dos `Transform` escritos
+/// **neste frame** (animação incluída), e não do `GlobalTransform` propagado no
+/// fim do frame anterior.
+///
+/// `foot_ik_system` corre depois de `AnimationSystems` e antes de
+/// `TransformSystems::Propagate`: o `GlobalTransform` propagado ainda contém a
+/// pose de ontem — e, nos ossos da perna, a pose de ontem é o resultado do
+/// próprio IK. Ler isso devolvia ao solver o seu próprio resultado, frame após
+/// frame: a bacia subia e descia com o clip mas as pernas ficavam na pose de
+/// repouso (pés colados, sem passada). Compor os locais atuais é o que deixa o
+/// IK ver a pose que o clip acabou de escrever.
+fn current_global(
     entity: Entity,
-    parent_rot: Quat,
-    bone_world_rot: Quat,
-    from: Vec3,
-    to: Vec3,
-    transforms: &mut Query<&mut Transform>,
-) {
-    let local = local_rotation_toward(parent_rot, bone_world_rot, from, to);
-    if let Ok(mut tf) = transforms.get_mut(entity) {
-        tf.rotation = local;
+    locals: &Query<(&Transform, Option<&ChildOf>)>,
+    globals: &Query<&GlobalTransform>,
+) -> Option<GlobalTransform> {
+    let mut chain: Vec<Transform> = Vec::new();
+    let mut anchor = None;
+    let mut current = entity;
+    loop {
+        match locals.get(current) {
+            Ok((transform, parent)) => {
+                chain.push(*transform);
+                match parent {
+                    Some(parent) => current = parent.parent(),
+                    None => break,
+                }
+            }
+            Err(_) => {
+                // Um antepassado sem `Transform` é invulgar; ancora no último
+                // global propagado em vez de perder a cadeia toda.
+                anchor = globals.get(current).ok().copied();
+                break;
+            }
+        }
     }
-}
-
-/// Assenta os pés e, com lock-on, vira a cabeça. Corre depois da animação.
-pub fn foot_ik_system(
-    mut characters: Query<(&CharacterAnimator, &GlobalTransform), With<FootIk>>,
-    names: Query<&Name>,
-    children: Query<&Children>,
-    parents: Query<&ChildOf>,
-    globals: Query<&GlobalTransform>,
-    mut transforms: Query<&mut Transform>,
-    rigs: Query<Has<FrozenAnimation>>,
-    terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
-) {
-    let Some(terrain) = terrain.as_deref() else {
-        return;
+    let mut global = match anchor {
+        Some(anchor) => anchor,
+        None => GlobalTransform::from(chain.pop()?),
     };
-    for (animator, _xform) in &mut characters {
-        if rigs.get(animator.player).unwrap_or(false) {
-            continue;
-        }
-        let weight = foot_ik_weight(animator.state, animator.is_busy());
-        let mut bones = Vec::new();
-        walk_bones(animator.player, &children, &names, &mut bones);
-        if weight > 0.0 {
-            plant_pair(
-                &bones,
-                is_left_hip,
-                is_left_knee,
-                is_left_foot,
-                terrain,
-                weight,
-                &parents,
-                &globals,
-                &mut transforms,
-            );
-            plant_pair(
-                &bones,
-                is_right_hip,
-                is_right_knee,
-                is_right_foot,
-                terrain,
-                weight,
-                &parents,
-                &globals,
-                &mut transforms,
-            );
-        }
+    while let Some(transform) = chain.pop() {
+        global = global * transform;
     }
+    Some(global)
 }
 
-fn plant_pair(
-    bones: &[(Entity, String)],
-    hip_pred: fn(&str) -> bool,
-    knee_pred: fn(&str) -> bool,
-    foot_pred: fn(&str) -> bool,
+/// Rotação local decidida para um osso; escrita numa segunda passagem.
+struct PendingRotation {
+    entity: Entity,
+    rotation: Quat,
+}
+
+/// Resolve a cadeia de uma perna na pose ATUAL e devolve as rotações locais de
+/// coxa e canela, ou `None` quando o terreno não pede correção.
+#[allow(clippy::too_many_arguments)]
+fn solve_leg(
+    (hip, knee, foot): (Entity, Entity, Entity),
+    root_y: f32,
     terrain: &crate::terrain::runtime::TerrainRuntime,
     weight: f32,
     parents: &Query<&ChildOf>,
+    locals: &Query<(&Transform, Option<&ChildOf>)>,
     globals: &Query<&GlobalTransform>,
-    transforms: &mut Query<&mut Transform>,
-) {
-    let Some((hip, _)) = bones.iter().find(|(_, n)| hip_pred(n)) else {
-        return;
-    };
-    let Some((knee, _)) = bones.iter().find(|(_, n)| knee_pred(n)) else {
-        return;
-    };
-    let Some((foot, _)) = bones.iter().find(|(_, n)| foot_pred(n)) else {
-        return;
-    };
-    let (Some(hip_p), Some(knee_p), Some(foot_p)) = (
-        world_of(*hip, globals),
-        world_of(*knee, globals),
-        world_of(*foot, globals),
-    ) else {
-        return;
-    };
+) -> Option<[PendingRotation; 2]> {
+    let hip_global = current_global(hip, locals, globals)?;
+    let knee_global = current_global(knee, locals, globals)?;
+    let foot_global = current_global(foot, locals, globals)?;
+    let hip_p = hip_global.translation();
+    let knee_p = knee_global.translation();
+    let foot_p = foot_global.translation();
     let surface = if terrain.in_field(foot_p.x, foot_p.z) {
         terrain
             .surface_below(foot_p.x, foot_p.z, foot_p.y + FOOT_MAX_ERROR)
             .unwrap_or_else(|| terrain.sample_mesh_surface(foot_p.x, foot_p.z))
     } else {
-        return;
+        return None;
     };
-    let Some(y) =
-        plant_foot_y(foot_p.y, surface).map(|target| foot_p.y + (target - foot_p.y) * weight)
-    else {
-        return;
-    };
-    let goal = Vec3::new(foot_p.x, y, foot_p.z);
+    // `foot_l`/`foot_r` são o tornozelo (~0.124 m acima da sola em repouso).
+    // Em terreno plano (`surface ≈ root_y`), a animação já posiciona o pé na
+    // altura certa e o IK não deve puxar o tornozelo para a sola (o que
+    // hiper-estendia e trancava os dois joelhos retos). O IK corrige apenas o
+    // desnível do terreno sob o pé em relação à raiz, atenuado na fase de
+    // balanço da passada e limitado à folga natural da perna.
+    let terrain_delta = surface - root_y;
+    if terrain_delta.abs() > FOOT_MAX_ERROR {
+        return None;
+    }
+    // Altura do tornozelo acima da superfície sob ele: ~0.12 m em apoio, mais
+    // em balanço. (Medir contra `root_y` dava sempre ≤ 0 — o pé está abaixo da
+    // raiz — e o fator de balanço ficava preso em 1.)
+    let sole = foot_p.y - surface;
+    let swing_lift = (sole - 0.14).max(0.0);
+    let stance = (1.0 - swing_lift / 0.12).clamp(0.0, 1.0);
+    let clamped_delta = terrain_delta.clamp(-0.03, FOOT_MAX_ERROR);
+    let y = foot_p.y + clamped_delta * stance * weight;
+    if (y - foot_p.y).abs() < 1e-4 {
+        return None;
+    }
+    let mut goal = Vec3::new(foot_p.x, y, foot_p.z);
+    // Preserva uma ligeira flexão mínima no joelho para evitar o snap rígido
+    // quando a perna estica em declive.
+    let soft_max_reach = (knee_p.distance(hip_p) + foot_p.distance(knee_p)) * 0.985;
+    let to_goal = goal - hip_p;
+    let reach = to_goal.length();
+    if reach > soft_max_reach && reach > 1e-4 {
+        goal = hip_p + to_goal * (soft_max_reach / reach);
+    }
     let (new_knee, new_foot) = solve_two_bone(hip_p, knee_p, foot_p, goal);
-    let hip_parent = parents.get(*hip).map(|c| c.parent()).unwrap_or(*hip);
-    let (Ok(hip_global), Ok(knee_global)) = (globals.get(*hip), globals.get(*knee)) else {
-        return;
-    };
-    let hip_parent_rot = globals
-        .get(hip_parent)
+    let hip_parent = parents.get(hip).map(|c| c.parent()).unwrap_or(hip);
+    let hip_parent_rot = current_global(hip_parent, locals, globals)
         .map(|g| g.rotation())
-        .unwrap_or_else(|_| hip_global.rotation());
+        .unwrap_or_else(|| hip_global.rotation());
     // `local_rotation_toward` trata os vetores como DIREÇÕES: passar posições
     // absolutas alinhava o osso com o ponto do mundo (o joelho dobrava ao
     // contrário perto da origem e o IK sumia longe dela).
@@ -331,31 +334,118 @@ fn plant_pair(
         knee_p - hip_p,
         new_knee - hip_p,
     );
-    if let Ok(mut tf) = transforms.get_mut(*hip) {
-        tf.rotation = hip_local;
-    }
-    // A coxa acabou de rodar: o `GlobalTransform` do osso só é reconstruído
-    // depois deste sistema, por isso ler o pai da canela daqui devolvia a
-    // rotação ANTIGA. A canela herdava então o delta da coxa duas vezes (a
-    // direção saía rodada e o pé não chegava ao alvo). O pai efetivo da
-    // canela é a rotação NOVA da coxa.
-    let knee_parent = parents.get(*knee).map(|c| c.parent()).unwrap_or(*hip);
-    let knee_parent_rot = if knee_parent == *hip {
+    // A coxa vai rodar: o pai efetivo da canela é a rotação NOVA da coxa (os
+    // globais de hoje já não servem depois desta escrita). Se a canela tiver
+    // outro pai, usa-se a pose atual desse pai.
+    let knee_parent = parents.get(knee).map(|c| c.parent()).unwrap_or(hip);
+    let knee_parent_rot = if knee_parent == hip {
         hip_parent_rot * hip_local
     } else {
-        globals
-            .get(knee_parent)
+        current_global(knee_parent, locals, globals)
             .map(|g| g.rotation())
-            .unwrap_or_else(|_| knee_global.rotation())
+            .unwrap_or_else(|| knee_global.rotation())
     };
-    apply_aim(
-        *knee,
+    let knee_local = local_rotation_toward(
         knee_parent_rot,
         knee_global.rotation(),
         foot_p - knee_p,
         new_foot - knee_p,
-        transforms,
     );
+    Some([
+        PendingRotation {
+            entity: hip,
+            rotation: hip_local,
+        },
+        PendingRotation {
+            entity: knee,
+            rotation: knee_local,
+        },
+    ])
+}
+
+/// Assenta os pés e, com lock-on, vira a cabeça. Corre depois da animação.
+pub fn foot_ik_system(
+    characters: Query<(Entity, &CharacterAnimator), With<FootIk>>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut sets: ParamSet<(Query<&mut Transform>, Query<(&Transform, Option<&ChildOf>)>)>,
+    rigs: Query<Has<FrozenAnimation>>,
+    terrain: Option<Res<crate::terrain::runtime::TerrainRuntime>>,
+    mut bone_cache: Local<std::collections::HashMap<Entity, CachedFootIkBones>>,
+) {
+    let Some(terrain) = terrain.as_deref() else {
+        return;
+    };
+    let mut pending: Vec<[PendingRotation; 2]> = Vec::new();
+    {
+        // Leitura: a pose que a animação escreveu neste frame.
+        let locals = sets.p1();
+        for (entity, animator) in &characters {
+            if rigs.get(animator.player).unwrap_or(false) {
+                continue;
+            }
+            let weight = foot_ik_weight(animator.state, animator.is_busy());
+            if weight <= 0.0 {
+                continue;
+            }
+            let cached = bone_cache
+                .get(&animator.player)
+                .copied()
+                .filter(|c| locals.contains(c.left.2) && locals.contains(c.right.2));
+            let rig = match cached {
+                Some(c) => c,
+                None => {
+                    let mut bones = Vec::new();
+                    walk_bones(animator.player, &children, &names, &mut bones);
+                    let find = |pred: fn(&str) -> bool| {
+                        bones.iter().find(|(_, n)| pred(n)).map(|(e, _)| *e)
+                    };
+                    let (Some(lh), Some(lk), Some(lf), Some(rh), Some(rk), Some(rf)) = (
+                        find(is_left_hip),
+                        find(is_left_knee),
+                        find(is_left_foot),
+                        find(is_right_hip),
+                        find(is_right_knee),
+                        find(is_right_foot),
+                    ) else {
+                        continue;
+                    };
+                    let resolved = CachedFootIkBones {
+                        left: (lh, lk, lf),
+                        right: (rh, rk, rf),
+                    };
+                    bone_cache.insert(animator.player, resolved);
+                    resolved
+                }
+            };
+            let Some(root) = current_global(entity, &locals, &globals) else {
+                continue;
+            };
+            let root_y = root.translation().y;
+            for leg in [rig.left, rig.right] {
+                if let Some(rotations) =
+                    solve_leg(leg, root_y, terrain, weight, &parents, &locals, &globals)
+                {
+                    pending.push(rotations);
+                }
+            }
+        }
+    }
+    if pending.is_empty() {
+        return;
+    }
+    // Escrita: uma segunda passagem, para não manter duas queries de
+    // `Transform` vivas ao mesmo tempo.
+    let mut transforms = sets.p0();
+    for rotations in pending {
+        for PendingRotation { entity, rotation } in rotations {
+            if let Ok(mut tf) = transforms.get_mut(entity) {
+                tf.rotation = rotation;
+            }
+        }
+    }
 }
 
 /// Envelope de voz que abre a mandíbula enquanto o clip toca.
@@ -584,5 +674,65 @@ mod tests {
     fn jaw_opens_down_with_the_envelope() {
         assert_eq!(jaw_pitch(0.0), 0.0);
         assert!(jaw_pitch(1.0) < -0.3);
+    }
+
+    #[derive(Resource)]
+    struct ProbeTarget(Entity);
+    #[derive(Resource, Default)]
+    struct ProbeGlobal(Option<GlobalTransform>);
+
+    fn probe_current_global(
+        locals: Query<(&Transform, Option<&ChildOf>)>,
+        globals: Query<&GlobalTransform>,
+        target: Res<ProbeTarget>,
+        mut out: ResMut<ProbeGlobal>,
+    ) {
+        out.0 = current_global(target.0, &locals, &globals);
+    }
+
+    /// O IK corre entre a animação e o `Propagate`: o `GlobalTransform`
+    /// disponível ali é o do frame anterior. `current_global` tem de compor os
+    /// `Transform` atuais (o que o clip escreveu agora), senão o solver lê o
+    /// próprio resultado do frame anterior e as pernas congelam na pose de
+    /// repouso.
+    #[test]
+    fn current_global_uses_this_frames_locals_not_the_stale_global() {
+        use std::f32::consts::FRAC_PI_2;
+
+        let mut app = App::new();
+        app.init_resource::<ProbeGlobal>()
+            .add_systems(Update, probe_current_global);
+
+        let parent = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(10.0, 0.0, 0.0).with_rotation(Quat::from_rotation_y(FRAC_PI_2)),
+                // Deliberadamente velho: o `Propagate` ainda não correu.
+                GlobalTransform::from_translation(Vec3::splat(999.0)),
+            ))
+            .id();
+        let child = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(1.0, 0.0, 0.0),
+                GlobalTransform::default(),
+                ChildOf(parent),
+            ))
+            .id();
+
+        app.insert_resource(ProbeTarget(child));
+        app.update();
+
+        let got = app
+            .world()
+            .resource::<ProbeGlobal>()
+            .0
+            .expect("current_global")
+            .translation();
+        // pai (10, 0, 0) + rotY(90°) * (1, 0, 0) = (10, 0, -1)
+        assert!(
+            (got - Vec3::new(10.0, 0.0, -1.0)).length() < 1e-4,
+            "{got:?}"
+        );
     }
 }

@@ -255,19 +255,34 @@ struct LatticeField<'a> {
     base: Vec3,
     cell: f32,
     cells: usize,
-    /// `-density` no lattice, em ordem x-rápido → y → z.
+    /// `-density` no lattice expandido `(-1..=cells+1)³` (`pts = cells + 3`),
+    /// em ordem x-rápido → y → z. Inclui a margem de 1 célula para que os
+    /// gradientes por diferenças centrais nas bordas do bloco também batam no
+    /// cache em vez de reavaliarem o SDF.
     samples: Vec<f32>,
+    has_sign_change: bool,
 }
 
 impl<'a> LatticeField<'a> {
     fn new(density: &'a dyn Fn(Vec3) -> f32, base: Vec3, cell: f32, cells: usize) -> Self {
-        let pts = cells + 1;
+        let pts = cells + 3;
         let mut samples = Vec::with_capacity(pts * pts * pts);
+        let mut has_pos = false;
+        let mut has_neg = false;
         for iz in 0..pts {
+            let dz = (iz as isize - 1) as f32 * cell;
             for iy in 0..pts {
+                let dy = (iy as isize - 1) as f32 * cell;
                 for ix in 0..pts {
-                    let p = base + Vec3::new(ix as f32 * cell, iy as f32 * cell, iz as f32 * cell);
-                    samples.push(-(density)(p));
+                    let dx = (ix as isize - 1) as f32 * cell;
+                    let p = base + Vec3::new(dx, dy, dz);
+                    let v = -(density)(p);
+                    if v > 0.0 {
+                        has_pos = true;
+                    } else {
+                        has_neg = true;
+                    }
+                    samples.push(v);
                 }
             }
         }
@@ -277,20 +292,22 @@ impl<'a> LatticeField<'a> {
             cell,
             cells,
             samples,
+            has_sign_change: has_pos && has_neg,
         }
     }
 
-    /// Índice do lattice para uma coordenada, ou `None` se cair entre pontos.
+    /// Índice do lattice expandido (`-1..=cells+1` → `0..cells+3`), ou `None`
+    /// se cair entre pontos (meias-células das faces de transição).
     fn lattice_index(&self, v: f32, base: f32) -> Option<usize> {
         let f = (v - base) / self.cell;
         let i = f.round();
         // Tolerância relativa à célula: as posições vêm de
         // `base + size * (index/subdivisions)`, com o erro de vírgula
         // flutuante dessa divisão.
-        if (f - i).abs() > 1e-3 || i < 0.0 || i > self.cells as f32 {
+        if (f - i).abs() > 1e-3 || i < -1.0 || i > (self.cells as f32 + 1.0) {
             return None;
         }
-        Some(i as usize)
+        Some((i as isize + 1) as usize)
     }
 }
 
@@ -301,7 +318,7 @@ impl DataField<f32, f32> for LatticeField<'_> {
             self.lattice_index(y, self.base.y),
             self.lattice_index(z, self.base.z),
         ) {
-            let pts = self.cells + 1;
+            let pts = self.cells + 3;
             return self.samples[(iz * pts + iy) * pts + ix];
         }
         -(self.density)(Vec3::new(x, y, z))
@@ -339,6 +356,9 @@ pub fn build_voxel_mesh(
     // `-density`: o transvoxel considera dentro o que está ACIMA do threshold.
     // O `LatticeField` faz a inversão e serve o lattice regular de cache.
     let field = LatticeField::new(density, params.origin, params.voxel_size, params.cells);
+    if !field.has_sign_change && !params.transitions.iter().any(|&t| t) {
+        return None;
+    }
     let builder = extract_from_field(
         &field,
         // NÃO trocar por `CacheCentralBlockOnly`. Esse cache é indexado à

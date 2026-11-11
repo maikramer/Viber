@@ -1,5 +1,11 @@
 # vendor/ — forks vendored para o Bevy 0.20
 
+**Atualização 2026-11-07**: os pins `bevy_* = "0.20.0-rc.2"` dos 5 forks
+passaram a **`"0.20.1"`** (38 linhas). O requisito pré-release já resolvia
+para 0.20.x no lockfile, mas dizia uma versão que já não é a que testamos —
+com o `bevy` do engine e do editor em `0.20.1` (docs/CRATES.md, ronda de
+2026-11-07) o pin acompanha. Nenhuma alteração de código nos forks.
+
 **Atualização 2026-10-18**: o fork `bevy_rapier3d` foi **REMOVIDO** — o
 upstream publicou o **0.37.0** (crates.io, 2026-10-10), que é exatamente a
 versão oficial bevy-0.20: `bevy ^0.20`, `rapier3d 0.36.1`, `nalgebra 0.35`
@@ -32,8 +38,8 @@ presos ao Bevy 0.19.
 
 Alterações locais (além do port a 0.20.0-rc.2):
 
-* depências bevy apontadas a `0.20.0-rc.2` (resolvidas pelo `[patch.crates-io]`
-  do `Cargo.toml` raiz para o tag git `v0.20.0-rc.2`);
+* depências bevy apontadas a `0.20.1` (era `0.20.0-rc.2`; desde 2026-10-09
+  resolvem do registry, sem `[patch.crates-io]` para os crates bevy);
 * cross-deps entre forks por `path` (landmass_rerecast → bevy_landmass /
   bevy_rerecast; bevy_rerecast → bevy_rerecast_core);
 * `bevy_rerecast`: removido o optional `bevy_rerecast_editor_integration`

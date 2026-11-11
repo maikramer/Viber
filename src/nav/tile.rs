@@ -92,7 +92,7 @@ pub fn retile_navmesh(
     mut generator: NavmeshGenerator,
     players: Query<&GlobalTransform, With<crate::player::Player>>,
     obstacles: Query<
-        (),
+        &GlobalTransform,
         (
             With<bevy_rapier3d::prelude::Collider>,
             super::backend::ObstacleFilter,
@@ -119,7 +119,18 @@ pub fn retile_navmesh(
         return; // no hero yet: nothing to centre on
     };
     let here = player.translation().xz();
-    let obstacle_count = obstacles.iter().count();
+    let half_reach = config.tile_size * 0.5 + 16.0;
+    let count_near = |c: Vec2| -> usize {
+        obstacles
+            .iter()
+            .filter(|xf| {
+                let p = xf.translation();
+                (p.x - c.x).abs() <= half_reach && (p.z - c.y).abs() <= half_reach
+            })
+            .count()
+    };
+    let check_center = tile.center.unwrap_or(here);
+    let obstacle_count = count_near(check_center);
     let dirty = world_dirty.0;
     let moved = tile
         .center
@@ -129,6 +140,11 @@ pub fn retile_navmesh(
     if !moved && !geometry_changed {
         return;
     }
+    let obstacle_count = if moved {
+        count_near(here)
+    } else {
+        obstacle_count
+    };
 
     let settings = tile_settings_attempt(&config, here, terrain.as_deref(), tile.failures);
     let handle = match tile.handle.clone() {

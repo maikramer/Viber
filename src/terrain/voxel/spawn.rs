@@ -350,7 +350,65 @@ pub fn build_box_mesh(
         uses_layer_material,
         transitions: b.transitions,
     };
-    let density = |p: Vec3| field.density(base, p);
+    let cell = b.voxel_size;
+    let pts = b.cells + 3;
+    // Pré-amostra a grelha 2D XZ (`-1..=cells+1`) UMA vez por coluna (ix, iz)
+    // em vez de reavaliar o Catmull-Rom 2D do `BrushGrid` `cells + 3` vezes
+    // na vertical para o mesmo (x, z).
+    let mut ground_xz = vec![0.0f32; pts * pts];
+    for iz in 0..pts {
+        let z = b.origin.z + (iz as isize - 1) as f32 * cell;
+        for ix in 0..pts {
+            let x = b.origin.x + (ix as isize - 1) as f32 * cell;
+            ground_xz[iz * pts + ix] = base.sample(x, z);
+        }
+    }
+    let pad = Vec3::splat(cell * 1.5);
+    let expanded = Bounds3::from_corners(b.origin - pad, b.origin + Vec3::splat(b.extent) + pad);
+    let all_mods = field.mods();
+    let box_mods: Vec<u32> = field
+        .index()
+        .candidates_in(&expanded)
+        .into_iter()
+        .filter(|&i| all_mods[i as usize].bounds().intersects(&expanded))
+        .collect();
+
+    let sample_ground = |x: f32, z: f32| -> f32 {
+        let fx = (x - b.origin.x) / cell;
+        let fz = (z - b.origin.z) / cell;
+        let ix = fx.round();
+        let iz = fz.round();
+        let max_i = b.cells as f32 + 1.0;
+        if (fx - ix).abs() <= 1e-3
+            && (fz - iz).abs() <= 1e-3
+            && ix >= -1.0
+            && ix <= max_i
+            && iz >= -1.0
+            && iz <= max_i
+        {
+            let ux = (ix as isize + 1) as usize;
+            let uz = (iz as isize + 1) as usize;
+            ground_xz[uz * pts + ux]
+        } else {
+            base.sample(x, z)
+        }
+    };
+
+    let density = |p: Vec3| -> f32 {
+        let mut d = p.y - sample_ground(p.x, p.z);
+        for &i in &box_mods {
+            let m = &all_mods[i as usize];
+            if !m.bounds().contains(p) {
+                continue;
+            }
+            let md = m.distance(p);
+            d = match m.op() {
+                super::mods::ModOp::Union => d.min(md),
+                super::mods::ModOp::Subtract => d.max(-md),
+            };
+        }
+        d
+    };
     build_voxel_mesh(&density, &params)
 }
 
@@ -437,6 +495,8 @@ pub(crate) fn spawn_column(
             },
         ))
         .id();
+    let in_collision_band = spec.collision_resolution > 0
+        && collision_anchor.is_none_or(|anchor| column_in_collision_band(anchor, coords, spec));
     let mut meshed = 0;
     let mut bake = crate::physics::ColumnColliderBake::new();
     for b in boxes {
@@ -447,14 +507,15 @@ pub(crate) fn spawn_column(
             b,
             matches!(material, ChunkMaterialHandle::Layer(_)),
         ) {
-            bake.add_mesh_data(b.origin, &data);
+            if in_collision_band {
+                bake.add_mesh_data(b.origin, &data);
+            }
             spawn_box_entity(commands, meshes, column, b, data, material, true);
             meshed += 1;
         }
     }
     if meshed > 0
-        && spec.collision_resolution > 0
-        && collision_anchor.is_none_or(|anchor| column_in_collision_band(anchor, coords, spec))
+        && in_collision_band
         && let Some(collider) = bake.bake()
     {
         commands.entity(column).insert((

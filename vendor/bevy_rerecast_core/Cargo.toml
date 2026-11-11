@@ -110,29 +110,29 @@ version = "1"
 default-features = false
 
 [dependencies.bevy_app]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_asset]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_camera]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_color]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_derive]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_ecs]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = [
     "bevy_reflect",
     "serialize",
@@ -140,21 +140,21 @@ features = [
 default-features = false
 
 [dependencies.bevy_gizmos]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_light]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_material]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_shape]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = [
     "bevy_reflect",
     "serialize",
@@ -162,7 +162,7 @@ features = [
 default-features = false
 
 [dependencies.bevy_math]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = [
     "bevy_reflect",
     "serialize",
@@ -170,35 +170,35 @@ features = [
 default-features = false
 
 [dependencies.bevy_mesh]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_pbr]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_platform]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = ["glam"]
 default-features = false
 
 [dependencies.bevy_render]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 optional = true
 default-features = false
 
 [dependencies.bevy_tasks]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 default-features = false
 
 [dependencies.bevy_transform]
-version = "0.20.0-rc.2"
+version = "0.20.1"
 features = ["bevy-support"]
 default-features = false
 

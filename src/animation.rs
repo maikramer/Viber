@@ -822,15 +822,7 @@ fn drive_locomotion_blend(
     let Some(loco) = animator.locomotion else {
         return;
     };
-    let Some(mut graph) = graphs.get_mut(&handle.0) else {
-        return;
-    };
-    if let Some(node) = graph.get_mut(loco.blend) {
-        node.weight = if active { 1.0 } else { 0.0 };
-    }
-    if !active {
-        return;
-    }
+    let target_blend = if active { 1.0 } else { 0.0 };
     let specs = [
         (loco.idle, weights.0, 1.0_f32),
         (
@@ -846,10 +838,36 @@ fn drive_locomotion_blend(
                 .clamp(speeds.scale_range.0, speeds.scale_range.1),
         ),
     ];
-    for (node, weight, _) in specs {
-        if let Some(n) = graph.get_mut(node) {
-            n.weight = weight.max(LOCOMOTION_MIN_WEIGHT);
+    let needs_graph_mut = graphs.get(&handle.0).is_some_and(|graph| {
+        let blend_diff = graph
+            .get(loco.blend)
+            .is_some_and(|n| (n.weight - target_blend).abs() > 1e-5);
+        if !active {
+            return blend_diff;
         }
+        blend_diff
+            || specs.iter().any(|(node, weight, _)| {
+                let w = weight.max(LOCOMOTION_MIN_WEIGHT);
+                graph.get(*node).is_some_and(|n| (n.weight - w).abs() > 1e-5)
+            })
+    });
+    if needs_graph_mut {
+        let Some(mut graph) = graphs.get_mut(&handle.0) else {
+            return;
+        };
+        if let Some(node) = graph.get_mut(loco.blend) {
+            node.weight = target_blend;
+        }
+        if active {
+            for (node, weight, _) in specs {
+                if let Some(n) = graph.get_mut(node) {
+                    n.weight = weight.max(LOCOMOTION_MIN_WEIGHT);
+                }
+            }
+        }
+    }
+    if !active {
+        return;
     }
     let Ok((mut player, mut transitions)) = players.get_mut(animator.player) else {
         return;
@@ -868,6 +886,32 @@ fn drive_locomotion_blend(
     }
     for (node, _, scale) in specs {
         player.play(node).repeat().set_speed(scale).set_weight(1.0);
+    }
+    // Sincronização de fase entre walk e run: ambos os clips partilham a mesma
+    // fase normalizada (0.0 = pé esquerdo à frente, 0.5 = pé direito à frente),
+    // mas têm durações distintas. Sem alinhar a fase, os dois clips saem de
+    // fase e cancelam o balanço das pernas nas transições walk ↔ run.
+    if loco.walk != loco.run && (weights.1 > 1e-3 || weights.2 > 1e-3) {
+        let walk_dur = animator.duration_of(loco.walk);
+        let run_dur = animator.duration_of(loco.run);
+        if walk_dur > 1e-3 && run_dur > 1e-3 {
+            let (leader, follower, leader_dur, follower_dur, leader_scale) =
+                if weights.1 >= weights.2 {
+                    (loco.walk, loco.run, walk_dur, run_dur, specs[1].2)
+                } else {
+                    (loco.run, loco.walk, run_dur, walk_dur, specs[2].2)
+                };
+            if let Some(leader_anim) = player.animation(leader) {
+                let phase = (leader_anim.seek_time() / leader_dur).rem_euclid(1.0);
+                let synced_speed = leader_scale * (follower_dur / leader_dur);
+                if let Some(follower_anim) = player.animation_mut(follower) {
+                    follower_anim.seek_to(phase * follower_dur);
+                    if weights.1 > 1e-3 && weights.2 > 1e-3 {
+                        follower_anim.set_speed(synced_speed);
+                    }
+                }
+            }
+        }
     }
     animator.current = Some(loco.blend);
     animator.state = animator.state.or(Some(AnimState::Idle));
@@ -1170,9 +1214,19 @@ fn advance_motion(
         animator.speed = 0.0;
     }
     // Low-pass: on a frame hitch the delta reads ~0 and the animation "stopped"
-    // mid-walk (Idle↔Walk flip on every stutter).
-    let alpha = 1.0 - (-dt / SPEED_SMOOTH_TAU).exp();
+    // mid-walk (Idle↔Walk flip on every stutter). Na paragem (`raw < speed`)
+    // decai mais depressa para o personagem não continuar a marchar no sítio.
+    const SPEED_DECEL_TAU: f32 = 0.038;
+    let tau = if raw < animator.speed {
+        SPEED_DECEL_TAU
+    } else {
+        SPEED_SMOOTH_TAU
+    };
+    let alpha = 1.0 - (-dt / tau).exp();
     animator.speed += (raw - animator.speed) * alpha;
+    if raw < 1e-3 && animator.speed < gates.idle {
+        animator.speed = 0.0;
+    }
 
     if grounded {
         animator.air_time = 0.0;
@@ -1224,7 +1278,17 @@ pub fn drive_player_animation(
         // `advance_motion` zera o air_time no primeiro frame grounded, pelo que
         // o valor ANTES da chamada é o voo acumulado até à aterragem.
         let was_airborne = animator.air_time;
-        let state = advance_motion(
+        let controller_speed = Vec2::new(hero.vel_x, hero.vel_z).length();
+        // O Rapier aplica `controller.translation` no `PostUpdate` do frame N e
+        // este sistema lê `Transform` no `Update` do frame N+1: sem zerar o
+        // baseline ao largar as teclas, o deslocamento residual do frame N
+        // mantinha o herói a andar depois de parar; e num hitch (`dt_N > dt_{N+1}`)
+        // a divisão `vel * dt_N / dt_{N+1}` inflacionava a velocidade medida
+        // acima de `gates.run`, disparando corrida em plena marcha.
+        if hero.grounded && controller_speed < 1e-3 {
+            animator.last_pos = Some(transform.translation);
+        }
+        let mut state = advance_motion(
             &mut animator,
             transform.translation,
             hero.grounded,
@@ -1232,6 +1296,17 @@ pub fn drive_player_animation(
             dt,
             MotionGates::HERO,
         );
+        if controller_speed > 1e-3 && animator.speed > controller_speed {
+            animator.speed = controller_speed;
+            let airborne = animator.air_time >= AIRBORNE_GRACE;
+            state = next_state_with(
+                animator.state,
+                animator.speed,
+                !airborne,
+                hero.vel_y,
+                MotionGates::HERO,
+            );
+        }
         let blended = animator.locomotion.is_some()
             && !animator.is_busy()
             && !matches!(state, AnimState::Jump | AnimState::Fall);

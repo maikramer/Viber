@@ -200,19 +200,53 @@ impl VoxelField {
         Vec3::new(dx, dy, dz).try_normalize().unwrap_or(Vec3::Y)
     }
 
-    /// The vertical window a column march has to cover here.
-    fn column_range(&self, base: &dyn HeightField, x: f32, z: f32) -> Option<(f32, f32)> {
+    /// The vertical window a column march has to cover here, along with the
+    /// pre-sampled heightfield ground and XZ candidate mods.
+    fn column_range(
+        &self,
+        base: &dyn HeightField,
+        x: f32,
+        z: f32,
+    ) -> Option<(f32, f32, f32, &[u32])> {
+        let candidates = self.index.candidates_at(x, z);
+        if candidates.is_empty() {
+            return None;
+        }
         let ground = base.sample(x, z);
         let (lo, hi) = self.index.column_span_at(x, z, ground)?;
-        Some((lo - COLUMN_PAD, hi.max(ground) + COLUMN_PAD))
+        Some((lo - COLUMN_PAD, hi.max(ground) + COLUMN_PAD, ground, candidates))
+    }
+
+    fn density_column(&self, ground: f32, candidates: &[u32], p: Vec3) -> f32 {
+        let mut d = p.y - ground;
+        for &i in candidates {
+            let m = &self.mods[i as usize];
+            if !m.bounds().contains(p) {
+                continue;
+            }
+            let md = m.distance(p);
+            d = match m.op() {
+                ModOp::Union => d.min(md),
+                ModOp::Subtract => d.max(-md),
+            };
+        }
+        d
     }
 
     /// Refines a bracketed sign change to the surface height between `lo`
     /// (solid) and `hi` (empty).
-    fn bisect(&self, base: &dyn HeightField, x: f32, z: f32, mut lo: f32, mut hi: f32) -> f32 {
+    fn bisect_column(
+        &self,
+        ground: f32,
+        candidates: &[u32],
+        x: f32,
+        z: f32,
+        mut lo: f32,
+        mut hi: f32,
+    ) -> f32 {
         for _ in 0..REFINE_ITERS {
             let mid = (lo + hi) * 0.5;
-            if self.density(base, Vec3::new(x, mid, z)) < 0.0 {
+            if self.density_column(ground, candidates, Vec3::new(x, mid, z)) < 0.0 {
                 lo = mid;
             } else {
                 hi = mid;
@@ -227,25 +261,25 @@ impl VoxelField {
     /// returns the heightfield value and costs one heightfield sample — which
     /// is what protects the 44 existing call sites and the 4 km budget.
     pub fn surface_top(&self, base: &dyn HeightField, x: f32, z: f32) -> f32 {
-        let Some((lo, hi)) = self.column_range(base, x, z) else {
+        let Some((lo, hi, ground, candidates)) = self.column_range(base, x, z) else {
             return base.sample(x, z);
         };
         let mut y = hi;
         // Already inside rock at the very top: the mod stacks above anything we
         // could search, so that is the surface.
-        if self.density(base, Vec3::new(x, y, z)) < 0.0 {
+        if self.density_column(ground, candidates, Vec3::new(x, y, z)) < 0.0 {
             return y;
         }
         while y > lo {
             let next = (y - COLUMN_STEP).max(lo);
-            if self.density(base, Vec3::new(x, next, z)) < 0.0 {
-                return self.bisect(base, x, z, next, y);
+            if self.density_column(ground, candidates, Vec3::new(x, next, z)) < 0.0 {
+                return self.bisect_column(ground, candidates, x, z, next, y);
             }
             y = next;
         }
         // Nothing solid anywhere in the column (a shaft cut clean through):
         // fall back to the heightfield so callers still get a finite number.
-        base.sample(x, z)
+        ground
     }
 
     /// Topmost solid surface **at or below** `from_y` — the query a creature
@@ -262,7 +296,7 @@ impl VoxelField {
         z: f32,
         from_y: f32,
     ) -> Option<f32> {
-        let Some((lo, _hi)) = self.column_range(base, x, z) else {
+        let Some((lo, _hi, ground, candidates)) = self.column_range(base, x, z) else {
             let h = base.sample(x, z);
             return (h <= from_y).then_some(h);
         };
@@ -272,13 +306,13 @@ impl VoxelField {
         }
         // Walk down out of any rock we start inside, so a query from within a
         // solid returns the floor below it rather than the point itself.
-        while y > lo && self.density(base, Vec3::new(x, y, z)) < 0.0 {
+        while y > lo && self.density_column(ground, candidates, Vec3::new(x, y, z)) < 0.0 {
             y -= COLUMN_STEP;
         }
         while y > lo {
             let next = (y - COLUMN_STEP).max(lo);
-            if self.density(base, Vec3::new(x, next, z)) < 0.0 {
-                return Some(self.bisect(base, x, z, next, y));
+            if self.density_column(ground, candidates, Vec3::new(x, next, z)) < 0.0 {
+                return Some(self.bisect_column(ground, candidates, x, z, next, y));
             }
             y = next;
         }
@@ -290,7 +324,7 @@ impl VoxelField {
     /// One span is ordinary ground. Two mean an overhang, an arch or a cave
     /// roof — the thing a heightfield cannot represent at all.
     pub fn column(&self, base: &dyn HeightField, x: f32, z: f32) -> Vec<Span> {
-        let Some((lo, hi)) = self.column_range(base, x, z) else {
+        let Some((lo, hi, ground, candidates)) = self.column_range(base, x, z) else {
             return vec![Span {
                 top: base.sample(x, z),
                 bottom: f32::NEG_INFINITY,
@@ -299,18 +333,18 @@ impl VoxelField {
 
         let mut spans = Vec::new();
         let mut y = hi;
-        let mut inside = self.density(base, Vec3::new(x, y, z)) < 0.0;
+        let mut inside = self.density_column(ground, candidates, Vec3::new(x, y, z)) < 0.0;
         let mut top = if inside { hi } else { f32::NAN };
 
         while y > lo {
             let next = (y - COLUMN_STEP).max(lo);
-            let solid = self.density(base, Vec3::new(x, next, z)) < 0.0;
+            let solid = self.density_column(ground, candidates, Vec3::new(x, next, z)) < 0.0;
             if solid != inside {
                 let crossing = if solid {
-                    self.bisect(base, x, z, next, y)
+                    self.bisect_column(ground, candidates, x, z, next, y)
                 } else {
                     // Leaving rock going down: bracket is (solid=y, empty=next).
-                    self.bisect(base, x, z, y, next)
+                    self.bisect_column(ground, candidates, x, z, y, next)
                 };
                 if solid {
                     top = crossing;
@@ -348,11 +382,11 @@ impl VoxelField {
         z: f32,
         max_thickness: f32,
     ) -> bool {
-        let Some((lo, hi)) = self.column_range(base, x, z) else {
+        let Some((lo, hi, ground, candidates)) = self.column_range(base, x, z) else {
             return false; // coluna flat: um span só, nunca fino
         };
         let mut y = hi;
-        let mut inside = self.density(base, Vec3::new(x, y, z)) < 0.0;
+        let mut inside = self.density_column(ground, candidates, Vec3::new(x, y, z)) < 0.0;
         let mut top = if inside { hi } else { f32::NAN };
         // `Some` = o primeiro span já fechou (e diz se foi fino). Um SEGUNDO
         // fecho, ou o fundo da coluna apanhado ainda dentro de rocha depois
@@ -360,12 +394,12 @@ impl VoxelField {
         let mut first_closed_thin: Option<bool> = None;
         while y > lo {
             let next = (y - COLUMN_STEP).max(lo);
-            let solid = self.density(base, Vec3::new(x, next, z)) < 0.0;
+            let solid = self.density_column(ground, candidates, Vec3::new(x, next, z)) < 0.0;
             if solid != inside {
                 if solid {
-                    top = self.bisect(base, x, z, next, y);
+                    top = self.bisect_column(ground, candidates, x, z, next, y);
                 } else if first_closed_thin.is_none() {
-                    let bottom = self.bisect(base, x, z, y, next);
+                    let bottom = self.bisect_column(ground, candidates, x, z, y, next);
                     if top - bottom >= max_thickness {
                         return false; // span[0] grosso: a resposta é NÃO, já está
                     }

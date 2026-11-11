@@ -361,7 +361,7 @@ fn update_voxel_columns(
     } else {
         VOXEL_BUILD_BUDGET_MS
     };
-    let deadline = Instant::now() + Duration::from_secs_f32(budget_ms);
+    let deadline = Instant::now() + Duration::from_secs_f32(budget_ms * 1.0e-3);
     state.pending = false;
 
     let spec = &runtime.spec;
@@ -550,6 +550,7 @@ fn update_voxel_columns(
     }
     // 2.b Drenagem orçamentada, mais perto primeiro.
     draining.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut built_this_frame = 0u32;
     for (_, entity) in &draining {
         let Ok((_, mut chunk, mut build)) = columns.get_mut(*entity) else {
             continue;
@@ -566,6 +567,8 @@ fn update_voxel_columns(
         let Some(material) = material else {
             continue;
         };
+        let in_collision_band = spec.collision_resolution > 0
+            && super::voxel::spawn::column_in_collision_band(cam_xz, chunk.coords, spec);
         while budget > 0 {
             // Teto de tempo: uma caixa refinada pode custar 5 ms; não
             // começar outra quando o frame já gastou o orçamento.
@@ -590,7 +593,9 @@ fn update_voxel_columns(
                 // orçamento, segue para a próxima caixa.
                 continue;
             };
-            b.bake.add_mesh_data(box_spec.origin, &data);
+            if in_collision_band {
+                b.bake.add_mesh_data(box_spec.origin, &data);
+            }
             b.staged.push(super::voxel::spawn_box_entity(
                 &mut commands,
                 &mut meshes,
@@ -600,11 +605,19 @@ fn update_voxel_columns(
                 &material,
                 false,
             ));
+            built_this_frame += 1;
             // Caixa REFINADA: 8× as amostras do transvoxel — consome
             // a frame inteira de orçamento (uma por frame no máximo).
             budget = if box_spec.refined { 0 } else { budget - 1 };
         }
         if b.remaining.is_empty() {
+            // Se já construímos caixas neste frame e o orçamento de tempo
+            // esgotou, difere o swap + bake do trimesh (`FIX_INTERNAL_EDGES`)
+            // para o frame seguinte em vez de somar os dois picos.
+            if built_this_frame > 0 && in_collision_band && Instant::now() >= deadline {
+                state.pending = true;
+                break;
+            }
             // Swap atómico: caixas do LOD velho morrem, staged ficam
             // visíveis, a coluna aponta o LOD construído.
             if let Ok(kids) = children_q.get(*entity) {
@@ -617,26 +630,34 @@ fn update_voxel_columns(
             for e in &b.staged {
                 commands.entity(*e).insert(Visibility::Inherited);
             }
-            // O collider da coluna troca com o mesh, no MESMO frame:
-            // o trimesh novo substitui o velho. Sem geometria nova
-            // (coluna provou-se vazia), o collider velho sai — nunca
-            // fica chão invisível.
+            // O collider da coluna troca com o mesh, no MESMO frame, apenas
+            // se a coluna estiver na banda de colisão: o trimesh novo
+            // substitui o velho. Sem geometria nova (ou fora da banda), o
+            // collider velho sai — nunca fica chão invisível.
             if spec.collision_resolution > 0 {
-                match b.bake.bake() {
-                    Some(collider) => {
-                        commands.entity(*entity).try_insert((
-                            collider,
-                            bevy_rapier3d::prelude::RigidBody::Fixed,
-                            crate::physics::VoxelCollider,
-                        ));
+                if in_collision_band {
+                    match b.bake.bake() {
+                        Some(collider) => {
+                            commands.entity(*entity).try_insert((
+                                collider,
+                                bevy_rapier3d::prelude::RigidBody::Fixed,
+                                crate::physics::VoxelCollider,
+                            ));
+                        }
+                        None => {
+                            commands
+                                .entity(*entity)
+                                .try_remove::<bevy_rapier3d::prelude::Collider>()
+                                .try_remove::<bevy_rapier3d::prelude::RigidBody>()
+                                .try_remove::<crate::physics::VoxelCollider>();
+                        }
                     }
-                    None => {
-                        commands
-                            .entity(*entity)
-                            .try_remove::<bevy_rapier3d::prelude::Collider>()
-                            .try_remove::<bevy_rapier3d::prelude::RigidBody>()
-                            .try_remove::<crate::physics::VoxelCollider>();
-                    }
+                } else {
+                    commands
+                        .entity(*entity)
+                        .try_remove::<bevy_rapier3d::prelude::Collider>()
+                        .try_remove::<bevy_rapier3d::prelude::RigidBody>()
+                        .try_remove::<crate::physics::VoxelCollider>();
                 }
             }
             chunk.built_lod = b.target;

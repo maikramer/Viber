@@ -639,6 +639,16 @@ mod tests {
         loop {
             if let mlua::Value::Table(t) = poll.call::<mlua::Value>(()).unwrap() {
                 if t.get::<String>("kind").unwrap() == "loaded" {
+                    // `kind="loaded"` também é o formato do load FALHADO
+                    // (`ok=false` + `error`): sem este assert o teste morria
+                    // mais abaixo como "modelo ainda não carregado" e
+                    // escondia o erro real do artefacto (OOM/ORT/path).
+                    let ok: bool = t.get("ok").unwrap_or(false);
+                    assert!(
+                        ok,
+                        "load do d1 falhou: {:?}",
+                        t.get::<mlua::Value>("error").unwrap()
+                    );
                     break;
                 }
             }

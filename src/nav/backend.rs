@@ -127,18 +127,110 @@ pub fn ground_lattice(
         return TriMesh::default();
     }
 
+    // Pré-filtra lagos e segmentos de rio que cruzam o tile `[min, max]`:
+    // num mundo de 4 km o `hull` de um rio cobre o mapa inteiro, e testar
+    // `terrain.in_water` por ponto varria ~1 500 estações × 183 000 nós na
+    // main thread a cada pedido de tile.
+    let tile_max = Vec2::new(
+        min.x + (cols.saturating_sub(1)) as f32 * cell,
+        min.y + (rows.saturating_sub(1)) as f32 * cell,
+    );
+    let mut lakes: Vec<(Vec2, f32)> = Vec::new();
+    let mut river_segs: Vec<(Vec2, Vec2, Vec2, Vec2, f32)> = Vec::new();
+    let mut water_min = Vec2::splat(f32::INFINITY);
+    let mut water_max = Vec2::splat(f32::NEG_INFINITY);
+    for w in &terrain.water {
+        let r = w.carve_radius;
+        match w.kind {
+            crate::terrain::water::WaterKind::Lake => {
+                if w.at.x + r >= min.x
+                    && w.at.x - r <= tile_max.x
+                    && w.at.y + r >= min.y
+                    && w.at.y - r <= tile_max.y
+                {
+                    lakes.push((w.at, r));
+                    water_min = water_min.min(w.at - Vec2::splat(r));
+                    water_max = water_max.max(w.at + Vec2::splat(r));
+                }
+            }
+            crate::terrain::water::WaterKind::River => {
+                if w.stations.len() == 1 {
+                    let s = w.stations[0];
+                    if s.x + r >= min.x
+                        && s.x - r <= tile_max.x
+                        && s.y + r >= min.y
+                        && s.y - r <= tile_max.y
+                    {
+                        lakes.push((s, r));
+                        water_min = water_min.min(s - Vec2::splat(r));
+                        water_max = water_max.max(s + Vec2::splat(r));
+                    }
+                } else {
+                    for pair in w.stations.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let smin = a.min(b) - Vec2::splat(r);
+                        let smax = a.max(b) + Vec2::splat(r);
+                        if smax.x >= min.x
+                            && smin.x <= tile_max.x
+                            && smax.y >= min.y
+                            && smin.y <= tile_max.y
+                        {
+                            river_segs.push((a, b, smin, smax, r));
+                            water_min = water_min.min(smin);
+                            water_max = water_max.max(smax);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let has_water = !lakes.is_empty() || !river_segs.is_empty();
+    let in_tile_water = |p: Vec2| -> bool {
+        if !has_water
+            || p.x < water_min.x
+            || p.x > water_max.x
+            || p.y < water_min.y
+            || p.y > water_max.y
+        {
+            return false;
+        }
+        for &(center, r) in &lakes {
+            if p.distance(center) <= r {
+                return true;
+            }
+        }
+        for &(a, b, smin, smax, r) in &river_segs {
+            if p.x < smin.x || p.x > smax.x || p.y < smin.y || p.y > smax.y {
+                continue;
+            }
+            let ab = b - a;
+            let len_sq = ab.length_squared();
+            let closest = if len_sq <= 1e-12 {
+                a
+            } else {
+                a + ab * ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0)
+            };
+            if p.distance(closest) <= r {
+                return true;
+            }
+        }
+        false
+    };
+
+    let base = terrain.base();
     let mut heights = vec![f32::NAN; cols * rows];
     for row in 0..rows {
         for col in 0..cols {
             let x = min.x + col as f32 * cell;
             let z = min.y + row as f32 * cell;
-            if !terrain.in_field(x, z) || terrain.in_water(x, z) {
+            let p = Vec2::new(x, z);
+            if !terrain.in_field(x, z) || in_tile_water(p) {
                 continue;
             }
-            if cliffs.is_some_and(|mask| mask.is_cliff_at(Vec2::new(x, z))) {
+            if cliffs.is_some_and(|mask| mask.is_cliff_at(p)) {
                 continue;
             }
-            heights[row * cols + col] = terrain.sample_mesh_surface(x, z);
+            heights[row * cols + col] = terrain.voxel.surface_top(&base, x, z);
         }
     }
 

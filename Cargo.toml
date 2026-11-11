@@ -2,7 +2,7 @@
 name = "viber"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97.1"
 description = "Viber — native Bevy engine for AiGameKit declarative world XML"
 license = "MIT"
 repository = "https://github.com/maikramer/Viber"
@@ -30,7 +30,7 @@ base64 = "0.23"
 # `basis-universal` transcodes the KTX2/UASTC textures the asset pipeline
 # bakes into its GLBs (`KHR_texture_basisu`); without it those textures are
 # "Missing data" and the whole GLB fails to load.
-bevy = { version = "0.20", features = [
+bevy = { version = "0.20.1", features = [
     "bevy_remote",
     "wav",
     "jpeg",
@@ -100,8 +100,9 @@ dirs = "7"
 half = "2"
 notify = "8"
 # Navegação (docs/CRATES.md): Recast portado para Rust + pathfinding com
-# evitamento local. Os três são builds de Bevy 0.19 e do mesmo autor/família,
-# por isso não há risco de duas versões do ECS na árvore.
+# evitamento local. Os três são ports de Bevy 0.20 (vendor/, ver
+# vendor/FORKS_020.md) e do mesmo autor/família, por isso não há risco de
+# duas versões do ECS na árvore.
 #   bevy_rerecast     — gera a navmesh a partir da geometria real (o backend
 #                       de geometria é NOSSO: src/nav/backend.rs).
 #   bevy_landmass     — A* sobre a navmesh + evitamento RVO entre agentes +
