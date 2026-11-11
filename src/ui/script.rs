@@ -223,7 +223,8 @@ impl UiScriptBinds {
 }
 
 impl UiCommandQueue {
-    fn push(&self, command: UiCommand) {
+    /// Enfileira um comando (o `UiWriter` e os closures Lua partilham a fila).
+    pub(crate) fn push(&self, command: UiCommand) {
         if let Ok(mut queue) = self.0.lock() {
             queue.push(command);
         }

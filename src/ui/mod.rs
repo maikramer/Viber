@@ -34,6 +34,7 @@ pub mod style;
 pub mod tree;
 pub mod tween;
 pub mod widgets;
+pub mod writer;
 
 pub use bind::{UiBindWarnings, UiData};
 pub use collect::{UiPrompt, UiToast};
@@ -46,10 +47,11 @@ pub use runtime::{
     UiStyleDirty, UiTag,
 };
 pub use scale::hud_scale_for_height;
-pub use script::{UiCommandQueue, UiScriptState};
+pub use script::{ScriptBindValue, UiCommandQueue, UiScriptState};
 pub use style::{StyleProps, StyleSheet, StyleState};
 pub use tree::{build_ui_tree, is_ui_tag};
 pub use tween::{UiAnimation, UiTransitions};
+pub use writer::UiWriter;
 
 use bevy::prelude::*;
 
@@ -269,6 +271,12 @@ impl bevy::app::Plugin for UiPlugin {
                     .chain()
                     .in_set(UiSet::StyleLate),
             );
+        // Handle Rust para a MESMA fila: os closures Lua clonaram o `Arc` do
+        // `UiScriptState`. Publica-se a fila como recurso e constrói-se o
+        // writer a partir dela — uma fila nova ficaria sem quem a drenasse.
+        let queue = app.world().resource::<UiScriptState>().queue.clone();
+        app.insert_resource(queue.clone())
+            .insert_resource(writer::UiWriter::from(queue));
         // Cliques sintéticos e reais acumulam DURANTE o frame (o luau_update
         // pode correr antes ou depois da UI) e limpam no FIM. Os eventos de
         // UI são limpos no `UiSet::Bind` (depois de publicados), para os
