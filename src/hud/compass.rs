@@ -7,20 +7,23 @@ use crate::player::Player;
 use crate::recipes::spawn::OrbitCamera;
 
 /// One direction letter in the sliding compass strip.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct CompassLetter {
     /// World bearing this letter sits at (0° = north/−Z, 90° = east/+X).
     pub bearing_deg: f32,
 }
 
 /// A compass tick mark (slides with the letters).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct CompassTick {
     pub bearing_deg: f32,
 }
 
 /// Distance readout under a compass letter: nearest NPC in that sector.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct CompassDistance {
     pub bearing_deg: f32,
 }
@@ -157,7 +160,8 @@ pub fn hud_compass_update(
 /// Marca de marcodisponível na faixa do compasso: losango teal que desliza
 /// como as letras — a promessa "há algo para ver nessa direcção". Atalaias
 /// e marcos comuns partilham o pool; o desenho distingue-os.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct CompassLandmark {
     /// Slot fixo (ordem de desenho); o rumo é reatribuído por frame.
     pub slot: usize,

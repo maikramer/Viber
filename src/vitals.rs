@@ -12,7 +12,8 @@ use crate::player::Player;
 pub const DEFAULT_HEALTH: f32 = 100.0;
 
 /// HP pool, clamped to `0..=max` by [`apply_damage`] / [`heal_full`].
-#[derive(Debug, Clone, Copy, PartialEq, Component)]
+#[derive(Debug, Clone, Copy, PartialEq, Component, Reflect)]
+#[reflect(Component, Default)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -35,7 +36,8 @@ impl Default for Health {
 /// era imune a `entity_damage`/dano radial (o `ensure_creature_vitals` que o
 /// devia cobrir nunca foi registado num schedule). O default só entra quando
 /// não há `Health` no bundle; quem autora o HP continua a mandar.
-#[derive(Debug, Clone, Copy, Default, Component)]
+#[derive(Debug, Clone, Copy, Default, Component, Reflect)]
+#[reflect(Component, Default)]
 #[require(Health)]
 pub struct Hostile;
 

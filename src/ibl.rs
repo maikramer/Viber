@@ -59,7 +59,8 @@ const IBL_GROUND_FROM_HORIZON: f32 = 0.42;
 pub const IBL_INTENSITY: f32 = 1.0;
 
 /// Marcador do probe do IBL (um só, tamanho do mundo).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct SkyIblProbe;
 
 /// Mantém o [`LightProbe`] do IBL: gera o cubemap base na primeira frame

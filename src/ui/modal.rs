@@ -20,15 +20,17 @@
 //! what "selected" looks like; inactive pages are `display: none`, which keeps
 //! them out of layout entirely instead of merely invisible.
 
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
 // Bevy 0.20: `Interaction`/`Button` do prelude são aliases de tipos privados.
 use crate::ui::interaction::Interaction;
+use bevy::ui_widgets::{Activate, Dialog, ModalDialog, RequestClose};
 
 use super::runtime::{UiClasses, UiDisabled, UiId, UiStyleDirty};
 
 /// A full-screen overlay toggled by a key.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiModal {
     /// Key that opens and closes it.
     pub key: KeyCode,
@@ -39,7 +41,8 @@ pub struct UiModal {
 }
 
 /// Which modals are open — gameplay systems read this to stop stealing input.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiModalsOpen {
     pub open: Vec<String>,
     /// Modais SEM `id`: não entram em `open` (não há nome para listar), mas
@@ -58,7 +61,8 @@ impl UiModalsOpen {
 }
 
 /// A tab button: selects `tab` inside `group`.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTabButton {
     pub group: String,
     pub tab: String,
@@ -79,14 +83,16 @@ pub fn cycle(tabs: &[String], current: Option<&str>, delta: i32) -> Option<Strin
 }
 
 /// A tab page: visible only while `tab` is the selection of `group`.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTabPage {
     pub group: String,
     pub tab: String,
 }
 
 /// Selected tab per group; the first page authored in a group wins by default.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiTabs {
     pub active: std::collections::HashMap<String, String>,
 }
@@ -106,8 +112,13 @@ impl UiTabs {
     }
 }
 
-/// A scrollable viewport; `speed` is pixels per wheel line.
-#[derive(Debug, Component)]
+/// A scrollable viewport.
+///
+/// A roda é do [`bevy::ui_widgets::ScrollArea`] (que `tree.rs` insere ao lado
+/// deste); `speed` fica como compatibilidade autoral — a razão global px/linha
+/// vive em `MouseScrollPixelsPerLine` (UiPlugin).
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiScroll {
     pub vertical: bool,
     pub speed: f32,
@@ -266,7 +277,13 @@ pub fn drive_ui_modals(
     keys: Res<ButtonInput<KeyCode>>,
     mut typing: ResMut<super::widgets::UiFocusedInput>,
     mut open: ResMut<UiModalsOpen>,
-    mut modals: Query<(Entity, &mut UiModal, &mut Visibility, Option<&UiId>)>,
+    mut modals: Query<(
+        Entity,
+        &mut UiModal,
+        &mut Visibility,
+        Option<&UiId>,
+        Has<ModalDialog>,
+    )>,
     parents: Query<&ChildOf>,
     mut classes: Query<&mut UiClasses>,
 ) {
@@ -280,7 +297,7 @@ pub fn drive_ui_modals(
     // dos componentes: um modal destruído (`viber.ui.destroy`, unload de
     // cena) deixava o id na lista e `menu_open()` ficava true para sempre.
     let mut live = std::collections::HashSet::new();
-    for (entity, mut modal, mut visibility, id) in &mut modals {
+    for (entity, mut modal, mut visibility, id, has_modal) in &mut modals {
         let was_open = modal.open;
         let toggled = typing.0.is_none() && keys.just_pressed(modal.key);
         // Escape only ever closes: opening every modal with one key would be a
@@ -291,6 +308,19 @@ pub fn drive_ui_modals(
         }
         if was_open && !modal.open {
             closed.push(entity);
+        }
+        // O `ModalDialog` do Bevy é o focus trap: enquanto o overlay está
+        // aberto, o Tab/`AcquireFocus` fica dentro dele. Só existe enquanto
+        // aberto — o observer de `Add` procura o último focável e um modal
+        // `Hidden` no arranque só produzia um aviso por cada menu.
+        if modal.open && !has_modal {
+            commands.entity(entity).insert(ModalDialog);
+        } else if !modal.open && has_modal {
+            commands
+                .entity(entity)
+                .remove::<ModalDialog>()
+                .remove::<Dialog>()
+                .remove::<TabGroup>();
         }
         let wanted = if modal.open {
             Visibility::Inherited
@@ -528,51 +558,29 @@ fn tabs_by_group(
         .collect()
 }
 
-/// Scrolls the hovered viewport with the mouse wheel.
-///
-/// `Interaction` only lands on the element directly under the cursor, so the
-/// walk up the hierarchy is what makes scrolling work when the pointer is over
-/// a row rather than over the viewport itself.
-pub fn drive_ui_scroll(
-    mut wheel: bevy::ecs::message::MessageReader<MouseWheel>,
-    hovered: Query<(Entity, &Interaction)>,
-    parents: Query<&ChildOf>,
-    scrolls: Query<&UiScroll>,
-    mut positions: Query<&mut ScrollPosition>,
+/// `Activate` do Bevy num botão de aba (Enter/Espaço com o foco lá) selecciona
+/// a aba. O clique de rato continua no [`drive_ui_tabs`] (selecção no press,
+/// o contrato antigo), e as duas escritas são idempotentes.
+pub fn activate_ui_tab(
+    activate: On<Activate>,
+    buttons: Query<&UiTabButton>,
+    mut tabs: ResMut<UiTabs>,
 ) {
-    let mut delta = 0.0;
-    for event in wheel.read() {
-        delta += match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 26.0,
-        };
+    if let Ok(button) = buttons.get(activate.entity) {
+        tabs.select(&button.group, &button.tab);
     }
-    if delta == 0.0 {
-        return;
-    }
-    let Some((target, _)) = hovered
-        .iter()
-        .find(|(_, interaction)| **interaction != Interaction::None)
-    else {
-        return;
-    };
-    let mut current = target;
-    for _ in 0..32 {
-        if let Ok(scroll) = scrolls.get(current) {
-            if let Ok(mut position) = positions.get_mut(current) {
-                let step = delta * scroll.speed;
-                if scroll.vertical {
-                    position.0.y = (position.0.y - step).max(0.0);
-                } else {
-                    position.0.x = (position.0.x - step).max(0.0);
-                }
-            }
-            return;
-        }
-        let Ok(parent) = parents.get(current) else {
-            return;
-        };
-        current = parent.parent();
+}
+
+/// Um `RequestClose` do `ModalDialog` (barreira/Escape) fecha o `<UiModal>`.
+///
+/// O overlay é conduzido por `Visibility`/`UiModal::open`, por isso o pedido
+/// não despawna nada: só desliga o flag que o driver já reconcilia.
+pub fn close_modal_on_request(
+    request: On<RequestClose>,
+    mut modals: Query<&mut UiModal>,
+) {
+    if let Ok(mut modal) = modals.get_mut(request.source) {
+        modal.open = false;
     }
 }
 

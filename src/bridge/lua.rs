@@ -449,7 +449,8 @@ pub struct SchedulerInfo {
 
 /// Estado do chão ao vivo (`viber.debug.ground{...}`): o tuning de splat
 /// acumula entre chamadas — cada uma só passa o que muda.
-#[derive(Resource, Debug, Clone, Copy, Default)]
+#[derive(Resource, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Resource)]
 struct GroundState {
     tuning: crate::terrain::splat::SplatTuning,
 }
@@ -476,11 +477,21 @@ pub struct DebugOps(pub Vec<DebugOp>);
 /// original pintava todos os irmãos (e o pool entre cenas). O primeiro
 /// `set_material` clona o material e aponta só aquela entidade para a cópia;
 /// chamadas seguintes reutilizam-na.
-#[derive(Default, bevy::prelude::Resource)]
+#[derive(Default, bevy::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct DebugMaterialOverrides(pub std::collections::HashMap<Entity, Handle<StandardMaterial>>);
 
+/// TODO(migration): os verbos genéricos de ECS têm alternativa na MESMA
+/// sessão `viber.lua` via `viber.ecs`: `set_pos`/`tp` → `ecs.set` em
+/// `Transform`; `hide`/`show`/`toggle_vis` → `ecs.set` em `Visibility`;
+/// `despawn` → `ecs.despawn`; `set_scale`/`rotate` → `ecs.set` em
+/// `Transform`; `set_entity_hp`/`set_max_hp`/`kill` → `ecs.set` em `Health`;
+/// `ai_state`/`ai_aggro`/`set_speed` → `ecs.set` em `EnemyCreature`/
+/// `AiLocomotion`. Mantêm-se até o BRP provar o caminho ao vivo; os que
+/// dependem de primitivas (Spawn/Light/Material/…) não têm equivalente.
 pub enum DebugOp {
     /// Posição absoluta, sem snap (o que o script escreve é o que fica).
+    // TODO(migration): `viber.ecs.set` em `Transform`.
     SetPos(Entity, Vec3),
     /// Teleporte do player: Y explícito.
     Teleport(Entity, Vec3),
@@ -489,11 +500,13 @@ pub enum DebugOp {
     /// Delta XZ em metros com Y no terreno (`viber.debug.move_player`).
     MoveBySnap(Entity, Vec2),
     Face(Entity, Vec3),
+    // TODO(migration): `viber.ecs.set` em `Visibility`.
     Hide(Entity),
     Show(Entity),
     ToggleVis(Entity),
     Disable(Entity),
     Enable(Entity),
+    // TODO(migration): `viber.ecs.despawn`.
     Despawn(Entity),
     Toast(String),
     Heal(f32),
@@ -501,6 +514,7 @@ pub enum DebugOp {
     AddXp(u32),
     /// Deposita no vault — recurso (gold/wood/stone) ou item, pela mesma porta.
     Give(String, u32),
+    // TODO(migration): `viber.ecs.set` em `AiLocomotion.velocity`.
     SetSpeed(Entity, f32),
     SetTimeScale(f32),
     SpawnMarker {
@@ -517,8 +531,10 @@ pub enum DebugOp {
     /// HP absoluto do player (clamp a [0, max]).
     SetHp(f32),
     /// Soma yaw em graus em torno do Y.
+    // TODO(migration): `viber.ecs.set` em `Transform.rotation`.
     Rotate(Entity, f32),
     /// Escala uniforme.
+    // TODO(migration): `viber.ecs.set` em `Transform.scale`.
     SetScale(Entity, f32),
     /// Câmara orbital: distância, pitch, yaw (graus) e/ou alvo (nome).
     SetCamera {
@@ -590,8 +606,10 @@ pub enum DebugOp {
     },
     /// HP absoluto de QUALQUER entidade (clamp a [0, max]) — `set_hp(n)`
     /// continua a ser o atalho do player.
+    // TODO(migration): `viber.ecs.set` em `Health.current`.
     SetEntityHp(Entity, f32),
     /// HP máximo de qualquer entidade (mín. 1; atual clampado).
+    // TODO(migration): `viber.ecs.set/insert` em `Health`.
     SetMaxHp(Entity, f32),
     /// Força o estado de uma quest: "active" | "ready" | "done" | "not_taken".
     QuestForce(String, String),
@@ -611,8 +629,10 @@ pub enum DebugOp {
     SkillReset,
     /// Estado da FSM da criatura: "wander" | "chase" (a FSM reavalia por
     /// distância a cada frame — o aggro_radius é o lever que persiste).
+    // TODO(migration): `viber.ecs.set` em `EnemyCreature.state`.
     AiState(Entity, String),
     /// Raio de aggro da criatura (m).
+    // TODO(migration): `viber.ecs.set` em `EnemyCreature.aggro_radius`.
     AiAggro(Entity, f32),
     /// Todas as criaturas da FSM → Wander.
     AiCalmAll,
@@ -1988,6 +2008,11 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
     }
 
     let view = build_view(world);
+    // `viber.ecs` na REPL: espelho ao vivo desta chamada (o bridge tem
+    // `&mut World`, ao contrário das closures de script) e ids livres para
+    // `viber.ecs.spawn` — o mesmo pool que o `luau_update` reabastece.
+    let ecs_mirror = crate::luau::ecs::build_mirror_live(world);
+    crate::luau::ecs::refill_spawn_pool(world);
     let elapsed = world.resource::<Time>().elapsed_secs_f64();
     let mut warnings: Vec<String> = Vec::new();
     // `viber.ground_below` na REPL: handle de leitura do terreno, lido
@@ -2004,7 +2029,7 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
         })
     });
 
-    let (ok, result, error, ops) = {
+    let (ok, result, error, ops, ecs_ops) = {
         let host = world.resource_mut::<LuaScriptHost>();
         // Self = player: a API `viber.*` dos scripts funciona na REPL (log,
         // quest_*, toast, heal_player, teleport_player…). dt = 1.0 para que
@@ -2029,6 +2054,9 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
             // `viber.interacted` com o alcance de outra entidade.
             ctx.interaction_range = None;
             ctx.surfaces = surfaces;
+            // Espelho refletido DESTA chamada (`viber.ecs.get/query`); no
+            // jogo é semeado pelo `luau_update` no início do frame.
+            ctx.ecs_mirror = Some(ecs_mirror);
         }
         host.lua.set_app_data(view);
         host.lua.set_app_data(DebugOps::default());
@@ -2079,6 +2107,27 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
         // crescia sem fim. As leituras já falham com "sem snapshot"; as
         // escritas passam a falhar com a mesma causa em vez do no-op mudo.
         host.lua.remove_app_data::<DebugOps>();
+        // `viber.ecs.*` também enfileira `ScriptCommand::Ecs`. Na REPL não há
+        // `luau_update` a drenar no mesmo frame (e a fila de um script de jogo
+        // não pode ser roubada): retiram-se SÓ as ops ECS e aplicam-se já,
+        // mantendo as restantes para o runtime.
+        let ecs_ops: Vec<crate::luau::ecs::EcsOp> = host
+            .lua
+            .app_data_mut::<crate::luau::ScriptCtx>()
+            .map(|mut ctx| {
+                let ops: Vec<crate::luau::ecs::EcsOp> = ctx
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        crate::luau::ScriptCommand::Ecs(op) => Some(op.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                ctx.commands
+                    .retain(|command| !matches!(command, crate::luau::ScriptCommand::Ecs(_)));
+                ops
+            })
+            .unwrap_or_default();
         // Limpa o snapshot: uma closure de SCRIPT DE JOGO que chamasse
         // viber.debug veria dados podres da última REPL — melhor falhar.
         // REMOVER (e não substituir por `DebugView::default()`): com um
@@ -2086,9 +2135,16 @@ pub fn eval(params: In<Option<Json>>, world: &mut World) -> BrpResult {
         // devolviam dados ocos (lista de entidades vazia, player nil) em vez
         // do erro "sem snapshot — só dentro de viber.lua".
         host.lua.remove_app_data::<DebugView>();
-        (ok, result, error, ops)
+        (ok, result, error, ops, ecs_ops)
     };
 
+    // `viber.ecs` primeiro: as ops de debug seguintes podem ler o componente
+    // que o chunk acabou de escrever.
+    for op in ecs_ops {
+        if let Err(error) = crate::luau::ecs::apply_op(world, &op) {
+            warnings.push(format!("viber.ecs: {error}"));
+        }
+    }
     let applied = apply_ops(world, ops, &mut warnings);
     let mut response = json!({ "ok": ok, "applied": applied, "warnings": warnings });
     if let Some(result) = result {

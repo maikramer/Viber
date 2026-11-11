@@ -150,7 +150,8 @@ const BUILD_BUDGET_COLD: usize = 6;
 const LATTICE: usize = 17;
 
 /// Runtime settings, so a slow GPU can be dialed back without a rebuild.
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct GrassSettings {
     pub enabled: bool,
     /// Multiplies every tier's density.
@@ -173,7 +174,8 @@ impl Default for GrassSettings {
 }
 
 /// Live tiles, keyed by tile coordinate.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct GrassField {
     /// Ainda há tiles por construir à volta da câmara (`crate::cinematic`
     /// espera por isto num corte em negro).
@@ -201,6 +203,7 @@ pub struct GrassField {
     edit_rev: u64,
 }
 
+#[derive(Reflect)]
 struct LiveTile {
     entity: Entity,
     mesh: Handle<Mesh>,
@@ -209,7 +212,8 @@ struct LiveTile {
 }
 
 /// Marker on a grass tile entity.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct GrassTile;
 
 // ───────────────────────────────────────────────────────────── biomes

@@ -30,13 +30,15 @@ pub const FALL_ANGLE_DEG: f32 = 88.0;
 // ── componentes ─────────────────────────────────────────────────────────
 
 /// Velocidade horizontal residual de um impacto (m/s).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct Knockback {
     pub velocity: Vec3,
 }
 
 /// Destrutível a tombar (`break-style: fall`).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct Falling {
     pub axis: Vec3,
     pub timer: f32,

@@ -47,7 +47,7 @@ use crate::recipes::spawn::PendingTerrain;
 use crate::textures::WorldTiledTextures;
 
 /// One texture still loading, watched by [`drop_failed_terrain_textures`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub enum WatchedTexture {
     /// Legacy single-texture material (terrain fallback path, road ribbons,
     /// junction discs, ground decals).
@@ -98,7 +98,8 @@ pub enum WatchedTexture {
 /// Albedos que o ecrã de loading espera. Vazio = nada para esperar (mundo
 /// sem `layers`). O chão não desenha enquanto um destes ainda carrega; os
 /// mapas de detalhe ficam de fora deste gate de propósito.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainTextureGate {
     pub albedo: Vec<Handle<Image>>,
 }
@@ -125,7 +126,8 @@ impl TerrainTextureGate {
 /// single missing **albedo** therefore makes the whole terrain disappear —
 /// which is exactly what `simple-rpg` hit when it asked for `vale_grass.png`
 /// before the texture pool existed.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PendingTerrainTextures {
     /// Entries still waiting on their image.
     pub watched: Vec<WatchedTexture>,
@@ -383,7 +385,7 @@ pub(crate) fn load_world_texture(
 /// The terrain's layer material, published by the bootstrap: ONE material for
 /// every chunk (the 13 pool layers + the global splat planes). Kept behind the
 /// per-chunk `get` so the chunk spawners stay unchanged.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct ChunkLayerMap {
     pub material: Handle<TerrainChunkMaterial>,
 }
@@ -400,7 +402,8 @@ impl ChunkLayerMap {
 /// after a successful bootstrap: the layer material when the world opted in
 /// (`layers`) and the render plugins are live, the legacy single-texture
 /// material otherwise.
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainChunkMaterials {
     pub layer: Option<ChunkLayerMap>,
     pub standard: Option<Handle<StandardMaterial>>,
@@ -418,10 +421,13 @@ impl TerrainChunkMaterials {
 /// O splat GLOBAL do terreno (13 pesos por texel em 4 planos RGBA8): os bytes
 /// (para repintar um retângulo ao vivo), os handles das 4 imagens que o
 /// material lê e os parâmetros com que foi cozido.
-#[derive(Resource, Debug)]
+#[derive(Resource, Debug, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainSplat {
+    #[reflect(ignore)]
     pub map: SplatMap,
     pub planes: [Handle<Image>; 4],
+    #[reflect(ignore)]
     pub params: SplatParams,
 }
 
@@ -523,9 +529,19 @@ pub enum ChunkMaterialHandle {
 /// readers outside the ECS (the Luau context) without copying — the terrain is
 /// immutable after the bootstrap (destructible terrain is not in this round),
 /// so sharing IS the single source of height, not a copy of it.
-#[derive(Resource)]
+/// Grelha de preenchimento para o `FromReflect` (campo ignorado).
+fn default_brush_grid() -> std::sync::Arc<BrushGrid> {
+    std::sync::Arc::new(
+        BrushGrid::new(vec![0], 1, 1, 1.0, 1.0, 0.0).expect("grelha 1x1"),
+    )
+}
+
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainRuntime {
+    #[reflect(ignore)]
     pub spec: TerrainSpec,
+    #[reflect(ignore, default = "default_brush_grid")]
     pub grid: std::sync::Arc<BrushGrid>,
     pub water: Vec<WaterBody>,
     pub roads: Vec<RoadPath>,
@@ -534,6 +550,7 @@ pub struct TerrainRuntime {
     ///
     /// Empty in a world that authors no 3D feature, and empty is free — every
     /// query below then costs exactly what it cost before this field existed.
+    #[reflect(ignore)]
     pub voxel: std::sync::Arc<VoxelField>,
     /// Edições VIVAS (Fase 3): recortes densos de altura sobre a grid
     /// carvada — crateras/valas/aterros pedidos em runtime por Lua/bridge.
@@ -542,12 +559,14 @@ pub struct TerrainRuntime {
     /// sempre na grid (uma leitura de `len` por amostra). A grid do
     /// bootstrap NUNCA é mutada; o overlay é a única diferença entre
     /// "mundo como autorado" e "mundo como ficou".
+    #[reflect(ignore)]
     pub deltas: std::sync::Arc<crate::terrain::delta::DeltaGrid>,
     /// Camada de PINCEL de material (Fase 2): overrides por célula sobre os
     /// pesos splat procedurais, persistida ao lado do `.ahgt`
     /// (`` `<ahgt>`.paint ``) e repintada in-place nos materiais de chunk
     /// ([`repaint_chunks`]).
     /// `Arc`: dezenas de MB num mapa grande — o repaint e o sync partilham, não clonam.
+    #[reflect(ignore)]
     pub paint: std::sync::Arc<crate::terrain::paint::PaintGrid>,
     /// O ÚLTIMO tuning aplicado por `viber.debug.ground` — a repintura ao
     /// vivo usa-o para não reverter os ajustes (default enquanto ninguém

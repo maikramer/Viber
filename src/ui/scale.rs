@@ -23,7 +23,8 @@ pub const MAX_SCALE: f32 = 2.0;
 
 /// Multiplicador do utilizador (menu de acessibilidade). 1.0 = escala
 /// automática por resolução; 0.5..3.0 é o intervalo aceite.
-#[derive(Debug, Clone, Copy, Resource)]
+#[derive(Debug, Clone, Copy, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiUserScale(pub f32);
 
 impl Default for UiUserScale {

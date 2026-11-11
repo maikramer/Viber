@@ -1,7 +1,7 @@
-//! Fills [`UiData`] once per frame from the game's own components and
-//! resources.
+//! Fills [`UiData`] once per frame from the world's own resources and from
+//! the interaction/zone systems.
 //!
-//! This is the single place the declarative UI touches gameplay state. Keeping
+//! This is the single place the declarative UI touches engine state. Keeping
 //! it in one system means a HUD element never queries the world itself: worlds
 //! and scripts only ever see the named bindings, which is what makes the
 //! interface re-authorable without recompiling the engine.
@@ -10,10 +10,10 @@ use bevy::prelude::*;
 
 use super::bind::UiData;
 use super::runtime::{UiBind, UiTag};
-use crate::vitals::Health;
 
 /// Newest toast plus its remaining lifetime, so `toast.active` can fade.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiToast {
     pub text: String,
     pub time: f32,
@@ -162,26 +162,16 @@ pub fn key_label(key: bevy::input::keyboard::KeyCode) -> String {
 }
 
 /// Gathers everything the bindings can read.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn collect_ui_data(
     mut data: ResMut<UiData>,
-    hero: Query<Option<&Health>, With<crate::player::Player>>,
     day: Option<Res<crate::worldsys::DayCycleState>>,
     weather: Option<Res<crate::worldsys::WeatherState>>,
     prompt: Option<Res<UiPrompt>>,
     toast: Res<UiToast>,
 ) {
     // Escritas gated: `UiData` é `ResMut` e um `deref_mut` marca o recurso em
-    // `Changed`; escrever a vida/chuva incondicionalmente fazia o
+    // `Changed`; escrever a chuva incondicionalmente fazia o
     // `publish_ui_script_view` clonar o snapshot inteiro em todos os frames.
-    if let Ok(Some(health)) = hero.single() {
-        if data.health != health.current {
-            data.health = health.current;
-        }
-        if data.health_max != health.max {
-            data.health_max = health.max;
-        }
-    }
     let rain = weather.as_deref().map(|w| w.rain).unwrap_or(0.0);
     if data.weather_rain != rain {
         data.weather_rain = rain;
@@ -224,28 +214,14 @@ pub fn collect_ui_data(
 
 // ── revelações contextuais ──────────────────────────────────────────────
 
-/// Quanto tempo um widget contextual fica no ecrã depois da mudança que o
-/// justificou (s).
-pub const REVEAL_SECS: f32 = 3.2;
-/// A missão fica um pouco mais — é a única linha de texto longa do HUD e o
-/// jogador tem de a conseguir ler.
-pub const QUEST_REVEAL_SECS: f32 = 6.0;
-/// Depois do último sinal de combate, a barra de acções ainda espera isto
-/// antes de sair (evita piscar entre dois golpes).
-pub const COMBAT_REVEAL_SECS: f32 = 5.0;
 /// Vida do cartão de descoberta de zona.
 pub const ZONE_REVEAL_SECS: f32 = 4.5;
 
-/// Último valor visto de cada coisa que dispara uma revelação.
+/// Último valor visto da zona — é o único sinal de revelação que a engine
+/// conhece (vida, ouro, quests e combate são do jogo).
 #[derive(Debug, Default)]
 pub struct RevealMemory {
     seeded: bool,
-    purse: (u32, u32, u32),
-    belt: (u32, u32, u32),
-    xp: (f32, u32),
-    quest: String,
-    progress: String,
-    health: f32,
     zone: Option<String>,
 }
 
@@ -256,21 +232,16 @@ pub const INTERIOR_ZONE_ID: &str = "interior";
 ///
 /// Um cartão de descoberta que diz `dark-forest` é uma etiqueta de debug; o
 /// que dá peso ao sítio é o nome que ele tem no mundo. A precedência é:
-/// **`display-name` autoral** na região activa (XML) → tabela de fallback da
-/// engine → título derivado do próprio id, para uma zona nova não precisar
-/// nem de Rust nem de editar o mundo existente.
+/// **`display-name` autoral** na região activa (XML) → título derivado do
+/// próprio id, para uma zona nova não precisar nem de Rust nem de editar o
+/// mundo existente. Sem id nem attr não há cartão (string vazia).
 pub fn zone_display_name(display_name: Option<&str>, id: Option<&str>) -> String {
     if let Some(name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
         return name.to_string();
     }
     match id {
-        None => "O Vale".to_string(),
-        Some(INTERIOR_ZONE_ID) => "Interior".to_string(),
-        Some("dark-forest") => "Floresta Sombria".to_string(),
-        Some("desert") => "Ermo Rubro".to_string(),
-        Some("swamp") => "Pântano da Bruma".to_string(),
-        Some("frozen-peaks") => "Picos Gelados".to_string(),
-        Some(other) => title_case(other),
+        None => String::new(),
+        Some(id) => title_case(id),
     }
 }
 
@@ -289,12 +260,12 @@ fn title_case(id: &str) -> String {
         .join(" ")
 }
 
-/// Abre e fecha as janelas de revelação de [`UiData`].
+/// Abre e fecha a janela do cartão de descoberta de [`UiData`].
 ///
-/// Corre depois de `collect_ui_data`: compara o que mudou face ao frame
-/// anterior, reabre a janela do widget correspondente e desconta o tempo das
-/// outras. O primeiro frame é só semeadura — sem isto, o HUD abria tudo de uma
-/// vez no arranque, que é exactamente o que estamos a tentar não ter.
+/// Corre depois de `collect_ui_data`: compara a zona com o frame anterior e,
+/// quando muda, publica o nome e reabre a janela. O primeiro frame é só
+/// semeadura — sem isto, o HUD abria o cartão de zona no arranque, que é
+/// exactamente o que estamos a tentar não ter.
 pub fn collect_ui_reveals(
     mut data: ResMut<UiData>,
     mut memory: Local<RevealMemory>,
@@ -304,9 +275,6 @@ pub fn collect_ui_reveals(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    let purse = (data.gold, data.wood, data.stone);
-    let belt = (data.potions, data.antidotes, data.bombs);
-    let xp = (data.xp, data.level);
     // Dentro de uma sala da bolsa a "zona" é o interior — o bioma lá fora
     // (o vale a 2,6 km) não é onde o herói está.
     let inside = interior.as_deref().is_some_and(|state| state.active);
@@ -316,7 +284,7 @@ pub fn collect_ui_reveals(
         biome.as_deref().and_then(|b| b.id.clone())
     };
     // O `display-name` da região activa vem do XML (Tinta Quente: o mundo é
-    // quem nomeia os sítios); sem attr, `zone_display_name` cai na tabela.
+    // quem nomeia os sítios); sem attr, `zone_display_name` cai no id.
     let authored = zone.as_deref().and_then(|id| {
         biomes
             .as_deref()?
@@ -331,70 +299,18 @@ pub fn collect_ui_reveals(
 
     if !memory.seeded {
         memory.seeded = true;
-        memory.purse = purse;
-        memory.belt = belt;
-        memory.xp = xp;
-        memory.quest = data.quest_title.clone();
-        memory.progress = data.quest_progress_text.clone();
-        memory.health = data.health;
         memory.zone = zone.clone();
         // A zona inicial não é uma descoberta — o herói já lá está.
         data.zone_name = zone_display_name(authored.as_deref(), zone.as_deref());
         return;
     }
 
-    let open = |window: &mut f32, seconds: f32| {
-        if *window < seconds {
-            *window = seconds;
-        }
-    };
-
-    if purse != memory.purse {
-        memory.purse = purse;
-        open(&mut data.purse_reveal, REVEAL_SECS);
-    }
-    if belt != memory.belt {
-        memory.belt = belt;
-        open(&mut data.belt_reveal, REVEAL_SECS);
-    }
-    if xp != memory.xp {
-        memory.xp = xp;
-        open(&mut data.xp_reveal, REVEAL_SECS);
-    }
-    if data.quest_title != memory.quest {
-        memory.quest = data.quest_title.clone();
-        open(&mut data.quest_reveal, QUEST_REVEAL_SECS);
-    }
-    // Progresso do objectivo ("1/5" → "2/5") também reabre o tracker: é o
-    // feedback da colheita/kill. Sem isto, só uma MISSÃO nova aparecia e o
-    // "2/5" atualizava-se às escuras.
-    if !data.quest_progress_text.is_empty() && data.quest_progress_text != memory.progress {
-        memory.progress = data.quest_progress_text.clone();
-        open(&mut data.quest_reveal, QUEST_REVEAL_SECS);
-    } else if data.quest_progress_text != memory.progress {
-        memory.progress = data.quest_progress_text.clone();
-    }
-    // Combate: um alvo travado ou uma perda de vida mantêm a janela aberta.
-    let hurt = data.health < memory.health - 0.01;
-    memory.health = data.health;
-    if hurt || !data.target_name.is_empty() {
-        open(&mut data.combat_reveal, COMBAT_REVEAL_SECS);
-    }
-    // O cinto acompanha o combate: é onde a poção está.
-    if data.combat_reveal > 0.0 {
-        open(&mut data.belt_reveal, 0.6);
-    }
     if zone != memory.zone {
         memory.zone = zone.clone();
         data.zone_name = zone_display_name(authored.as_deref(), zone.as_deref());
         data.zone_reveal = ZONE_REVEAL_SECS;
     }
 
-    tick(&mut data.purse_reveal, dt);
-    tick(&mut data.belt_reveal, dt);
-    tick(&mut data.xp_reveal, dt);
-    tick(&mut data.quest_reveal, dt);
-    tick(&mut data.combat_reveal, dt);
     tick(&mut data.zone_reveal, dt);
 }
 
@@ -406,7 +322,8 @@ fn tick(window: &mut f32, dt: f32) {
 }
 
 /// Nearest interactable, published by the interaction system.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiPrompt {
     pub key: String,
     pub label: String,
@@ -563,37 +480,32 @@ mod tests {
     }
 
     #[test]
-    fn test_zone_display_name_is_a_place_not_an_id() {
-        assert_eq!(zone_display_name(None, None), "O Vale");
-        assert_eq!(
-            zone_display_name(None, Some("dark-forest")),
-            "Floresta Sombria"
-        );
-        assert_eq!(
-            zone_display_name(None, Some("frozen-peaks")),
-            "Picos Gelados"
-        );
+    fn test_zone_display_name_derives_a_place_not_an_id() {
+        // Sem zona (nem attr) não há cartão a mostrar.
+        assert_eq!(zone_display_name(None, None), "");
+        // O id vira título: a tabela de nomes é CONTEÚDO do mundo, não da
+        // engine (Vael tem os `display-name` no XML).
+        assert_eq!(zone_display_name(None, Some("dark-forest")), "Dark Forest");
+        assert_eq!(zone_display_name(None, Some("frozen-peaks")), "Frozen Peaks");
         // Uma região nova no XML já sai legível sem tocar em Rust.
         assert_eq!(zone_display_name(None, Some("sunken-city")), "Sunken City");
+        assert_eq!(zone_display_name(None, Some("interior")), "Interior");
         assert_eq!(zone_display_name(None, Some("")), "");
     }
 
     #[test]
     fn test_zone_display_name_prefers_the_authored_name() {
-        // display-name autoral vence a tabela…
+        // display-name autoral vence o id…
         assert_eq!(
             zone_display_name(Some("Vale das Cinzas"), Some("dark-forest")),
             "Vale das Cinzas"
         );
-        // …e a tabela vence o id derivado.
         assert_eq!(
-            zone_display_name(None, Some("dark-forest")),
+            zone_display_name(Some("Floresta Sombria"), Some("dark-forest")),
             "Floresta Sombria"
         );
-        assert_eq!(zone_display_name(None, Some("banana-tree")), "Banana Tree");
-        // Um attr em branco não conta como nome — cai ao nível abaixo.
-        assert_eq!(zone_display_name(Some("   "), Some("desert")), "Ermo Rubro");
-        // Com id desconhecido E sem attr, o id deriva o título.
+        // …e um attr em branco não conta como nome — cai ao id derivado.
+        assert_eq!(zone_display_name(Some("   "), Some("desert")), "Desert");
         assert_eq!(zone_display_name(Some("Nome"), None), "Nome");
     }
 

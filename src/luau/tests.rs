@@ -2525,3 +2525,224 @@ fn test_camera_free_and_pose_reach_the_resource() {
     assert_eq!(free.pos, Vec3::new(1.0, 2.0, 3.0));
     assert_eq!(free.look, Vec3::new(1.0, 2.0, 2.0));
 }
+
+// ── `viber.ecs` (reflexão ECS) ────────────────────────────────────────────
+//
+// A app destes testes é a `test_app` + `ReflectPlugin` + o espelho/pool do
+// `EcsSpawnPool`. As leituras (`get`/`query`) vêm do snapshot do início do
+// frame; as escritas (`set`/`insert`/`remove`/`spawn`/`despawn`) enfileiram
+// `ScriptCommand::Ecs` e aplicam no fim do `Update` (como todos os comandos).
+
+/// App mínima com reflexão e o espelho/pool de `viber.ecs`.
+fn ecs_test_app(host: LuaScriptHost) -> bevy::app::App {
+    let mut app = bevy::app::App::new();
+    app.add_plugins(crate::reflect::ReflectPlugin);
+    let mut host = host;
+    host.set_ecs_registry(
+        app.world()
+            .resource::<bevy::ecs::reflect::AppTypeRegistry>()
+            .0
+            .clone(),
+    );
+    let pool = crate::luau::ecs::EcsSpawnPool::default();
+    host.set_ecs_pool(pool.queue.clone());
+    app.insert_resource(pool);
+    app.init_resource::<crate::luau::ecs::EcsMirror>();
+    app.init_resource::<Time>();
+    app.init_resource::<ButtonInput<KeyCode>>();
+    app.add_message::<ScriptToast>();
+    app.add_message::<crate::ambient::SfxEvent>();
+    app.insert_resource(host);
+    app.add_systems(
+        Update,
+        (
+            crate::luau::ecs::mirror_system,
+            luau_on_add,
+            luau_update,
+            luau_on_remove,
+        )
+            .chain(),
+    );
+    app
+}
+
+#[test]
+fn test_ecs_lua_get_query_set() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             local st = viber.state()\n\
+             if st.done then return end\n\
+             st.done = true\n\
+             local id = viber.self_id()\n\
+             local hp = viber.ecs.get(id, 'viber::vitals::Health')\n\
+             assert(hp ~= nil, 'Health visível por reflexão')\n\
+             assert(hp.current == 50 and hp.max == 100, 'valores refletidos')\n\
+             local ids = viber.ecs.query('viber::vitals::Health')\n\
+             assert(#ids == 1 and ids[1] == id, 'query devolve o id')\n\
+             local ok, err = viber.ecs.set(id, 'viber::vitals::Health', { current = 42 })\n\
+             assert(ok, err)\n\
+         end",
+        "ecs.lua",
+    );
+    let mut app = ecs_test_app(host);
+    let entity = app
+        .world_mut()
+        .spawn((
+            Health {
+                current: 50.0,
+                max: 100.0,
+            },
+            Transform::default(),
+            LuaScriptRef {
+                path: "ecs.lua".into(),
+            },
+        ))
+        .id();
+    app.update();
+    let health = app.world().get::<Health>(entity).unwrap();
+    assert!(
+        (health.current - 42.0).abs() < 1e-4,
+        "set aplicado pós-frame: {}",
+        health.current
+    );
+    assert!((health.max - 100.0).abs() < 1e-4);
+
+    // Path fora da whitelist é recusado ANTES de qualquer acesso ao mundo.
+    let host = app.world().resource::<LuaScriptHost>();
+    let error = host
+        .lua
+        .load("viber.ecs.get(0, 'std::vec::Vec<u8>')")
+        .exec()
+        .expect_err("path arbitrário tem de falhar");
+    assert!(
+        error.to_string().contains("whitelist"),
+        "erro claro: {error}"
+    );
+}
+
+#[test]
+fn test_ecs_lua_spawn_insert_remove_despawn() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             local st = viber.state()\n\
+             if st.frame == nil then\n\
+                 st.frame = 1\n\
+                 st.spawned = viber.ecs.spawn({\n\
+                     ['viber::vitals::Health'] = { current = 7, max = 9 },\n\
+                     ['viber::vitals::Hostile'] = {},\n\
+                 })\n\
+                 local ok, err = viber.ecs.insert(viber.self_id(),\n\
+                     'viber::luau::components::ScriptActivation', { radius = 12.5 })\n\
+                 assert(ok, err)\n\
+                 local ok2, err2 = viber.ecs.remove(viber.self_id(), 'viber::vitals::Health')\n\
+                 assert(ok2, err2)\n\
+                 return\n\
+             end\n\
+             if st.frame == 1 then\n\
+                 st.frame = 2\n\
+                 local id = viber.self_id()\n\
+                 assert(viber.ecs.get(id, 'viber::vitals::Health') == nil, 'Health removido')\n\
+                 local act = viber.ecs.get(id, 'viber::luau::components::ScriptActivation')\n\
+                 assert(act ~= nil and act.radius == 12.5, 'insert refletido')\n\
+                 local spawn = viber.ecs.get(st.spawned, 'viber::vitals::Health')\n\
+                 assert(spawn ~= nil and spawn.current == 7 and spawn.max == 9, 'spawn refletido')\n\
+                 local ids = viber.ecs.query('viber::vitals::Health')\n\
+                 assert(#ids == 1 and ids[1] == st.spawned, 'query só o spawnado')\n\
+                 viber.ecs.despawn(st.spawned)\n\
+             end\n\
+         end",
+        "ecs_spawn.lua",
+    );
+    let mut app = ecs_test_app(host);
+    let entity = app
+        .world_mut()
+        .spawn((
+            Health {
+                current: 50.0,
+                max: 100.0,
+            },
+            Transform::default(),
+            LuaScriptRef {
+                path: "ecs_spawn.lua".into(),
+            },
+        ))
+        .id();
+    app.update(); // frame 1: fila aplicada no fim do schedule
+    assert!(app.world().get::<Health>(entity).is_none(), "remove aplicado");
+    assert!(
+        app.world()
+            .get::<crate::luau::ScriptActivation>(entity)
+            .is_some(),
+        "insert aplicado"
+    );
+
+    let host = app.world().resource::<LuaScriptHost>();
+    let states: Table = host.lua.named_registry_value("viber_states").unwrap();
+    let state: Table = states.raw_get(entity.to_bits() as i64).unwrap();
+    let spawned_bits: i64 = state.raw_get("spawned").unwrap();
+    let spawned = Entity::try_from_bits(spawned_bits as u64).unwrap();
+    let spawned_health = app.world().get::<Health>(spawned).expect("Health do spawn");
+    assert_eq!((spawned_health.current, spawned_health.max), (7.0, 9.0));
+    assert!(
+        app.world().get::<crate::vitals::Hostile>(spawned).is_some(),
+        "segundo componente do spawn"
+    );
+
+    app.update(); // frame 2: lê o espelho e despawna
+    assert!(
+        app.world().get_entity(spawned).is_err(),
+        "despawn aplicado"
+    );
+}
+
+#[test]
+fn test_ecs_errors_are_clear() {
+    let host = host_with(
+        "function on_update(dt)\n\
+             local st = viber.state()\n\
+             if st.done then return end\n\
+             st.done = true\n\
+             local id = viber.self_id()\n\
+             -- campo inexistente: false + erro
+             local ok, err = viber.ecs.set(id, 'viber::vitals::Health', { nope = 1 })\n\
+             assert(ok == false and err:find(\"campo 'nope'\") ~= nil, tostring(err))\n\
+             -- tipo construído sem Default: exige todos os campos
+             local ok2, err2 = viber.ecs.insert(id, 'viber::luau::components::LuaScriptRef', {})\n\
+             assert(ok2 == false and err2 ~= nil, tostring(err2))\n\
+         end",
+        "ecs_err.lua",
+    );
+    let mut app = ecs_test_app(host);
+    app.world_mut().spawn((
+        Health {
+            current: 50.0,
+            max: 100.0,
+        },
+        Transform::default(),
+        LuaScriptRef {
+            path: "ecs_err.lua".into(),
+        },
+    ));
+    app.update();
+}
+
+#[test]
+fn test_ecs_api_registered() {
+    let host = LuaScriptHost::new(PathBuf::from("scripts")).expect("host");
+    let viber: Table = host.lua.globals().get("viber").expect("tabela viber");
+    let ecs: Table = viber.get("ecs").expect("viber.ecs");
+    for name in [
+        "get", "set", "insert", "remove", "query", "spawn", "despawn", "types",
+    ] {
+        let value: mlua::Value = ecs.raw_get(name).expect("chave");
+        assert!(
+            matches!(value, mlua::Value::Function(_)),
+            "viber.ecs.{name} deve ser função"
+        );
+    }
+    // Sem `AppTypeRegistry` na VM, `types()` devolve a whitelist completa
+    // (com o registo, filtra o que está registado).
+    let types_fn: mlua::Function = ecs.get("types").expect("types");
+    let types: Table = types_fn.call(()).expect("types()");
+    assert!(types.raw_len() >= 10, "whitelist curada: {}", types.raw_len());
+}

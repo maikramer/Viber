@@ -9,7 +9,7 @@ use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 pub enum Action {
     Jump,
     Sprint,
@@ -44,13 +44,14 @@ impl Action {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Reflect)]
 pub struct Binding {
     pub key: Option<String>,
     pub pad: Option<String>,
 }
 
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, Reflect)]
+#[reflect(Resource)]
 pub struct ActionMap {
     pub bindings: HashMap<Action, Binding>,
 }
@@ -84,7 +85,8 @@ impl ActionMap {
     }
 }
 
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct ActionState {
     pub move_x: f32,
     pub forward: f32,

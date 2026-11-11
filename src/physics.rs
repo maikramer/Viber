@@ -41,7 +41,7 @@ use bevy_rapier3d::prelude::*;
 use crate::recipes::parse_component_string;
 
 /// Where a collision mesh's origin sits relative to the entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum MeshAnchor {
     /// Origin as authored (the glTF's own origin).
     #[default]
@@ -52,7 +52,7 @@ pub enum MeshAnchor {
 }
 
 /// The collision shape an entity asks for.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
 pub enum ColliderShape {
     /// No collider at all (`collider="none"`, and the default).
     #[default]
@@ -372,7 +372,8 @@ fn finite_or_default(value: Option<String>, default: f32) -> f32 {
 // ------------------------------------------------------------------ runtime
 
 /// A collider that still needs mesh data before it can be built.
-#[derive(Debug, Component, Clone)]
+#[derive(Debug, Component, Clone, Reflect)]
+#[reflect(Component)]
 pub struct PendingCollider {
     pub shape: ColliderShape,
     /// Handle of the glTF being loaded for `Mesh` / `Precompute` shapes.
@@ -398,8 +399,10 @@ pub const PENDING_TIMEOUT: f32 = 4.0;
 /// reference-counted internally, so the clones share one shape. The failure
 /// reason (when the bake failed) is cached too, so the warning is emitted
 /// once per asset instead of once per placed instance.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ColliderCache {
+    #[reflect(ignore)]
     baked: std::collections::HashMap<(AssetId<bevy::gltf::Gltf>, bool), BakedCollider>,
 }
 
@@ -425,7 +428,8 @@ impl ColliderCache {
 
 /// Marker for entities whose collider has been resolved (or given up on), so
 /// the resolver never revisits them.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct ColliderResolved;
 
 /// Rapier wiring for Viber.
@@ -476,7 +480,8 @@ impl bevy::app::Plugin for PhysicsPlugin {
 /// O editor escreve isto para mostrar o wireframe no viewport de edição.
 /// Ausente no jogo: o toggle do profiler mexe no [`DebugRenderContext`]
 /// directamente e este sistema não o pisa.
-#[derive(Resource, Debug, Default, Clone, Copy)]
+#[derive(Resource, Debug, Default, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct ColliderDebugToggle(pub bool);
 
 fn apply_collider_debug_toggle(
@@ -1381,7 +1386,8 @@ pub const PHYSICS_CHUNK_RADIUS: f32 = 3.0;
 /// O collider vive na entidade da coluna (um trimesh por coluna, triângulos
 /// dos caixas transvoxel), não nas caixas — uma aresta interna a cada 64 m
 /// em vez de a cada 32 m, e zero superfícies coincidentes na pilha vertical.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct VoxelCollider;
 
 /// Banda de colisão em metros para um spec.
@@ -1433,7 +1439,8 @@ pub fn nearest_column_distance(points: &[Vec3], coords: UVec2, half: f32, edge: 
 /// porque o player 1 estava numa coluna assada e desligava o chão analítico do
 /// player 2, que caía pelo terreno ainda por assar. `ready` continua a ser o
 /// agregado (algum herói com chão) para quem não tem a entidade à mão.
-#[derive(Debug, Resource, Default)]
+#[derive(Debug, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainCollisionStatus {
     pub ready: bool,
     /// Heróis cuja coluna (a que os contém) já tem collider.

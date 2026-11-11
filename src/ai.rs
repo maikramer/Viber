@@ -59,7 +59,8 @@ pub const STOP_EPSILON: f32 = 0.02;
 ///
 /// The desire is a *one-frame* contract: the consumer clears it. A producer
 /// that stops asking decelerates to a stop instead of freezing mid-stride.
-#[derive(Debug, Clone, Copy, Component, Default)]
+#[derive(Debug, Clone, Copy, Component, Default, Reflect)]
+#[reflect(Component, Default)]
 pub struct AiLocomotion {
     /// Current planar velocity (m/s). Integrated, never assigned by producers.
     pub velocity: Vec2,
@@ -150,7 +151,7 @@ impl AiLocomotion {
 }
 
 /// Behaviour state of one [`EnemyCreature`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum EnemyState {
     /// Patrol around `home`; the [`Default`].
     #[default]
@@ -188,7 +189,8 @@ impl EnemyState {
 ///
 /// `Default` is Wander with `home` unset — [`enemy_ai`] latches the real home
 /// to the spawn position on the first tick.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component, Default)]
 pub struct EnemyCreature {
     /// Chase speed in m/s (wander runs at [`WANDER_SPEED_FRACTION`] × this).
     pub speed: f32,
@@ -216,7 +218,8 @@ impl Default for EnemyCreature {
 }
 
 /// Patrol bookkeeping for one wanderer, auto-inserted by [`enemy_ai`].
-#[derive(Debug, Clone, Component, Default)]
+#[derive(Debug, Clone, Component, Default, Reflect)]
+#[reflect(Component, Default)]
 pub struct WanderState {
     /// Current patrol target (XZ).
     pub target: Vec2,

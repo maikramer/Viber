@@ -23,8 +23,20 @@ pub struct UiAction {
 
 /// Ações da UI reclamadas por scripts (`viber.ui.own_action("buy")`): chegam
 /// a Lua via `viber.events()` (`{type="ui_action"}`) e a lógica vive no jogo.
-#[derive(Debug, Default, Resource)]
+///
+/// O handler nativo correspondente (ex.: `save`/`load` em [`crate::save`])
+/// consulta [`Self::owns`] e cala-se — sem dono, o comportamento nativo é o
+/// de sempre (compatível: nada muda até um script pedir).
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiActionOwners(pub std::collections::HashSet<String>);
+
+impl UiActionOwners {
+    /// A ação `name` é tratada por um script?
+    pub fn owns(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+}
 
 /// Encaminha TODAS as ações da UI para a fila de eventos dos scripts
 /// (`viber.events()` → `{type="ui_action", name=..., arg=...}`). Os handlers

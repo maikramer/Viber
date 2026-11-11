@@ -15,6 +15,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use bevy::ecs::reflect::ReflectResource;
+use bevy::reflect::Reflect;
 
 use crate::xml::emit::emit_document;
 use crate::xml::include::{MAX_INCLUDE_DEPTH, resolve_include_path};
@@ -25,7 +27,7 @@ pub type FileId = usize;
 
 /// Um nó de um ficheiro: caminho de índices de filhos a partir do elemento raiz.
 /// Caminho vazio = o elemento raiz (`<world>`) desse ficheiro.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord, Reflect)]
 pub struct NodeRef {
     pub file: FileId,
     pub path: Vec<usize>,
@@ -63,7 +65,7 @@ impl NodeRef {
 }
 
 /// Um ficheiro XML carregado.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct SceneFile {
     /// Caminho canónico absoluto.
     pub path: PathBuf,
@@ -81,7 +83,8 @@ pub struct SceneFile {
 }
 
 /// O mundo em edição.
-#[derive(Debug, Clone, bevy::prelude::Resource)]
+#[derive(Debug, Clone, bevy::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct SceneDoc {
     pub files: Vec<SceneFile>,
     /// Pasta do mundo (base dos seletores e dos includes `/…`).
@@ -90,6 +93,7 @@ pub struct SceneDoc {
     pub revision: u64,
     /// O heightmap do `<Terrain heightmap>`, carregado pela primeira operação de terreno
     /// (`terrain_brush`/`terrain_patch`) — dezenas de MB, por isso nunca à cabeça.
+    #[reflect(ignore)]
     pub terrain: Option<super::terrain::TerrainDoc>,
 }
 

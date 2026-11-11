@@ -25,6 +25,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use bevy::ecs::reflect::ReflectResource;
+use bevy::reflect::Reflect;
 use serde::{Deserialize, Serialize};
 
 use super::doc::{NodeRef, SceneDoc};
@@ -32,7 +34,7 @@ use crate::xml::emit::emit_document;
 use crate::xml::{XmlDocument, XmlNode, parse_fragment};
 
 /// Uma operação de edição. Os nós endereçam-se por seletor (ver [`super::doc`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EditOp {
     /// Define (ou, com `null`, remove) atributos. No raiz de um ficheiro (`ficheiro#`)
@@ -134,7 +136,7 @@ fn one() -> f32 {
 }
 
 /// O que uma operação mudou no documento — o sync ao vivo traduz isto para o ECS.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub enum Change {
     /// Atributos (nomes) ou texto de um nó mudaram.
     Attrs { node: NodeRef, keys: Vec<String> },
@@ -168,7 +170,7 @@ pub struct Applied {
 }
 
 /// Um lote aplicado atomicamente — a unidade de undo/redo.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Reflect)]
 pub struct Transaction {
     pub label: String,
     /// As operações, canónicas, pela ordem em que foram aplicadas.
@@ -481,7 +483,8 @@ pub fn apply_batch(doc: &mut SceneDoc, label: &str, ops: &[EditOp]) -> Result<Tr
 }
 
 /// Histórico de undo/redo de transações.
-#[derive(Debug, Default, Clone, bevy::prelude::Resource)]
+#[derive(Debug, Default, Clone, bevy::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct History {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,

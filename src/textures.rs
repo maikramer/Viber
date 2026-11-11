@@ -32,7 +32,8 @@ use bevy::prelude::*;
 /// `AssetServer::load`, so the registration is visible to
 /// [`generate_mipmaps_on_load`] before the image's `Added` event is ever
 /// read: the first (and only) patch already carries the tiled sampler.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct WorldTiledTextures(HashSet<AssetId<Image>>);
 
 impl WorldTiledTextures {

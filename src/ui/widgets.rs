@@ -1,19 +1,36 @@
 //! The interactive widgets: check, slider, input — plus tooltips and per-element
 //! mouse cursors.
 //!
-//! Everything here is state on a plain declarative element, not a new render
-//! path: a `<UiCheck>` is a box whose `checked` flag drives classes, a
-//! `<UiSlider>` is a track whose value follows the pressed pointer, and a
-//! `<UiInput>` is a text sink that owns the keyboard while focused. The
-//! stylesheet paints all three exactly like it paints a panel.
+//! A partir do Bevy 0.20 a mecânica destes widgets é a de `bevy_ui_widgets` /
+//! `bevy_input_focus`; o que fica aqui é o ADAPTADOR declarativo: um
+//! `<UiCheck>` continua a ser uma caixa cujo flag `checked` conduz classes, um
+//! `<UiSlider>` continua a ser uma track cujo valor move `.fill`/`.handle`, e
+//! um `<UiInput>` continua a ser um campo cujo texto espelha o `<UiText>`
+//! interno. O XML, o CSS, o `UiRegistry` e o `viber.ui.*` não mudam.
 //!
-//! Scripts read state back through `viber.ui.read(id)` and write it through
-//! `set_checked(id, on)` / `set_value(id, v)` / `focus(id)`.
+//! * `UiCheck` → [`bevy::ui_widgets::Checkbox`] + `Checked`;
+//! * `UiSlider` → [`bevy::ui_widgets::Slider`] + `SliderValue`/`SliderRange`;
+//! * `UiInput` → [`bevy::ui_widgets::TextInput`] + `EditableText`;
+//! * o foco de teclado é o [`bevy::input_focus::InputFocus`], espelhado em
+//!   [`UiFocusedInput`] para o resto da engine (gameplay, Luau).
+//!
+//! Os eventos Bevy (`ValueChange`, `Activate`, foco) são absorvidos por
+//! observers e escritos de volta nos componentes Viber; o diffs de
+//! [`super::events::collect_ui_widget_events`] transformam-nos na fila
+//! `viber.ui.events()` de sempre.
 
+use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input_focus::{FocusCause, InputFocus};
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 // Bevy 0.20: `Interaction`/`Button` do prelude são aliases de tipos privados.
 use crate::ui::interaction::Interaction;
-use bevy::ui::RelativeCursorPosition;
+use bevy::text::EditableText;
+use bevy::ui::{Checked, InteractionDisabled};
+use bevy::ui_widgets::popover::{Popover, PopoverAlign, PopoverPlacement, PopoverSide};
+use bevy::ui_widgets::{
+    Checkbox, Slider, SliderDragState, SliderValue, TextInput, ValueChange,
+};
 use bevy::window::{CursorIcon, PrimaryWindow};
 
 use super::runtime::{UiClasses, UiDisabled, UiStyleDirty};
@@ -32,39 +49,85 @@ pub(crate) fn normalized_range(min: f32, max: f32) -> (f32, f32) {
     (min.min(max), max.max(min))
 }
 
+/// Marca uma entidade que também existe no vocabulário de widgets do Bevy.
+/// O espelho de `UiDisabled` só toca nestas: um `InteractionDisabled` posto à
+/// toa ficava para sempre num nó que nunca foi widget.
+#[derive(Debug, Component)]
+pub struct UiBevyWidget;
+
+/// Marca um filho que não pode apanhar o pointer (`.fill`/`.handle` do slider,
+/// texto do placeholder). O re-estilo repõe `Pickable` nestes nós; o sistema
+/// [`sync_pick_through`] corre depois dele.
+#[derive(Debug, Component)]
+pub struct UiPickThrough;
+
 // ── UiCheck ─────────────────────────────────────────────────────────────
 
 /// A toggle: clicking flips `checked`; the classes `checked` / `unchecked`
 /// mirror it for the stylesheet, and the `.tick` child shows only when on.
-#[derive(Debug, Component)]
+///
+/// A decisão de flip é do [`Checkbox`] do Bevy (click, Enter/Space, gamepad);
+/// este componente é o espelho que o CSS e o `viber.ui.read` consomem.
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiCheck {
     pub checked: bool,
 }
 
-/// Flips checks on click and mirrors the flag into classes.
+/// Espelha o `Checked` do Bevy para `UiCheck` e as classes.
 ///
-/// `Changed<Interaction>` also fires on release, so the class sync is
-/// idempotent and only the `Pressed` edge toggles.
+/// O observer corre no trigger do widget (pointer click ou teclado), antes do
+/// diff de eventos do frame — o `checked_changed` sai no mesmo frame em que o
+/// jogador carregou.
+pub fn on_check_value_change(
+    change: On<ValueChange<bool>>,
+    mut commands: Commands,
+    mut checks: Query<(&mut UiCheck, &mut UiClasses, Has<UiStyleDirty>), With<Checkbox>>,
+) {
+    let Ok((mut check, mut classes, already_dirty)) = checks.get_mut(change.source) else {
+        return;
+    };
+    check.checked = change.value;
+    if change.value {
+        commands.entity(change.source).insert(Checked);
+    } else {
+        commands.entity(change.source).remove::<Checked>();
+    }
+    let changed = classes.set_class("checked", change.value)
+        | classes.set_class("unchecked", !change.value);
+    if changed && !already_dirty {
+        commands.entity(change.source).insert(UiStyleDirty);
+    }
+}
+
+/// Mantém o [`Checked`] do Bevy e as classes em passo com `UiCheck`.
+///
+/// Corre quando um script (`viber.ui.set_checked`) ou o parse escrevem o
+/// componente. A escrita é idempotente: o observer acima já deixou os dois
+/// lados iguais, por isso o caso normal não toca em nada.
 #[allow(clippy::type_complexity)]
 pub fn drive_ui_checks(
     mut commands: Commands,
     mut checks: Query<
         (
             Entity,
-            &Interaction,
-            &mut UiCheck,
+            &UiCheck,
+            Has<Checked>,
             &mut UiClasses,
             Has<UiStyleDirty>,
         ),
-        (
-            Or<(Changed<UiCheck>, Changed<Interaction>)>,
-            Without<UiDisabled>,
-        ),
+        Changed<UiCheck>,
     >,
 ) {
-    for (entity, interaction, mut check, mut classes, already_dirty) in &mut checks {
-        if *interaction == Interaction::Pressed {
-            check.checked = !check.checked;
+    for (entity, check, has_checked, mut classes, already_dirty) in &mut checks {
+        match (check.checked, has_checked) {
+            (true, false) => {
+                commands.entity(entity).insert(Checked);
+            }
+            (false, true) => {
+                commands.entity(entity).remove::<Checked>();
+            }
+            _ => {}
         }
         let changed = classes.set_class("checked", check.checked)
             | classes.set_class("unchecked", !check.checked);
@@ -109,7 +172,11 @@ pub fn sync_check_ticks(
 /// A draggable range. `value` lives in `min..max` (`step` quantises it); the
 /// `.fill` child mirrors the fraction like a bar and the `.handle` child
 /// slides along the track. The class `dragging` is set while the pointer holds.
-#[derive(Debug, Component)]
+///
+/// O arrasto/teclado é do [`Slider`] do Bevy; o observer
+/// [`on_slider_value_change`] quantiza e escreve aqui para o CSS e o Luau.
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiSlider {
     pub value: f32,
     pub min: f32,
@@ -126,12 +193,23 @@ impl UiSlider {
     /// stepped value in `min..max`.
     pub fn value_at(&self, fraction: f32) -> f32 {
         let fraction = fraction.clamp(0.0, 1.0);
-        // Defesa em profundidade: o parse já normalizou, mas `clamp` asserta
-        // com um intervalo cru — ordenar aqui nunca custa nada.
+        // Ordenar ANTES de interpolar: um intervalo invertido/não finito tem
+        // de cair no 0..1 normalizado, não propagar NaN.
         let (min, max) = normalized_range(self.min, self.max);
-        let raw = min + fraction * (max - min);
+        self.snap(min + fraction * (max - min))
+    }
+
+    /// Quantiza um valor cru para o passo e o intervalo. A defesa de
+    /// `normalized_range` fica aqui também: o valor vem de um observer Bevy e
+    /// não pode rebentar o `clamp` com um intervalo invertido.
+    pub fn snap(&self, raw: f32) -> f32 {
+        let (min, max) = normalized_range(self.min, self.max);
+        let raw = if raw.is_finite() {
+            raw.clamp(min, max)
+        } else {
+            min
+        };
         if self.step > 0.0 {
-            // Rounding can step off the range; clamp after.
             ((raw / self.step).round() * self.step).clamp(min, max)
         } else {
             raw
@@ -148,25 +226,61 @@ impl UiSlider {
     }
 }
 
-/// Drags sliders with the pointer and mirrors `value` onto fill + handle.
+/// Recebe o `ValueChange<f32>` do [`Slider`] do Bevy e escreve o valor em
+/// [`UiSlider`] (quantizado ao `step` autoral).
+pub fn on_slider_value_change(
+    change: On<ValueChange<f32>>,
+    mut commands: Commands,
+    mut sliders: Query<(Entity, &mut UiSlider), With<Slider>>,
+    values: Query<&SliderValue>,
+) {
+    let Ok((entity, mut slider)) = sliders.get_mut(change.source) else {
+        return;
+    };
+    let wanted = slider.snap(change.value);
+    if slider.value == wanted {
+        return;
+    }
+    slider.value = wanted;
+    // Componente imutável: substitui-se. O diff de eventos lê `Changed<UiSlider>`
+    // no fim do frame.
+    if values
+        .get(entity)
+        .map_or(true, |value| value.0 != wanted)
+    {
+        commands.entity(entity).insert(SliderValue(wanted));
+    }
+}
+
+/// Mantém o `SliderValue` do Bevy em passo com `UiSlider` (escritas de script).
+pub fn mirror_ui_sliders(
+    mut commands: Commands,
+    sliders: Query<(Entity, &UiSlider), Changed<UiSlider>>,
+    values: Query<&SliderValue>,
+) {
+    for (entity, slider) in &sliders {
+        if values
+            .get(entity)
+            .map_or(true, |value| value.0 != slider.value)
+        {
+            commands.entity(entity).insert(SliderValue(slider.value));
+        }
+    }
+}
+
+/// Espelha `value` onto fill + handle, and the `dragging` class from Bevy's
+/// drag state.
 ///
-/// Corre todos os frames: o arrasto lê o ponteiro, e a escrita do fill/handle
-/// é idempotente — o re-estilo (resize, `@media`) limpa os campos e este
-/// sistema repõe-os no mesmo frame.
-///
-/// `Interaction::Pressed` persists while the button is held — even off the
-/// track — so dragging past the edge keeps working and just clamps. The
-/// pointer position comes from bevy_ui's `RelativeCursorPosition.normalized`
-/// (0..1 node space, y-down), which is also why the vertical axis flips.
+/// Corre todos os frames: o re-estilo (resize, `@media`) limpa os campos e
+/// este sistema repõe-os no mesmo frame.
 #[allow(clippy::type_complexity)]
 pub fn drive_ui_sliders(
     mut commands: Commands,
     mut sliders: Query<
         (
             Entity,
-            &Interaction,
-            Option<&RelativeCursorPosition>,
-            &mut UiSlider,
+            &UiSlider,
+            Option<&SliderDragState>,
             &mut UiClasses,
             Has<UiStyleDirty>,
         ),
@@ -174,16 +288,8 @@ pub fn drive_ui_sliders(
     >,
     mut nodes: Query<&mut Node>,
 ) {
-    for (entity, interaction, cursor, mut slider, mut classes, already_dirty) in &mut sliders {
-        let dragging = *interaction == Interaction::Pressed;
-        if dragging && let Some(point) = cursor.and_then(|cursor| cursor.normalized) {
-            let fraction = if slider.vertical {
-                1.0 - point.y
-            } else {
-                point.x
-            };
-            slider.value = slider.value_at(fraction);
-        }
+    for (entity, slider, drag, mut classes, already_dirty) in &mut sliders {
+        let dragging = drag.is_some_and(|drag| drag.dragging);
         if classes.set_class("dragging", dragging) && !already_dirty {
             commands.entity(entity).insert(UiStyleDirty);
         }
@@ -218,146 +324,220 @@ pub fn drive_ui_sliders(
     }
 }
 
+/// O `.fill`/`.handle` não pode apanhar o pointer: o `slider_on_pointer_down`
+/// do Bevy pára a propagação no thumb e a track nunca começaria o arrasto. O
+/// mesmo para o placeholder do input (tem de deixar passar o clique).
+pub fn sync_pick_through(
+    mut commands: Commands,
+    parts: Query<(Entity, Option<&Pickable>), With<UiPickThrough>>,
+) {
+    for (entity, pickable) in &parts {
+        if pickable != Some(&Pickable::IGNORE) {
+            commands.entity(entity).insert(Pickable::IGNORE);
+        }
+    }
+}
+
 // ── UiInput ─────────────────────────────────────────────────────────────
 
 /// A single-line text field. Click to focus (class `focused`), type to edit,
-/// Enter/Escape to blur. `child` is the authored `<UiText>` kept in sync with
-/// `text` / `placeholder` by [`sync_ui_input_text`].
-#[derive(Debug, Component)]
+/// Enter/Escape to blur. `child` is the editable [`EditableText`] node kept in
+/// sync with `text`; `placeholder_child` is the dim label shown while empty.
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiInput {
     pub text: String,
     pub child: Entity,
     pub placeholder: Option<String>,
+    /// Nó `<UiText>` do placeholder (irmão do editável), escondido enquanto
+    /// houver texto.
+    pub placeholder_child: Option<Entity>,
     /// Hard cap on stored characters; typing past it is dropped.
     pub max_len: Option<usize>,
 }
 
 /// Which input has the keyboard, if any.
-#[derive(Debug, Default, Resource)]
+///
+/// Espelho compatível de `InputFocus` na raiz do `<UiInput>`: o gameplay
+/// (`player`, `input_map`, Luau) e o `viber.ui.focused()` continuam a ler este
+/// recurso, mas quem edita o texto é o `TextInput` do Bevy.
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiFocusedInput(pub Option<Entity>);
 
-/// Edits the focused input from key presses.
+/// Mapeia o foco do Bevy (`InputFocus`, que aponta para o nó editável) para a
+/// raiz `<UiInput>` e escreve `UiFocusedInput`.
 ///
-/// Only `Character` keys land in the field, and only without ctrl/alt/meta —
-/// shortcuts keep working while an input is focused. Backspace deletes.
-#[allow(clippy::type_complexity)]
-pub fn drive_ui_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut events: bevy::ecs::message::MessageReader<bevy::input::keyboard::KeyboardInput>,
+/// Também empurra o caminho inverso: `viber.ui.focus(id)`/`unfocus` escrevem
+/// `UiFocusedInput`, e este sistema leva o pedido ao `InputFocus` do Bevy.
+pub fn sync_ui_input_focus(
+    mut input_focus: ResMut<InputFocus>,
     mut focus: ResMut<UiFocusedInput>,
-    mut inputs: Query<&mut UiInput>,
+    inputs: Query<(Entity, &UiInput)>,
+    // A inicialização do recurso (`Added`) conta como "changed" e, com
+    // `focus.0 = None`, seria lida como um blur que limpava um `InputFocus`
+    // já posto no primeiro frame. Só o primeiro run ignora esse falso
+    // positivo; depois, `is_changed` distingue escritas externas (scripts,
+    // `drive_ui_modals`) das nossas (o próprio sistema não as vê).
+    mut initialized: Local<bool>,
 ) {
-    let Some(entity) = focus.0 else {
-        return;
-    };
-    let Ok(mut input) = inputs.get_mut(entity) else {
-        focus.0 = None; // the input went away; drop the stale focus
-        return;
-    };
-    // Modifiers live on the global key state, not on the event.
-    let bypass = keys.any_pressed([
-        KeyCode::ControlLeft,
-        KeyCode::ControlRight,
-        KeyCode::AltLeft,
-        KeyCode::AltRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]);
-    for key in events.read() {
-        if key.state != bevy::input::ButtonState::Pressed {
-            continue;
+    let root_of = |entity: Entity| -> Option<Entity> {
+        if inputs.contains(entity) {
+            Some(entity)
+        } else {
+            inputs
+                .iter()
+                .find(|(_, input)| input.child == entity)
+                .map(|(root, _)| root)
         }
-        match &key.logical_key {
-            bevy::input::keyboard::Key::Backspace => {
-                input.text.pop();
-            }
-            bevy::input::keyboard::Key::Character(chars) if !bypass => {
-                for ch in chars.chars() {
-                    if input
-                        .max_len
-                        .is_none_or(|max| input.text.chars().count() < max)
-                    {
-                        input.text.push(ch);
+    };
+    let first = !*initialized;
+    *initialized = true;
+    let external = focus.is_changed() && !(first && focus.0.is_none());
+    if external {
+        // Pedido vindo de um script (ou do `drive_ui_modals` a fechar).
+        match focus.0 {
+            Some(root) => {
+                if let Some((_, input)) = inputs.iter().find(|(entity, _)| *entity == root) {
+                    if input_focus.get() != Some(input.child) {
+                        input_focus.set(input.child, FocusCause::Navigated);
                     }
+                } else {
+                    // O elemento deixou de ser um input (destroy/rebuild).
+                    focus.0 = None;
+                    input_focus.clear();
                 }
             }
-            _ => {}
+            None => {
+                if input_focus.get().and_then(root_of).is_some() {
+                    input_focus.clear();
+                }
+            }
         }
+        return;
+    }
+    // Pedido vindo do Bevy (clique, navegação por teclado/gamepad).
+    // Um clique na MOLDURA foca a raiz (o `TabIndex` dela); o teclado é do nó
+    // editável, por isso o foco desce até ele.
+    if let Some(root) = input_focus.get()
+        && let Some((_, input)) = inputs.iter().find(|(entity, _)| *entity == root)
+        && input_focus.get() != Some(input.child)
+    {
+        input_focus.set(input.child, FocusCause::Navigated);
+    }
+    let mapped = input_focus.get().and_then(root_of);
+    if focus.0 != mapped {
+        focus.0 = mapped;
     }
 }
 
-/// Click-to-focus, Enter/Escape blur, and the `focused` class.
-#[allow(clippy::type_complexity)]
-pub fn sync_ui_input_focus(
-    mut commands: Commands,
-    mut keys: bevy::ecs::message::MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mut focus: ResMut<UiFocusedInput>,
-    mut inputs: Query<
-        (Entity, &Interaction, &mut UiClasses, Has<UiStyleDirty>),
-        Without<UiDisabled>,
-    >,
+/// Enter/Escape tira o teclado ao campo.
+///
+/// O `TextInput` do Bevy já trata do Escape; o Enter fica por tratar (o campo
+/// não aceita newlines) e era o blur documentado do `<UiInput>`.
+pub fn blur_ui_inputs_on_enter(
+    mut keys: bevy::ecs::message::MessageReader<KeyboardInput>,
+    mut input_focus: ResMut<InputFocus>,
+    inputs: Query<(Entity, &UiInput)>,
+    editables: Query<&TextInput>,
 ) {
-    for key in keys.read() {
-        if key.state != bevy::input::ButtonState::Pressed {
-            continue;
-        }
-        if matches!(
-            key.logical_key,
-            bevy::input::keyboard::Key::Enter | bevy::input::keyboard::Key::Escape
-        ) && let Some(entity) = focus.0.take()
-            && let Ok((_, _, mut classes, already_dirty)) = inputs.get_mut(entity)
-            && classes.remove("focused")
-            && !already_dirty
-        {
-            commands.entity(entity).insert(UiStyleDirty);
-        }
+    let Some(focused) = input_focus.get() else {
+        return;
+    };
+    let is_input = inputs.contains(focused)
+        || inputs.iter().any(|(_, input)| input.child == focused)
+        || editables.contains(focused);
+    if !is_input {
+        return;
     }
-    // Um só alvo por frame: com o iterador mutável não se pode pedir outra
-    // entidade ao mesmo `Query` (o blur do anterior exige `get_mut`).
-    let pressed = inputs.iter_mut().find_map(|(entity, interaction, _, _)| {
-        (*interaction == Interaction::Pressed && focus.0 != Some(entity)).then_some(entity)
-    });
-    if let Some(entity) = pressed {
-        let previous = focus.0.replace(entity);
-        if let Some(previous) = previous
-            && previous != entity
-            && let Ok((_, _, mut classes, already_dirty)) = inputs.get_mut(previous)
-            && classes.remove("focused")
-            && !already_dirty
+    for key in keys.read() {
+        if key.state == bevy::input::ButtonState::Pressed
+            && matches!(
+                key.logical_key,
+                Key::Enter | Key::Escape
+            )
         {
-            // Sem isto, clicar noutro campo deixava o antigo com o estilo de
-            // foco para sempre.
-            commands.entity(previous).insert(UiStyleDirty);
-        }
-        if let Ok((_, _, mut classes, already_dirty)) = inputs.get_mut(entity)
-            && classes.add("focused")
-            && !already_dirty
-        {
-            commands.entity(entity).insert(UiStyleDirty);
+            input_focus.clear();
+            return;
         }
     }
 }
 
-/// Mirrors `text` / `placeholder` into the field's `<UiText>` child and toggles
-/// the `placeholder` class while the field is empty.
-#[allow(clippy::type_complexity)]
+/// Aplica a classe `focused` à raiz do input focado.
+///
+/// O `focused` visual continua a ser uma classe CSS (o stylesheet é que decide
+/// a cor/anel), não um overlay de foco do Bevy. Nos botões só o
+/// [`super::gamepad::UiGamepadFocus`] a recebe — o anel do menu é o indicador
+/// da navegação por comando, e um clique de rato não o pode deixar preso (o
+/// foco do Bevy em si é usado para Enter/Espaço, não para pintar).
+pub fn sync_ui_focused_class(
+    mut commands: Commands,
+    focus: Res<UiFocusedInput>,
+    input_focus: Res<InputFocus>,
+    gamepad: Res<super::gamepad::UiGamepadFocus>,
+    inputs: Query<(Entity, &UiInput)>,
+    mut all_classes: Query<&mut UiClasses>,
+    mut previous: Local<Option<Entity>>,
+) {
+    // Um input focado tem prioridade (a raiz); os restantes nós focáveis
+    // (botões/checks/sliders) expõem-se directamente, mas só quando o foco
+    // veio do gamepad.
+    let current = focus.0.or_else(|| {
+        let entity = input_focus.get()?;
+        if gamepad.0 != Some(entity) {
+            return None;
+        }
+        if inputs.iter().any(|(_, input)| input.child == entity) {
+            return None;
+        }
+        all_classes.get(entity).ok().map(|_| entity)
+    });
+    if *previous == current {
+        return;
+    }
+    if let Some(previous) = previous.take()
+        && let Ok(mut classes) = all_classes.get_mut(previous)
+        && classes.remove("focused")
+    {
+        commands.entity(previous).insert(UiStyleDirty);
+    }
+    if let Some(current) = current
+        && let Ok(mut classes) = all_classes.get_mut(current)
+        && classes.add("focused")
+    {
+        commands.entity(current).insert(UiStyleDirty);
+    }
+    *previous = current;
+}
+
+/// Mirrors the editable value into `UiInput.text` and toggles the placeholder.
 pub fn sync_ui_input_text(
     mut commands: Commands,
-    inputs: Query<(Entity, &UiInput), Changed<UiInput>>,
-    mut texts: Query<&mut Text>,
+    mut inputs: Query<(Entity, &mut UiInput)>,
+    editables: Query<&EditableText>,
+    mut visibility: Query<&mut Visibility>,
     mut classes: Query<&mut UiClasses>,
 ) {
-    for (entity, input) in &inputs {
-        let empty = input.text.is_empty();
-        let shown = if empty {
-            input.placeholder.clone().unwrap_or_default()
-        } else {
-            input.text.clone()
+    for (entity, mut input) in &mut inputs {
+        let Ok(editable) = editables.get(input.child) else {
+            continue;
         };
-        if let Ok(mut text) = texts.get_mut(input.child)
-            && text.0 != shown
+        let value = editable.value().to_string();
+        if input.text != value {
+            input.text = value;
+        }
+        let empty = input.text.is_empty();
+        if let Some(child) = input.placeholder_child
+            && let Ok(mut visibility) = visibility.get_mut(child)
         {
-            text.0 = shown;
+            let wanted = if empty {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *visibility != wanted {
+                *visibility = wanted;
+            }
         }
         if let Ok(mut classes) = classes.get_mut(entity)
             && classes.set_class("placeholder", empty)
@@ -367,45 +547,63 @@ pub fn sync_ui_input_text(
     }
 }
 
+/// Aplica escritas de script (`viber.ui.set_text`) e do parse ao `EditableText`.
+pub fn apply_ui_input_text(
+    mut commands: Commands,
+    inputs: Query<&UiInput, Changed<UiInput>>,
+    editables: Query<&EditableText>,
+) {
+    for input in &inputs {
+        let Ok(editable) = editables.get(input.child) else {
+            continue;
+        };
+        if editable.value().to_string() != input.text {
+            let mut replacement = EditableText::new(&input.text);
+            replacement.max_characters = input.max_len;
+            commands.entity(input.child).insert(replacement);
+        }
+    }
+}
+
 // ── tooltips ────────────────────────────────────────────────────────────
 
 /// `tooltip="…"` on any element: shows a labelled hint near the pointer while
 /// the element is hovered.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTooltipText(pub String);
 
 /// Shared tooltip state: the floating element (spawned lazily under the first
 /// UiRoot), its text child, and whose text it currently shows.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiTooltipLayer {
     pub entity: Option<Entity>,
     pub text_entity: Option<Entity>,
     pub showing: Option<String>,
+    /// Dono actual do popover; reparentar é o que o `Popover` do Bevy usa para
+    /// calcular a posição.
+    pub target: Option<Entity>,
 }
 
-/// Floats one tooltip near the pointer while a `tooltip="…"` element is
-/// hovered.
+/// Floats one tooltip over the hovered `tooltip="…"` element.
 ///
-/// The layer is created on first use under the first UiRoot and given the
-/// class `tooltip` — the stylesheet paints it; the system only moves it and
-/// keeps its text current. It carries no `Interaction`, so it can never steal
-/// hover from the element underneath.
+/// O posicionamento é o [`Popover`] do Bevy (ancorado ao elemento, com
+/// fallback para cima quando não há espaço em baixo), não o cursor. A camada é
+/// criada na primeira utilização, vive sob o primeiro UiRoot e é reparentada
+/// para o alvo enquanto o hint estiver visível.
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub fn drive_ui_tooltip(
     mut commands: Commands,
     mut layer: ResMut<UiTooltipLayer>,
-    hovered: Query<(&Interaction, &UiTooltipText)>,
+    hovered: Query<(Entity, &Interaction, &UiTooltipText)>,
     roots: Query<(Entity, &super::runtime::UiTag)>,
-    // A janela PRIMÁRIA, como no cursor: com mais do que uma janela o
-    // `single()` falhava e o tooltip ficava parado.
-    windows: Query<&Window, With<PrimaryWindow>>,
     // `Option`: mundos sem HUD (qa-agua, terrain demo) não inserem
     // `HudAssets` — exigir o resource panica a engine no arranque.
     assets: Option<Res<crate::hud::HudAssets>>,
-    scale: Res<UiScale>,
     mut texts: Query<&mut Text>,
-    mut nodes: Query<&mut Node>,
+    nodes: Query<(), With<Node>>,
     mut visibility: Query<&mut Visibility>,
 ) {
     let Some(assets) = assets else {
@@ -420,10 +618,13 @@ pub fn drive_ui_tooltip(
         layer.entity = None;
         layer.text_entity = None;
         layer.showing = None;
+        layer.target = None;
     }
-    let target = hovered.iter().find_map(|(interaction, tooltip)| {
-        (*interaction != Interaction::None).then(|| tooltip.0.clone())
-    });
+    let target = hovered
+        .iter()
+        .find_map(|(entity, interaction, tooltip)| {
+            (*interaction != Interaction::None).then(|| (entity, tooltip.0.clone()))
+        });
     // Lazily build the floating layer the first time anything needs it.
     if layer.entity.is_none() {
         let Some((root, _)) = roots.iter().find(|(_, tag)| tag.0 == "uiroot") else {
@@ -447,6 +648,21 @@ pub fn drive_ui_tooltip(
                     "ui tooltip defaults",
                 )),
                 super::runtime::UiStyleDirty,
+                Popover {
+                    positions: vec![
+                        PopoverPlacement {
+                            side: PopoverSide::Bottom,
+                            align: PopoverAlign::Start,
+                            gap: 8.0,
+                        },
+                        PopoverPlacement {
+                            side: PopoverSide::Top,
+                            align: PopoverAlign::Start,
+                            gap: 8.0,
+                        },
+                    ],
+                    window_margin: 6.0,
+                },
                 Visibility::Hidden,
                 ChildOf(root),
             ))
@@ -472,7 +688,13 @@ pub fn drive_ui_tooltip(
         return;
     };
     match target {
-        Some(text) => {
+        Some((target, text)) => {
+            // O popover ancora ao elemento; reparentar é mais barato do que
+            // manter uma posição absoluta sincronizada com o cursor.
+            if layer.target != Some(target) {
+                commands.entity(tip).insert(ChildOf(target));
+                layer.target = Some(target);
+            }
             if layer.showing.as_deref() != Some(text.as_str()) {
                 if let Some(text_entity) = layer.text_entity
                     && let Ok(mut tip_text) = texts.get_mut(text_entity)
@@ -486,32 +708,10 @@ pub fn drive_ui_tooltip(
             {
                 *visibility = Visibility::Inherited;
             }
-            // Near the pointer. The cursor arrives in window pixels, but
-            // `Val::Px` is multiplied by `UiScale` — sem a divisão, o tooltip
-            // deriva do cursor sempre que o HUD estiver ampliado (tudo acima
-            // de 720p). Trabalha no espaço AUTORAL (janela ÷ escala,
-            // `scale::ui_viewport`) e clampeia nesse mesmo espaço; o Val::Px
-            // volta a ser multiplicado pela escala ao aplicar.
-            if let (Ok(window), Ok(mut node)) = (windows.single(), nodes.get_mut(tip))
-                && let Some(cursor) = window.cursor_position()
-            {
-                let scale = if scale.0 > 1e-3 { scale.0 } else { 1.0 };
-                let (width, height) =
-                    super::scale::ui_viewport(window.width(), window.height(), scale);
-                node.left = Val::Px(
-                    (cursor.x / scale + 14.0)
-                        .max(0.0)
-                        .min((width - 230.0).max(0.0)),
-                );
-                node.top = Val::Px(
-                    (cursor.y / scale + 18.0)
-                        .max(0.0)
-                        .min((height - 48.0).max(0.0)),
-                );
-            }
         }
         None => {
             layer.showing = None;
+            layer.target = None;
             if let Ok(mut visibility) = visibility.get_mut(tip)
                 && *visibility != Visibility::Hidden
             {
@@ -565,6 +765,39 @@ pub fn drive_ui_cursors(
     *last = icon;
 }
 
+// ── disabled ────────────────────────────────────────────────────────────
+
+/// Espelha `UiDisabled` no `InteractionDisabled` do Bevy (e vice-versa).
+///
+/// Os widgets do Bevy consultam `InteractionDisabled` para recusar clicks/
+/// teclado; a engine continua a usar `UiDisabled` para `:disabled` e para os
+/// drivers antigos.
+pub fn sync_ui_disabled(
+    mut commands: Commands,
+    disabled: Query<Entity, (With<UiDisabled>, With<UiBevyWidget>, Without<InteractionDisabled>)>,
+    enabled: Query<Entity, (Without<UiDisabled>, With<UiBevyWidget>, With<InteractionDisabled>)>,
+    inputs: Query<(&UiInput, Has<UiDisabled>)>,
+    editables: Query<(Entity, Has<InteractionDisabled>), With<TextInput>>,
+) {
+    for entity in &disabled {
+        commands.entity(entity).insert(InteractionDisabled);
+    }
+    for entity in &enabled {
+        commands.entity(entity).remove::<InteractionDisabled>();
+    }
+    // Um input desactivado desactiva o nó editável (é ele que recebe o teclado).
+    for (input, disabled) in &inputs {
+        let Ok((editable, has_disabled)) = editables.get(input.child) else {
+            continue;
+        };
+        if disabled && !has_disabled {
+            commands.entity(editable).insert(InteractionDisabled);
+        } else if !disabled && has_disabled {
+            commands.entity(editable).remove::<InteractionDisabled>();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,7 +844,7 @@ mod tests {
     #[test]
     fn test_value_at_survives_an_inverted_range() {
         // Defesa em profundidade: o parse normaliza os extremos, mas o
-        // `value_at` volta a ordená-los para o `clamp` nunca assertar
+        // `snap` volta a ordená-los para o `clamp` nunca assertar
         // (intervalo invertido ou não finito não pode rebentar o arrasto).
         let mut inverted = slider(0.0);
         inverted.min = 100.0;
@@ -624,12 +857,123 @@ mod tests {
     }
 
     #[test]
+    fn test_snap_matches_drag_and_keyboard_values() {
+        let stepped = slider(5.0);
+        assert_eq!(stepped.snap(12.4), 10.0);
+        assert_eq!(stepped.snap(12.6), 15.0);
+        assert_eq!(stepped.snap(-10.0), 0.0);
+        assert_eq!(stepped.snap(999.0), 100.0);
+        assert_eq!(stepped.snap(f32::NAN), 0.0);
+        // Contínuo não quantiza.
+        assert!((slider(0.0).snap(12.34) - 12.34).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_input_edits_respect_max_len() {
-        // The typing rules live inline in `drive_ui_input`; this pins the
-        // counting rule it must apply (chars, not bytes — acentos contam 1).
+        // The typing rules now live in `EditableText::max_characters`; this
+        // pins the counting rule (chars, not bytes — acentos contam 1).
         let mut text = String::from("çé");
         assert_eq!(text.chars().count(), 2);
         text.pop();
         assert_eq!(text, "ç");
+    }
+
+    #[test]
+    fn test_bevy_check_value_change_feeds_ui_check() {
+        let mut app = App::new();
+        app.add_observer(on_check_value_change);
+        let entity = app
+            .world_mut()
+            .spawn((
+                Checkbox::default(),
+                UiCheck { checked: false },
+                UiClasses::default(),
+            ))
+            .id();
+        app.world_mut().trigger(ValueChange {
+            source: entity,
+            value: true,
+            is_final: true,
+        });
+        app.world_mut().flush();
+        assert!(app.world().get::<UiCheck>(entity).unwrap().checked);
+        assert!(
+            app.world().get::<Checked>(entity).is_some(),
+            "o Checked do Bevy é o estado do widget"
+        );
+        assert!(
+            app.world()
+                .get::<UiClasses>(entity)
+                .unwrap()
+                .has("checked")
+        );
+    }
+
+    #[test]
+    fn test_bevy_slider_value_change_snaps_back() {
+        let mut app = App::new();
+        app.add_observer(on_slider_value_change);
+        let entity = app
+            .world_mut()
+            .spawn((Slider::default(), slider(5.0)))
+            .id();
+        app.world_mut().trigger(ValueChange {
+            source: entity,
+            value: 12.4_f32,
+            is_final: true,
+        });
+        app.world_mut().flush();
+        assert_eq!(app.world().get::<UiSlider>(entity).unwrap().value, 10.0);
+        assert_eq!(app.world().get::<SliderValue>(entity).unwrap().0, 10.0);
+    }
+
+    #[test]
+    fn test_input_focus_bridges_to_ui_focused_input() {
+        let mut app = App::new();
+        app.init_resource::<InputFocus>()
+            .init_resource::<UiFocusedInput>()
+            .init_resource::<super::super::gamepad::UiGamepadFocus>()
+            .add_systems(
+                Update,
+                (sync_ui_input_focus, sync_ui_focused_class).chain(),
+            );
+
+        let child = app.world_mut().spawn_empty().id();
+        let root = app
+            .world_mut()
+            .spawn((
+                UiInput {
+                    text: String::new(),
+                    child,
+                    placeholder: None,
+                    placeholder_child: None,
+                    max_len: None,
+                },
+                UiClasses::default(),
+            ))
+            .id();
+
+        // O Bevy foca o NÓ EDITÁVEL; a raiz é que é visível aos scripts.
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(child, FocusCause::Pressed);
+        app.update();
+        assert_eq!(app.world().resource::<UiFocusedInput>().0, Some(root));
+        assert!(
+            app.world().get::<UiClasses>(root).unwrap().has("focused"),
+            "o campo focado leva a classe CSS"
+        );
+
+        // `viber.ui.focus(id)` escreve a raiz; o sistema leva o pedido ao
+        // `InputFocus` do Bevy.
+        app.world_mut().resource_mut::<InputFocus>().clear();
+        app.world_mut().resource_mut::<UiFocusedInput>().0 = Some(root);
+        app.update();
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(child));
+
+        // Blur por script limpa os dois lados.
+        app.world_mut().resource_mut::<UiFocusedInput>().0 = None;
+        app.update();
+        assert_eq!(app.world().resource::<InputFocus>().get(), None);
     }
 }

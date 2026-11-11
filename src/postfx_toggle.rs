@@ -22,13 +22,14 @@ pub const DEFAULT_BINDINGS: &str =
     "ctrl+1:bloom, ctrl+2:ca, ctrl+3:vignette, ctrl+4:ssao, ctrl+5:dof, ctrl+6:volumetrics";
 
 /// Uma tecla (com modificadores exatos) → um gate de [`crate::postfx::fx_off`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Reflect)]
 pub struct FxBinding {
     pub key: KeyCode,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
     /// Key do gate (`BLOOM`, `SSAO`, `LENS`…).
+    #[reflect(ignore)]
     pub fx: &'static str,
     /// Texto da binding como o autor o escreveu (para o log).
     pub label: String,
@@ -38,7 +39,8 @@ pub struct FxBinding {
 /// partilhado com o bridge ([`crate::postfx::fx_forced_off`]) — uma cópia
 /// local ficava dessincronizada e a 1.ª tecla depois de um
 /// `viber.debug.postfx{…}` não fazia nada.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PostFxToggleBindings {
     pub bindings: Vec<FxBinding>,
 }

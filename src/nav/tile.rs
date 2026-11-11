@@ -34,11 +34,13 @@ pub const ROAD_BAND_ABOVE: f32 = 1.5;
 
 /// Sobe quando um prop estático parte. O tile volta a assar mesmo que a
 /// contagem de colisores não mude.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct NavDirty(pub u64);
 
 /// State of the single navmesh tile.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct NavTile {
     /// Centre of the tile currently generated or generating.
     pub center: Option<Vec2>,

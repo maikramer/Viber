@@ -1,18 +1,16 @@
 //! HUD element builders: everything spawned from world tags
-//! (`HealthBar`, `XpBar`, `Minimap`, `Compass`, `ResourceChip`, …) plus the
-//! DOM-parity widgets (help bar, action slots, name-tag pool).
+//! (`Minimap`, `Compass`, `WaypointArrow`, `DialogueBalloon`, …). Os
+//! builders legacy do simple-rpg (`HealthBar`, `TabbedModal`, `ResourceChip`, …)
+//! saíram: o HUD do jogo é declarativo (`<UiRoot>`).
 
 use bevy::prelude::*;
 use bevy::ui::BoxShadow;
 use bevy::ui::widget::ImageNode;
 
-use super::assets::{
-    HudAssets, centered_at, gradient_overlay, label, panel_base, panel_edge, panel_shadow,
-};
+use super::assets::{HudAssets, centered_at, label, panel_shadow};
 use super::compass::{CompassDistance, CompassLetter, CompassTick};
-use super::interact::{BALLOON_DURATION, HudBalloon, HudPrompt};
+use super::interact::{BALLOON_DURATION, HudBalloon};
 use super::minimap::{MinimapAnchor, MinimapArrow, MinimapDot, MinimapRange};
-use super::vitals::{HudHealthFill, HudHealthLabel};
 
 fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     attrs
@@ -55,143 +53,6 @@ pub fn spawn_hud(world: &mut World, tag: &str, attrs: &[(String, String)]) {
             // Os antigos slots de acção saíram daqui: a barra de habilidades
             // é agora `<UiCooldown>` no HUD declarativo (`src/ui`), onde a
             // veladura de recarga e o aro de "pronta" são folha de estilo.
-        }
-        "healthbar" => {
-            // Tag legada: mantém-se a funcionar (mundos antigos não partem),
-            // mas o caminho suportado é o HUD declarativo. Warn 1× por spawn
-            // (o spawn acontece uma vez por mundo, não por frame).
-            bevy::log::warn!(
-                "hud: tag legada `HealthBar` — usa `<UiBar bind=\"health\">` num UiRoot (HUD declarativo)"
-            );
-            // Rounded gradient panel: glossy heart icon + green bar with
-            // "100/100" inside.
-            world
-                .spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: Val::Px(12.0),
-                        left: Val::Px(12.0),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(10.0),
-                        padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
-                        border: UiRect::all(Val::Px(1.5)),
-                        border_radius: BorderRadius::all(Val::Px(16.0)),
-                        ..Default::default()
-                    },
-                    panel_base(),
-                    panel_edge(),
-                    panel_shadow(),
-                    Name::new("hud:health"),
-                ))
-                .with_children(|p| {
-                    p.spawn(gradient_overlay(&hud, 16.0));
-                })
-                .with_children(|panel| {
-                    // Glossy heart icon: back diamond, front diamond, lobes,
-                    // glint.
-                    panel
-                        .spawn(Node {
-                            width: Val::Px(30.0),
-                            height: Val::Px(26.0),
-                            ..Default::default()
-                        })
-                        .with_children(|heart| {
-                            heart.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(8.0),
-                                    top: Val::Px(7.0),
-                                    width: Val::Px(14.0),
-                                    height: Val::Px(14.0),
-                                    ..Default::default()
-                                },
-                                UiTransform::from_rotation(Rot2::radians(
-                                    std::f32::consts::FRAC_PI_4,
-                                )),
-                                BackgroundColor(Color::srgb(0.52, 0.05, 0.08)),
-                            ));
-                            heart.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(8.0),
-                                    top: Val::Px(6.0),
-                                    width: Val::Px(14.0),
-                                    height: Val::Px(14.0),
-                                    ..Default::default()
-                                },
-                                UiTransform::from_rotation(Rot2::radians(
-                                    std::f32::consts::FRAC_PI_4,
-                                )),
-                                BackgroundColor(Color::srgb(0.80, 0.10, 0.13)),
-                            ));
-                            for x in [2.0_f32, 14.0] {
-                                heart.spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: Val::Px(x),
-                                        top: Val::Px(1.0),
-                                        width: Val::Px(14.0),
-                                        height: Val::Px(14.0),
-                                        border_radius: BorderRadius::all(Val::Px(7.0)),
-                                        ..Default::default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.80, 0.10, 0.13)),
-                                ));
-                            }
-                            heart.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(6.0),
-                                    top: Val::Px(4.0),
-                                    width: Val::Px(6.0),
-                                    height: Val::Px(6.0),
-                                    border_radius: BorderRadius::all(Val::Px(3.0)),
-                                    ..Default::default()
-                                },
-                                BackgroundColor(Color::srgba(1.0, 0.6, 0.6, 0.9)),
-                            ));
-                        });
-                    // Bar track with the green fill + centered label.
-                    panel
-                        .spawn((
-                            Node {
-                                width: Val::Px(170.0),
-                                height: Val::Px(20.0),
-                                padding: UiRect::all(Val::Px(2.0)),
-                                border_radius: BorderRadius::all(Val::Px(9.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-                        ))
-                        .with_children(|track| {
-                            track
-                                .spawn((
-                                    Node {
-                                        width: Val::Percent(100.0),
-                                        height: Val::Percent(100.0),
-                                        border_radius: BorderRadius::all(Val::Px(7.0)),
-                                        ..Default::default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.30, 0.74, 0.22)),
-                                    HudHealthFill,
-                                ))
-                                .with_children(|fill| {
-                                    fill.spawn((
-                                        Node {
-                                            justify_content: JustifyContent::Center,
-                                            align_items: AlignItems::Center,
-                                            width: Val::Percent(100.0),
-                                            height: Val::Percent(100.0),
-                                            ..Default::default()
-                                        },
-                                        label(&hud, "100/100", 14.0, Color::srgb(0.97, 1.0, 0.96)),
-                                        HudHealthLabel,
-                                    ));
-                                });
-                        });
-                });
         }
         "minimap" => {
             let range = attr(attrs, "range")
@@ -571,71 +432,6 @@ pub fn spawn_hud(world: &mut World, tag: &str, attrs: &[(String, String)]) {
                     });
                 });
         }
-        "interactionprompt" => {
-            let key = attr(attrs, "key").unwrap_or("E").to_string();
-            let range = attr(attrs, "range")
-                .and_then(|v| v.parse::<f32>().ok())
-                .unwrap_or(3.5);
-            // Tema TINTA QUENTE (valores equivalentes ao theme.css/hud.css,
-            // que a engine não lê aqui): card stone-900 translúcido, borda
-            // dourada da casa, texto papel, keycap âmbar, sombra quente.
-            // Cinzel (HudAssets) para o selo ler como jogo, não como debug.
-            let card = Color::srgba(0.110, 0.098, 0.090, 0.92); // #1c1917eb
-            let gold_edge = Color::srgba(0.718, 0.643, 0.467, 0.44); // #b7a47770
-            let paper = Color::srgb(0.933, 0.914, 0.863); // #eee9dc
-            let keycap = Color::srgb(0.867, 0.780, 0.596); // #ddc798
-            let ink = Color::srgb(0.110, 0.098, 0.090); // #1c1917
-            world
-                .spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        bottom: Val::Px(130.0),
-                        left: Val::Px(0.0),
-                        right: Val::Px(0.0),
-                        justify_content: JustifyContent::Center,
-                        ..Default::default()
-                    },
-                    Visibility::Hidden,
-                    Name::new("hud:prompt"),
-                ))
-                .with_children(|wrap| {
-                    wrap.spawn((
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            column_gap: Val::Px(9.0),
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                            border: UiRect::all(Val::Px(1.0)),
-                            border_radius: BorderRadius::all(Val::Px(9.0)),
-                            ..Default::default()
-                        },
-                        BackgroundColor(card),
-                        BorderColor::all(gold_edge),
-                        warm_shadow(),
-                        HudPrompt { range },
-                    ))
-                    .with_children(|card| {
-                        card.spawn((
-                            Node {
-                                padding: UiRect::axes(Val::Px(7.0), Val::Px(2.0)),
-                                border_radius: BorderRadius::all(Val::Px(4.0)),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                ..Default::default()
-                            },
-                            BackgroundColor(keycap),
-                            Text::new(key),
-                            TextColor(ink),
-                            TextFont {
-                                font: hud.font.clone().into(),
-                                font_size: 15.0.into(),
-                                ..Default::default()
-                            },
-                        ));
-                        card.spawn(label(&hud, "Interagir", 15.0, paper));
-                    });
-                });
-        }
         "dialogueballoon" => {
             // Mesma voz do prompt: tinta escura translúcida + fio dourado +
             // papel. O TEXTO tem de ficar no PRIMEIRO filho (o fluxo de
@@ -681,13 +477,6 @@ pub fn spawn_hud(world: &mut World, tag: &str, attrs: &[(String, String)]) {
                     ));
                 });
         }
-        "tabbedmodal" => {
-            // Menu com abas: Controles (a antiga help bar) + Sobre. A tecla
-            // de toggle vem do attr autoral `key` (Q fica para o modal da
-            // engine — cai em F1).
-            let key = super::menu::toggle_key_from_attr(attr(attrs, "key"));
-            super::menu::build_menu(world, &hud, key);
-        }
         "waypointarrow" => {
             let margin = attr(attrs, "margin")
                 .and_then(|v| v.parse::<f32>().ok())
@@ -698,135 +487,4 @@ pub fn spawn_hud(world: &mut World, tag: &str, attrs: &[(String, String)]) {
             bevy::log::warn!("hud: unhandled element `{other}` — skipped");
         }
     }
-}
-
-/// Resource chip slot styled like the original: rounded dark slot with an
-/// authored mini icon (coin / log / stone) and a count. `index` is 1-based.
-pub fn spawn_resource_chip(world: &mut World, index: usize, resource: &str) {
-    let hud = HudAssets::get(world);
-    world
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(110.0),
-                left: Val::Px(12.0 + 64.0 * (index - 1) as f32),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(7.0),
-                padding: UiRect::axes(Val::Px(9.0), Val::Px(6.0)),
-                border_radius: BorderRadius::all(Val::Px(12.0)),
-                ..Default::default()
-            },
-            panel_base(),
-            panel_edge(),
-            panel_shadow(),
-            Name::new(format!("chip:{resource}")),
-        ))
-        .with_children(|slot| {
-            match resource {
-                // Gold coin: dark ring + gold disc + glint.
-                "gold" => {
-                    slot.spawn((
-                        Node {
-                            width: Val::Px(15.0),
-                            height: Val::Px(15.0),
-                            border_radius: BorderRadius::all(Val::Px(7.5)),
-                            ..Default::default()
-                        },
-                        BackgroundColor(Color::srgb(0.42, 0.29, 0.04)),
-                    ))
-                    .with_children(|coin| {
-                        coin.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(2.0),
-                                top: Val::Px(2.0),
-                                width: Val::Px(11.0),
-                                height: Val::Px(11.0),
-                                border_radius: BorderRadius::all(Val::Px(5.5)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgb(0.95, 0.73, 0.16)),
-                        ));
-                        coin.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(3.0),
-                                top: Val::Px(3.0),
-                                width: Val::Px(4.0),
-                                height: Val::Px(4.0),
-                                border_radius: BorderRadius::all(Val::Px(2.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgba(1.0, 0.95, 0.75, 0.9)),
-                        ));
-                    });
-                }
-                // Wood log: rounded plank + end-grain disc + core dot.
-                "wood" => {
-                    slot.spawn((
-                        Node {
-                            width: Val::Px(17.0),
-                            height: Val::Px(11.0),
-                            border_radius: BorderRadius::px(5.5, 1.5, 1.5, 5.5),
-                            ..Default::default()
-                        },
-                        BackgroundColor(Color::srgb(0.45, 0.28, 0.12)),
-                    ))
-                    .with_children(|log| {
-                        log.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(0.0),
-                                top: Val::Px(0.0),
-                                width: Val::Px(9.0),
-                                height: Val::Px(11.0),
-                                border_radius: BorderRadius::all(Val::Px(5.5)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgb(0.66, 0.45, 0.22)),
-                        ));
-                        log.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(2.5),
-                                top: Val::Px(2.5),
-                                width: Val::Px(4.0),
-                                height: Val::Px(6.0),
-                                border_radius: BorderRadius::all(Val::Px(2.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgb(0.45, 0.28, 0.12)),
-                        ));
-                    });
-                }
-                // Stone: pebble disc + lighter top face.
-                _ => {
-                    slot.spawn((
-                        Node {
-                            width: Val::Px(15.0),
-                            height: Val::Px(12.0),
-                            border_radius: BorderRadius::all(Val::Px(6.0)),
-                            ..Default::default()
-                        },
-                        BackgroundColor(Color::srgb(0.38, 0.40, 0.44)),
-                    ))
-                    .with_children(|stone| {
-                        stone.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(1.5),
-                                top: Val::Px(0.5),
-                                width: Val::Px(12.0),
-                                height: Val::Px(8.0),
-                                border_radius: BorderRadius::all(Val::Px(5.0)),
-                                ..Default::default()
-                            },
-                            BackgroundColor(Color::srgb(0.63, 0.66, 0.71)),
-                        ));
-                    });
-                }
-            }
-            slot.spawn(label(&hud, "0", 15.0, Color::srgb(0.96, 0.94, 0.86)));
-        });
 }

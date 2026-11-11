@@ -1,10 +1,11 @@
 //! Data binding: engine state → declarative UI elements.
 //!
-//! An element written as `<UiBar bind="health"/>` or `<UiText bind="gold"/>`
-//! is fed once per frame from the game's own components and resources, with no
-//! Rust needed per HUD. This is what lets the whole simple-rpg interface live
-//! in XML: the *values* come from bindings, the *look* from the stylesheet, and
-//! only genuinely game-specific behaviour goes into a Luau script.
+//! An element written as `<UiBar bind="weather.rain"/>` or
+//! `<UiText bind="clock"/>` is fed once per frame from the engine's own
+//! components and resources, with no Rust needed per HUD. This is what lets the
+//! whole interface live in XML: the *values* come from bindings, the *look*
+//! from the stylesheet, and only genuinely game-specific behaviour goes into a
+//! Luau script.
 //!
 //! A binding produces one [`BoundValue`]; how the element consumes it depends
 //! on what the element is:
@@ -13,27 +14,24 @@
 //! * `UiText` → the formatted string;
 //! * anything else → the truthiness drives `Visibility`.
 //!
-//! ## Bindings de estado do herói e do mundo
+//! ## Bindings de estado do mundo
 //!
-//! Os três binds "derivados" que o HUD lê para estados de jogo:
+//! A engine só conhece o MUNDO; vida, ouro, quests, cooldowns e alvo são do
+//! jogo e chegam por `viber.ui.set` (binds de script). Os binds "derivados"
+//! que a engine publica são:
 //!
-//! | bind           | tipo  | semântica                                                    |
-//! |----------------|-------|--------------------------------------------------------------|
-//! | `health.low`   | flag  | vida/máx ≤ 0.30 — o card de vitais fica em alerta (`danger`) |
-//! | `status.venom` | flag  | veneno activo no herói (`StatusEffects.venom > 0`)           |
-//! | `zone.name`    | texto | nome de exposição da zona (`display-name` do BiomeRegion → tabela → id) |
+//! | bind           | tipo   | semântica                                                    |
+//! |----------------|--------|--------------------------------------------------------------|
+//! | `zone.name`    | texto  | nome de exposição da zona (`display-name` do BiomeRegion → id) |
 //! | `weather.rain` | fração | intensidade de chuva do `<Weather>` (0 = seco, 1 = tempestade) |
-//! | `weather.wet`  | flag  | rain > 0.05 — liga o chip de chuva no card de ambiente       |
-//! | `talent.ready` | flag  | pontos de talento por gastar (`LevelState.points > 0`)       |
-//! | `cd.*.ready`   | flag  | cooldown terminado — acende o slot (`cd.dash.ready:ready`)   |
-//! | `*.empty`      | flag  | consumível esgotado (`potion.empty:empty` cinzeia o vial)    |
+//! | `weather.wet`  | flag   | rain > 0.05 — liga o chip de chuva no card de ambiente       |
 //!
 //! ## Bindings de classe: `nome:classe`
 //!
-//! Um `bind="health.low:danger"` não mostra nem esconde nada — troca uma
+//! Um `bind="weather.wet:wet"` não mostra nem esconde nada — troca uma
 //! **classe** no próprio elemento conforme a flag (`apply_bind_classes`,
 //! idempotente, padrão apply-fresh: só toca o `UiClasses`/`UiStyleDirty`
-//! quando o estado muda). É o caminho engine-driven dos toggles que antes
+//! quando o estado muda). É o caminho declarativo dos toggles que antes
 //! viviam em Luau (`viber.ui.toggle_class`).
 //!
 //! Unknown binding names are reported once and then ignored, so a typo costs a
@@ -50,24 +48,9 @@ use super::script::UiScriptBinds;
 ///
 /// Collected once per frame so a hundred bound elements cost one pass over the
 /// game state instead of a hundred queries.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiData {
-    pub health: f32,
-    pub health_max: f32,
-    pub xp: f32,
-    pub xp_next: f32,
-    pub level: u32,
-    pub gold: u32,
-    pub wood: u32,
-    pub stone: u32,
-    /// Ability cooldowns as *remaining fractions* (1 = just fired, 0 = ready).
-    pub cd_dash: f32,
-    pub cd_heal: f32,
-    pub cd_strike: f32,
-    /// Soft-locked combat target, when one is live.
-    pub target_name: String,
-    pub target_health: f32,
-    pub target_health_max: f32,
     /// In-world clock, as `HH:MM`.
     pub clock: String,
     /// Fraction of the day elapsed (0 = midnight) — drives the day/night dial.
@@ -75,41 +58,11 @@ pub struct UiData {
     /// Nearest interactable's prompt, empty when there is nothing to press.
     pub prompt_key: String,
     pub prompt_label: String,
-    /// Currently tracked quest.
-    pub quest_title: String,
-    pub quest_progress: f32,
-    pub quest_progress_text: String,
     /// Newest toast and how long it still has to live.
     pub toast: String,
     pub toast_time: f32,
-    /// Consumable stacks on the hotbar.
-    pub potions: u32,
-    pub antidotes: u32,
-    pub bombs: u32,
-    /// Sementes de canção coletadas (colecionáveis) — `korok-seed`.
-    pub korok_seeds: u32,
-    /// Combo counter do melee: hits acertados na janela (0 = escondido).
-    pub combo_hits: u32,
-    /// Veneno activo no herói (`status.venom`) — segundos restantes > 0.
-    pub status_venom: bool,
     /// Chuva contínua do `<Weather>` (0 = seco, 1 = tempestade) — `weather.rain`.
     pub weather_rain: f32,
-    /// Pontos de talento por gastar (`LevelState.points`) — `talent.points`.
-    pub talent_points: u32,
-    // ── janelas de revelação ────────────────────────────────────────────
-    // Segundos que ainda faltam a um widget contextual antes de se apagar.
-    // A regra do HUD é: **permanente = vida + mapa**; tudo o resto entra
-    // quando muda e sai sozinho. Estes contadores são a memória disso.
-    /// Ouro/madeira/pedra mudaram há pouco.
-    pub purse_reveal: f32,
-    /// Poções/antídotos/bombas mudaram há pouco.
-    pub belt_reveal: f32,
-    /// XP subiu há pouco (ou o nível).
-    pub xp_reveal: f32,
-    /// A missão activa mudou de título ou de progresso há pouco.
-    pub quest_reveal: f32,
-    /// Houve combate (alvo vivo, dano recebido) há pouco.
-    pub combat_reveal: f32,
     /// Nome legível da zona em que o herói acabou de entrar.
     pub zone_name: String,
     /// Quanto tempo o cartão de descoberta ainda tem de vida.
@@ -122,8 +75,7 @@ impl UiData {
         let value = match name {
             // Vida, ouro, quests, cooldowns e alvo são do jogo: o script
             // publica-os com `viber.ui.set`. A engine só conhece o mundo.
-            "weather.rain" => BoundValue::fraction(self.weather_rain.clamp(0.0, 1.0)),
-            "weather.wet" => BoundValue::flag(self.weather_rain > 0.05),
+            "weather.rain" => BoundValue::fraction(self.weather_rain.clamp(0.0, 1.0)),            "weather.wet" => BoundValue::flag(self.weather_rain > 0.05),
             "clock" => BoundValue::text(self.clock.clone()),
             "day" => BoundValue::fraction(self.day_fraction),
             "prompt.key" => BoundValue::text(self.prompt_key.clone()),
@@ -177,7 +129,8 @@ impl BoundValue {
 }
 
 /// Names already reported as unknown, so a typo logs once and not every frame.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiBindWarnings(HashSet<String>);
 
 /// Segundos de jogo antes de um bind em falta ser aviso: os binds de script
@@ -338,16 +291,6 @@ mod tests {
 
     fn sample() -> UiData {
         UiData {
-            health: 45.0,
-            health_max: 100.0,
-            xp: 30.0,
-            xp_next: 120.0,
-            level: 3,
-            gold: 12,
-            cd_dash: 0.5,
-            target_name: "Lobo".into(),
-            target_health: 20.0,
-            target_health_max: 80.0,
             clock: "07:15".into(),
             ..Default::default()
         }

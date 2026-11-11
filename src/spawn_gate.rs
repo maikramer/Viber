@@ -29,7 +29,7 @@ pub const GATE_TIMEOUT_S: f32 = 20.0;
 const RESOLVE_FRAMES: u32 = 600;
 
 /// Um `<SpawnGate>` do mundo, por resolver.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct GateSpec {
     /// Nome da entidade (`player` também casa com o herói sem `name`).
     pub target: String,
@@ -56,14 +56,16 @@ impl GateSpec {
 }
 
 /// Portões declarados ainda à procura da entidade-alvo.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PendingSpawnGates {
     pub list: Vec<GateSpec>,
     frames: u32,
 }
 
 /// A entidade está congelada à espera de chão.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct SpawnGated {
     /// Posição de espera (XZ autorado, Y = `y-fallback` ou o autorado).
     pub hold: Vec3,

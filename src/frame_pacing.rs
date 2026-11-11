@@ -40,7 +40,7 @@ const AUTO_MIN_FPS: f32 = 28.0;
 /// Margem final em espera ativa: o `sleep` do SO acorda tarde ~1 ms.
 const SPIN: Duration = Duration::from_micros(1500);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum PacingMode {
     Off,
     Fixed(f32),
@@ -76,7 +76,8 @@ pub fn pick_period(periods: &[f32], work: f32) -> Option<f32> {
     periods.iter().copied().find(|p| *p >= work * HEADROOM)
 }
 
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct FramePacer {
     pub mode: PacingMode,
     /// Período em vigor (s); `None` = sem pacing.

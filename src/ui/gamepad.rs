@@ -1,24 +1,33 @@
 //! Navegação da UI declarativa por gamepad.
 //!
-//! A UI nasceu para rato/teclado: `Interaction` vinha do ponteiro e os
-//! botões só respondiam a clique. Este módulo dá-lhe um foco de teclado
-//! direccional (D-pad/stick esquerdo) e A para accionar — o mínimo para um
-//! jogo de PC com comando não ficar preso no menu.
+//! O foco direccional deixou de ser um `pick_direction` à mão: o
+//! [`AutoDirectionalNavigator`] do Bevy (sobre o `AutoDirectionalNavigation`
+//! que cada nó focável carrega) escolhe o vizinho geométrico na direcção do
+//! D-pad/stick, e o estado vive no `InputFocus` do `bevy_input_focus`. Este
+//! módulo só traduz o gamepad para octantes e acciona o foco com A.
 //!
 //! Só corre com um menu/modal aberto (`MenusOpen::any()`); no mundo, o stick
-//! pertence ao movimento do herói. O foco vive em [`UiGamepadFocus`] e a
-//! classe CSS `focused` marca o botão — o jogo pode estilizá-la.
+//! pertence ao movimento do herói. [`UiGamepadFocus`] é o espelho compatível
+//! que o resto da engine lê (e a classe CSS `focused` vem do `InputFocus`).
 
 use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
+use bevy::input_focus::InputFocusVisible;
+use bevy::math::CompassOctant;
 use bevy::prelude::*;
+use bevy::ui::auto_directional_navigation::{AutoDirectionalNavigation, AutoDirectionalNavigator};
 use bevy::ui::{ComputedNode, UiGlobalTransform};
+use bevy::ui_widgets::{Activate, ToggleChecked};
 
-use super::runtime::{UiClasses, UiDisabled, UiPointerNone};
+use super::runtime::{UiDisabled, UiPointerNone};
 use crate::menus::MenusOpen;
-use crate::ui::interaction::{Button, Interaction};
+use crate::ui::interaction::Interaction;
 
 /// Elemento com foco do gamepad. `None` = sem foco.
-#[derive(Debug, Default, Resource)]
+///
+/// Espelho de `InputFocus` enquanto um menu está aberto; mantém-se o recurso
+/// para os consumidores que já o liam e para o `viber.ui`/profiler.
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiGamepadFocus(pub Option<Entity>);
 
 fn node_center(node: &ComputedNode, transform: &UiGlobalTransform) -> Vec2 {
@@ -26,32 +35,45 @@ fn node_center(node: &ComputedNode, transform: &UiGlobalTransform) -> Vec2 {
     translation + node.size * 0.5
 }
 
-/// Escolhe o candidato mais alinhado na direcção pedida: projecção no eixo
-/// pretendido, penalizando o desvio perpendicular (um botão à frente e ao
-/// lado perde para um mesmo à frente).
-fn pick_direction(candidates: &[(Entity, Vec2)], from: Vec2, dir: Vec2) -> Option<Entity> {
-    let mut best: Option<(Entity, f32)> = None;
-    for (entity, center) in candidates {
-        let delta = *center - from;
-        let forward = delta.dot(dir);
-        if forward <= 1.0 {
-            continue; // atrás ou em cima do foco actual
+/// Converte o eixo do stick/D-pad num octante do `CompassOctant`.
+///
+/// O eixo Y da UI cresce para BAIXO; o stick para cima é Y positivo, por isso
+/// o chamador inverte o Y antes de chegar aqui. Um eixo nulo em ambos os
+/// sentidos não navega.
+fn stick_octant(dx: f32, dy: f32) -> Option<CompassOctant> {
+    let sign = |value: f32| {
+        if value > 0.0 {
+            1
+        } else if value < 0.0 {
+            -1
+        } else {
+            0
         }
-        let side = delta.dot(Vec2::new(-dir.y, dir.x)).abs();
-        let score = forward + side * 1.8;
-        if best.is_none_or(|(_, current)| score < current) {
-            best = Some((*entity, score));
-        }
-    }
-    best.map(|(entity, _)| entity)
+    };
+    let x = sign(dx);
+    let y = sign(dy);
+    Some(match (x, y) {
+        (0, -1) => CompassOctant::North,
+        (1, -1) => CompassOctant::NorthEast,
+        (1, 0) => CompassOctant::East,
+        (1, 1) => CompassOctant::SouthEast,
+        (0, 1) => CompassOctant::South,
+        (-1, 1) => CompassOctant::SouthWest,
+        (-1, 0) => CompassOctant::West,
+        (-1, -1) => CompassOctant::NorthWest,
+        _ => return None,
+    })
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn drive_ui_gamepad_nav(
     menus: Option<Res<MenusOpen>>,
+    typing: Option<Res<super::widgets::UiFocusedInput>>,
     pads: Query<&Gamepad>,
+    mut nav: AutoDirectionalNavigator,
     mut focus: ResMut<UiGamepadFocus>,
-    buttons: Query<
+    mut focus_visible: ResMut<InputFocusVisible>,
+    candidates: Query<
         (
             Entity,
             &ComputedNode,
@@ -60,9 +82,8 @@ pub fn drive_ui_gamepad_nav(
             Option<&UiDisabled>,
             Option<&UiPointerNone>,
         ),
-        With<Button>,
+        With<AutoDirectionalNavigation>,
     >,
-    mut classes: Query<&mut UiClasses>,
     mut interactions: Query<&mut Interaction>,
     mut stick_armed: Local<bool>,
     // Entidades cujo `Pressed` foi sintetizado por nós. Sem isto o botão
@@ -83,50 +104,77 @@ pub fn drive_ui_gamepad_nav(
         }
     }
     if !menus.as_deref().is_some_and(MenusOpen::any) {
-        if focus.0.take().is_some() {
-            // Sair do menu: tira a classe do último foco.
-            for (entity, _, _, _, _, _) in &buttons {
-                if let Ok(mut classes) = classes.get_mut(entity) {
-                    if classes.remove("focused") {
-                        commands.entity(entity).insert(super::runtime::UiStyleDirty);
-                    }
-                }
+        // Sair do menu tira o foco da UI — mas nunca o de um campo de texto
+        // que viva fora dele (barra de fala do NLU) nem o de um nó que não
+        // seja desta UI (o `InputFocus` é partilhado com o resto do Bevy).
+        if typing.as_deref().is_none_or(|typing| typing.0.is_none()) {
+            if let Some(current) = nav.input_focus()
+                && candidates.contains(current)
+            {
+                nav.manual_directional_navigation.focus.clear();
             }
+            focus.0 = None;
         }
         *stick_armed = false;
         return;
     }
+    // Com um `<UiInput>` focado as teclas pertencem ao texto; o stick também
+    // não deve arrancar o foco do campo (nem limpar o espelho).
+    if typing.as_deref().is_some_and(|typing| typing.0.is_some()) {
+        *stick_armed = false;
+        return;
+    }
 
-    let mut candidates: Vec<(Entity, Vec2)> = Vec::new();
-    for (entity, node, transform, visibility, disabled, pointer_none) in &buttons {
+    let mut live: Vec<(Entity, Vec2)> = Vec::new();
+    for (entity, node, transform, visibility, disabled, pointer_none) in &candidates {
         if disabled.is_some() || pointer_none.is_some() {
             continue;
         }
         if visibility.is_some_and(|visible| !visible.get()) {
             continue;
         }
-        if node.size.x <= 1.0 || node.size.y <= 1.0 {
+        if node.size().x <= 1.0 || node.size().y <= 1.0 {
             continue;
         }
-        candidates.push((entity, node_center(node, transform)));
+        live.push((entity, node_center(node, transform)));
     }
-    if candidates.is_empty() {
-        // O foco anterior ainda pode existir (ficou `disabled`, por exemplo):
-        // sem tirar a classe, o anel de foco ficava preso num botão morto.
-        if let Some(previous) = focus.0.take()
-            && let Ok(mut classes) = classes.get_mut(previous)
-            && classes.remove("focused")
-        {
-            commands
-                .entity(previous)
-                .insert(super::runtime::UiStyleDirty);
-        }
+    if live.is_empty() {
+        // Menu sem focáveis: não há foco de gamepad para manter — mas o
+        // `InputFocus` global pode pertencer a outra coisa.
+        focus.0 = None;
         return;
     }
 
+    // Sem comando ligado não há navegação nenhuma: o teclado tem o seu
+    // próprio caminho (`InputFocus`/Tab, quando instalado).
     let Some(pad) = pads.iter().next() else {
         return;
     };
+
+    let current = nav
+        .input_focus()
+        .filter(|entity| live.iter().any(|(candidate, _)| candidate == entity))
+        .or_else(|| {
+            // Sem foco, o primeiro da esquerda para a direita, de cima para
+            // baixo. A classe entra já neste frame (o sync do foco corre
+            // depois), e o A premido no mesmo frame em que o menu abriu não
+            // se perde.
+            live.iter()
+                .min_by(|(_, a), (_, b)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)))
+                .map(|(entity, _)| *entity)
+        });
+    let Some(current) = current else {
+        return;
+    };
+    if nav.input_focus() != Some(current) {
+        nav.manual_directional_navigation
+            .focus
+            .set(current, bevy::input_focus::FocusCause::Navigated);
+        // O anel `.focused` é de navegação, não de rato: o gamepad marca-o.
+        focus_visible.0 = true;
+    }
+    focus.0 = Some(current);
+
     let (mut dx, mut dy) = (0.0f32, 0.0f32);
     if pad.just_pressed(GamepadButton::DPadUp) {
         dy -= 1.0;
@@ -157,81 +205,29 @@ pub fn drive_ui_gamepad_nav(
         }
     }
 
-    // Foco actual pode ter desaparecido (modal fechou, lista reconstruída).
-    if let Some(previous) = focus.0
-        && !candidates.iter().any(|(e, _)| *e == previous)
-    {
-        focus.0 = None;
-        if let Ok(mut classes) = classes.get_mut(previous)
-            && classes.remove("focused")
-        {
-            commands
-                .entity(previous)
-                .insert(super::runtime::UiStyleDirty);
-        }
-    }
-
-    // Sem foco: o primeiro da esquerda para a direita, de cima para baixo.
-    // A classe entra JÁ neste frame (antes, o foco inicial só ficava visível
-    // ao primeiro toque na direcção) e o fluxo continua, para o A premido no
-    // mesmo frame em que o menu abriu não se perder.
-    if focus.0.is_none() {
-        focus.0 = candidates
-            .iter()
-            .min_by(|(_, a), (_, b)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)))
-            .map(|(entity, _)| *entity);
-        if let Some(first) = focus.0
-            && let Ok(mut classes) = classes.get_mut(first)
-            && classes.add("focused")
-        {
-            commands.entity(first).insert(super::runtime::UiStyleDirty);
-        }
-    }
-
-    let current = focus.0.and_then(|entity| {
-        candidates
-            .iter()
-            .find(|(candidate, _)| *candidate == entity)
-            .map(|(_, center)| *center)
-    });
-    let Some(from) = current else { return };
-
     if dx != 0.0 || dy != 0.0 {
-        // O eixo do UI cresce para baixo (Y para baixo), logo o stick
-        // esquerdo (Y para cima) é invertido ao construir a direcção.
-        let dir = Vec2::new(dx, dy).normalize_or_zero();
-        if let Some(next) = pick_direction(&candidates, from, dir) {
-            if let Ok(mut classes) = classes.get_mut(next) {
-                if classes.add("focused") {
-                    commands.entity(next).insert(super::runtime::UiStyleDirty);
-                }
-            }
-            if let Some(previous) = focus.0
-                && previous != next
-                && let Ok(mut classes) = classes.get_mut(previous)
-            {
-                if classes.remove("focused") {
-                    commands
-                        .entity(previous)
-                        .insert(super::runtime::UiStyleDirty);
-                }
-            }
-            focus.0 = Some(next);
+        if let Some(octant) = stick_octant(dx, dy)
+            && let Ok(entity) = nav.navigate(octant)
+        {
+            focus.0 = Some(entity);
+            focus_visible.0 = true;
         }
         return;
     }
 
-    // A acciona o foco. `collect_ui_clicks` corre depois deste sistema no
-    // mesmo frame e vê `Changed<Interaction>`.
-    if pad.just_pressed(GamepadButton::South)
-        && let Some(entity) = focus.0
-        && let Ok(mut interaction) = interactions.get_mut(entity)
-    {
-        *interaction = Interaction::Pressed;
-        // Enquanto o rato estiver premido a lista não é drenada; sem o
-        // guard, premir A repetidamente acumulava a mesma entidade.
-        if !synthetic.contains(&entity) {
-            synthetic.push(entity);
+    // A acciona o foco. O `Activate` do Bevy cobre botões/abas (Enter/Espaço
+    // quando o foco está lá) e o `ToggleChecked` cobre o `Checkbox`; o
+    // `Interaction::Pressed` sintético mantém o `viber.ui.clicked`/`UiClicks`
+    // dos elementos que não são widgets Bevy. `collect_ui_clicks` corre depois
+    // deste sistema no mesmo frame e vê `Changed<Interaction>`.
+    if pad.just_pressed(GamepadButton::South) {
+        commands.trigger(Activate { entity: current });
+        commands.trigger(ToggleChecked { entity: current });
+        if let Ok(mut interaction) = interactions.get_mut(current) {
+            *interaction = Interaction::Pressed;
+            if !synthetic.contains(&current) {
+                synthetic.push(current);
+            }
         }
     }
 }
@@ -241,35 +237,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direction_picks_forward_and_ignores_behind() {
-        let a = Entity::from_raw_u32(1).unwrap();
-        let b = Entity::from_raw_u32(2).unwrap();
-        let c = Entity::from_raw_u32(3).unwrap();
-        let from = Vec2::new(100.0, 100.0);
-        let candidates = vec![
-            (a, Vec2::new(100.0, 180.0)), // abaixo
-            (b, Vec2::new(260.0, 100.0)), // à direita
-            (c, Vec2::new(100.0, 20.0)),  // acima
-        ];
-        assert_eq!(
-            pick_direction(&candidates, from, Vec2::new(0.0, 1.0)),
-            Some(a),
-            "baixo escolhe o que está abaixo"
-        );
-        assert_eq!(
-            pick_direction(&candidates, from, Vec2::new(1.0, 0.0)),
-            Some(b),
-            "direita escolhe o que está à direita"
-        );
-        assert_eq!(
-            pick_direction(&candidates, from, Vec2::new(0.0, -1.0)),
-            Some(c),
-            "cima escolhe o que está acima"
-        );
-        assert_eq!(
-            pick_direction(&candidates, from, Vec2::new(-1.0, 0.0)),
-            None,
-            "nada à esquerda"
-        );
+    fn stick_maps_to_compass_octants() {
+        assert_eq!(stick_octant(0.0, -1.0), Some(CompassOctant::North));
+        assert_eq!(stick_octant(1.0, 0.0), Some(CompassOctant::East));
+        assert_eq!(stick_octant(0.0, 1.0), Some(CompassOctant::South));
+        assert_eq!(stick_octant(-1.0, 0.0), Some(CompassOctant::West));
+        assert_eq!(stick_octant(1.0, -1.0), Some(CompassOctant::NorthEast));
+        assert_eq!(stick_octant(-1.0, 1.0), Some(CompassOctant::SouthWest));
+        assert_eq!(stick_octant(0.0, 0.0), None);
     }
 }

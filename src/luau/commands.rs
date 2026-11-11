@@ -125,6 +125,9 @@ pub enum ScriptCommand {
         look: Vec3,
     },
     /// Esconde/mostra uma entidade e a subárvore (`viber.set_visible`).
+    ///
+    /// TODO(migration): aplicado via reflexão (`Visibility`); o shim Lua
+    /// fica até `viber.ecs` ser o único caminho.
     SetVisible {
         entity: Entity,
         visible: bool,
@@ -188,19 +191,25 @@ pub enum ScriptCommand {
     SetLocale(String),
     /// Fecha o jogo (`viber.quit`) — pedido limpo ao AppExit.
     Quit,
-    /// Vitais GENÉRICAS de entidade (`viber.entity_set_max_hp`): cria o
-    /// `Health` se faltar (current = max); numa entidade existente
-    /// redimensiona (current clampe ao novo max).
     /// Toca uma cinemática (`viber.cinematic`); `anchor` = âncora `self`.
     PlayCinematic {
         id: String,
         anchor: Option<Entity>,
     },
     /// Escala uniforme da entidade (`viber.set_scale`) — elites maiores, etc.
+    ///
+    /// TODO(migration): aplicado via reflexão (`Transform.scale`).
     SetScale {
         entity: Entity,
         scale: f32,
     },
+    /// Vitais GENÉRICAS de entidade (`viber.entity_set_max_hp`): cria o
+    /// `Health` se faltar (current = max); numa entidade existente
+    /// redimensiona (current clampe ao novo max).
+    ///
+    /// TODO(migration): a escrita em `Health` é o alvo de `viber.ecs`, mas a
+    /// criação condicional e a sombra de HP do frame vivem aqui — migrar só
+    /// quando houver teste do caminho refletido com `Kill`.
     EntitySetMaxHp {
         entity: Entity,
         max: f32,
@@ -209,11 +218,16 @@ pub enum ScriptCommand {
     /// são do path do player). Sem `Health` = no-op (warn 1×). HP ≤ 0 emite
     /// [`ScriptGameEvent::Kill`] e NÃO corre o caminho nativo de morte
     /// (cadáver/XP/quests são do melee) — o script decide o que segue.
+    ///
+    /// TODO(migration): idem — reflexão só depois de coberta a emissão de
+    /// `Kill`/`script_kind` e o ramo do herói.
     EntityDamage {
         entity: Entity,
         amount: f32,
     },
     /// Cura direta em entidade (`viber.entity_heal`), clampe ao max.
+    ///
+    /// TODO(migration): idem; a cura partilha o `Health` do dano/criação.
     EntityHeal {
         entity: Entity,
         amount: f32,
@@ -287,6 +301,8 @@ pub enum ScriptCommand {
     /// Pose local da entidade (`viber.set_pose`). O yaw é `Quat::from_rotation_y`.
     /// A escala fica. Com `own_system("locomotion")` o `player_movement` não
     /// disputa esta escrita no herói.
+    ///
+    /// TODO(migration): aplicado via reflexão (`Transform.translation/rotation`).
     SetPose {
         entity: Entity,
         pos: Vec3,
@@ -348,4 +364,14 @@ pub enum ScriptCommand {
         pos: Vec3,
         loudness: f32,
     },
+    /// Escrita ECS genérica (`viber.ecs.set/insert/remove/spawn/despawn`).
+    /// Aplicada pós-frame com `&mut World` (reflexão); a variante única
+    /// substitui os comandos por conceito à medida que migram.
+    ///
+    /// TODO(migration): os verbos genéricos `SetVisible`/`SetScale`/`SetPose`
+    /// já passam por `crate::luau::ecs`; `EntitySetMaxHp`/`EntityDamage`/
+    /// `EntityHeal` mantêm-se até o BRP/reflexão provar o caminho de escrita
+    /// (semântica de `Kill`, sombra de HP criado no frame e i-frames do
+    /// herói vivem aqui, não no componente).
+    Ecs(crate::luau::ecs::EcsOp),
 }

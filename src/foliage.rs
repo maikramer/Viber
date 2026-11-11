@@ -39,7 +39,8 @@ pub fn batch_enabled() -> bool {
     )
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct SimpleFoliage {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
@@ -55,12 +56,14 @@ pub struct SimpleFoliage {
 /// * `true` — instância de spawner/vegetação: a cena pode ter vários meshes
 ///   (tronco + folhas) e cada um entra no batch. A vegetação não tem ladder
 ///   de LOD, por isso não há troca de subárvore a invalidar o tile fundido.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct FoliageCandidate {
     pub multi: bool,
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct FoliageTile {
     pub key: IVec2,
     pub mesh_id: AssetId<Mesh>,
@@ -392,7 +395,8 @@ pub fn impostor_band(distance: f32, cull: f32) -> bool {
     distance >= IMPOSTOR_NEAR && distance < cull
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct ImpostorCard {
     pub source: Entity,
 }

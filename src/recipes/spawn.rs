@@ -31,7 +31,8 @@ use crate::terrain::water::{LakeSpec, RiverSpec};
 /// cameras: [`crate::camera::third_person_camera`] drives them (decoupled
 /// follow, terrain collision), and [`crate::player::player_movement`] steers
 /// their yaw with A/D. Cameras with a `target` stay on the rigid follow.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct OrbitCamera {
     pub target: Option<String>,
     pub distance: f32,
@@ -90,7 +91,8 @@ impl OrbitCamera {
 pub const DEFAULT_ORBIT_PIVOT_HEIGHT: f32 = 1.2;
 
 /// Camera spawned automatically when the world has none: slow orbit at origin.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct AutoOrbit {
     pub yaw: f32,
     pub radius: f32,
@@ -99,8 +101,10 @@ pub struct AutoOrbit {
 
 /// World XML held as a resource until the startup system spawns it.
 /// `base_dir` is the world file's directory (heightmap/asset path base).
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PendingWorld {
+    #[reflect(ignore)]
     pub world: ParsedWorld,
     pub base_dir: Option<PathBuf>,
 }
@@ -114,7 +118,8 @@ const NPC_CAPSULE_CENTER: f32 = NPC_CAPSULE_HALF_HEIGHT + NPC_CAPSULE_RADIUS;
 /// swaps it for a `SceneRoot` once loaded (and drops it on failure). Os
 /// handles de LOD opcionais (`lod1-url`/`lod2-url`) constroem a ladder de
 /// [`crate::render_lod::MeshLod`] quando todos os tiers resolvem.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct GltfScenePending {
     pub handle: Handle<Gltf>,
     pub lod1: Option<Handle<Gltf>>,
@@ -138,10 +143,13 @@ impl GltfScenePending {
 
 /// Declarative terrain collected from the entity tree, consumed by the
 /// terrain runtime ([`crate::terrain::runtime`]) at startup.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PendingTerrain {
     pub base_dir: Option<PathBuf>,
+    #[reflect(ignore)]
     pub terrain: Option<TerrainSpec>,
+    #[reflect(ignore)]
     pub features: TerrainFeatures,
 }
 
@@ -175,8 +183,9 @@ fn is_ground_feature(kind: &EntityKind) -> bool {
 /// and tests can carve a world without booting the app.
 /// Prototypes do mundo (`<Prototype id="…">`) para spawn EM RUNTIME
 /// (`viber.spawn_prototype`). Imutável pós-arranque.
-#[derive(Resource, Default)]
-pub struct PrototypeLibrary(pub std::collections::BTreeMap<String, EntitySpec>);
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
+pub struct PrototypeLibrary(#[reflect(ignore)] pub std::collections::BTreeMap<String, EntitySpec>);
 
 /// Pedido de spawn pendente enfileirado por script; materializado pelo
 /// sistema exclusivo [`apply_script_spawns`] (primitivas com textura/colisor
@@ -194,8 +203,9 @@ pub struct PendingPrototypeSpawn {
 }
 
 /// Fila de pedidos de spawn (`ScriptCommand::SpawnPrototype` → sistema).
-#[derive(Resource, Default)]
-pub struct PendingScriptSpawns(pub Vec<PendingPrototypeSpawn>);
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
+pub struct PendingScriptSpawns(#[reflect(ignore)] pub Vec<PendingPrototypeSpawn>);
 
 pub fn collect_terrain(specs: &[EntitySpec], out: &mut PendingTerrain) {
     collect_walk(specs, Vec2::ZERO, out);
@@ -369,7 +379,8 @@ pub struct SpawnStats {
 ///
 /// Os grupos têm `Transform` de identidade e `Visibility::Inherited`, logo
 /// reparentar para eles não move nada nem quebra o culling por distância.
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct EditorGroups {
     pub environment: Entity,
     pub terrain: Entity,
@@ -383,7 +394,8 @@ pub struct EditorGroups {
 
 /// Marca as entidades-grupo de [`EditorGroups`] — filtra-as de queries que
 /// procuram hierarquia autoral (ex.: raízes de composição em testes).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct EditorGroup;
 
 impl EditorGroups {
@@ -603,7 +615,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     let mut stats = SpawnStats::default();
     let mut ambient: Option<GlobalAmbientLight> = None;
     let (
-        chips,
         hud_elements,
         ui_styles,
         ui_trees,
@@ -621,9 +632,7 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
             tiled: &mut tiled,
             mesh_cache: std::collections::HashMap::new(),
             material_cache: std::collections::HashMap::new(),
-            chip_counter: std::cell::Cell::new(0),
             mixer: std::cell::RefCell::new(None),
-            chips: std::cell::RefCell::new(Vec::new()),
             hud: std::cell::RefCell::new(Vec::new()),
             ui_styles: std::cell::RefCell::new(Vec::new()),
             ui_pending_sheets: std::cell::RefCell::new(Vec::new()),
@@ -660,7 +669,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
         let pending_worldsys = ctx.worldsys.consume();
         let sky_request = ctx.sky_request.into_inner();
         (
-            ctx.chips.into_inner(),
             hud_elements,
             ui_styles,
             ui_trees,
@@ -672,9 +680,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     };
     if let Some(light) = ambient {
         world.insert_resource(light);
-    }
-    for (index, resource) in chips {
-        crate::hud::spawn_resource_chip(world, index, &resource);
     }
     for (tag, attrs) in &hud_elements {
         crate::hud::spawn_hud(world, tag, attrs);
@@ -826,9 +831,7 @@ pub fn spawn_specs(
             tiled: &mut tiled,
             mesh_cache: std::collections::HashMap::new(),
             material_cache: std::collections::HashMap::new(),
-            chip_counter: std::cell::Cell::new(0),
             mixer: std::cell::RefCell::new(None),
-            chips: std::cell::RefCell::new(Vec::new()),
             hud: std::cell::RefCell::new(Vec::new()),
             ui_styles: std::cell::RefCell::new(Vec::new()),
             ui_pending_sheets: std::cell::RefCell::new(Vec::new()),
@@ -944,10 +947,7 @@ struct SpawnCtx<'a> {
     mesh_cache: std::collections::HashMap<MeshKey, Handle<Mesh>>,
     /// Cache de materiais por spec exata — mesmo contrato do mesh_cache.
     material_cache: std::collections::HashMap<MaterialKey, Handle<StandardMaterial>>,
-    chip_counter: std::cell::Cell<usize>,
     mixer: std::cell::RefCell<Option<crate::music::AudioMixerSettings>>,
-    /// Deferred HUD chip UI nodes (resource name + stack index).
-    chips: std::cell::RefCell<Vec<(usize, String)>>,
     /// Deferred HUD screen elements (tag + raw attrs).
     hud: std::cell::RefCell<HudList>,
     /// `<UiStyle>` sources, in document order (later rules win).
@@ -968,7 +968,8 @@ struct SpawnCtx<'a> {
 }
 
 /// O mundo carregado é estático (`<world static="true">`) — lido pelo spawn incremental.
-#[derive(Resource, Debug, Clone, Copy, Default)]
+#[derive(Resource, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Resource)]
 pub struct StaticWorld(pub bool);
 
 /// Malha de primitiva com dedup: as partes repetidas de uma
@@ -1904,16 +1905,10 @@ fn spawn_entity(
                 )]),
             ));
         }
-        EntityKind::ResourceChip {
-            resource,
-            icon: _,
-            target: _,
-        } => {
-            let index = ctx.chip_counter.get() + 1;
-            ctx.chip_counter.set(index);
-            // HUD chip: UI node deferred to the end of startup (the entity
-            // borrow holds `world`).
-            ctx.chips.borrow_mut().push((index, resource.clone()));
+        EntityKind::ResourceChip { .. } => {
+            // Elemento LEGADO do HUD do simple-rpg: o chip de recurso é hoje
+            // um `<UiText bind="...">` declarativo, alimentado pelo jogo. A
+            // entidade continua a nascer (nome/hierarquia) sem widget nativo.
         }
         EntityKind::AudioMixer {
             master,
@@ -2169,6 +2164,11 @@ fn spawn_entity(
 
 /// XZ acumulado das translations dos ancestrais já spawnados (sem rotação —
 /// a mesma convenção de [`collect_walk`] para as features do terreno).
+///
+/// ASSUNÇÃO: só TRANSLATION (rotação/escala identidade), a convenção dos
+/// grupos autorais. Corres um passo de cada vez durante o próprio spawn, antes
+/// de o `TransformPlugin` propagar: `GlobalTransform` ainda está no default e
+/// `TransformHelper` só existe como system param, não neste `&World`.
 fn ancestor_xz(world: &World, mut parent: Option<Entity>) -> Vec2 {
     let mut offset = Vec2::ZERO;
     for _ in 0..64 {
@@ -2603,9 +2603,7 @@ pub fn apply_script_spawns(world: &mut World) {
         tiled: &mut tiled,
         mesh_cache: std::collections::HashMap::new(),
         material_cache: std::collections::HashMap::new(),
-        chip_counter: std::cell::Cell::new(0),
         mixer: std::cell::RefCell::new(None),
-        chips: std::cell::RefCell::new(Vec::new()),
         hud: std::cell::RefCell::new(Vec::new()),
         ui_styles: std::cell::RefCell::new(Vec::new()),
         ui_pending_sheets: std::cell::RefCell::new(Vec::new()),

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Reflect)]
 pub enum NetRole {
     Off,
     Host { port: u16 },
@@ -76,6 +76,7 @@ pub fn decode(line: &str) -> Option<NetMsg> {
     }
 }
 
+#[derive(Default)]
 struct Shared {
     inbound: Mutex<Vec<NetMsg>>,
     outbound: Mutex<Vec<NetMsg>>,
@@ -85,13 +86,16 @@ struct Shared {
     closed: AtomicBool,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct NetLink {
+    #[reflect(ignore)]
     shared: Arc<Shared>,
     pub role: NetRole,
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct NetGhost;
 
 fn pump(shared: Arc<Shared>, stream: TcpStream) {

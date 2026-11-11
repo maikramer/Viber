@@ -24,7 +24,7 @@ pub const SENSE_RAYS_PER_FRAME: usize = 8;
 /// Folga do raio de LOS (m): evita "bloqueado" por encostar à parede.
 pub const LOS_SLACK: f32 = 0.45;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 pub enum SenseKind {
     See,
     Hear,
@@ -39,7 +39,7 @@ impl SenseKind {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Reflect)]
 pub struct SenseEvent {
     pub kind: SenseKind,
     pub pos: Vec3,
@@ -47,18 +47,21 @@ pub struct SenseEvent {
     pub from: Option<Entity>,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SenseBus {
     pub events: Vec<SenseEvent>,
 }
 
 /// Último sentido por entidade, lido pelo Lua no mesmo frame (`viber.sense`, `on_sense`).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SenseInbox {
     pub pulses: HashMap<Entity, SenseKind>,
 }
 
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct SenseMemory {
     pub alert_left: f32,
     pub search_left: f32,
@@ -176,7 +179,8 @@ pub struct HeardNoise {
 }
 
 /// Impacto de projétil à espera de entrar no barramento (um frame).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct NoisePing(pub Vec3);
 
 /// Rotação do ponto de partida do orçamento de raios de visão.
@@ -184,7 +188,8 @@ pub struct NoisePing(pub Vec3);
 /// Sem isto os primeiros [`SENSE_RAYS_PER_FRAME`] inimigos da query (ordem
 /// estável) consumiam TODOS os raios em todos os frames: os restantes nunca
 /// eram testados e ficavam cegos para sempre, mesmo de frente para o herói.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SenseCursor(pub usize);
 
 /// Golpes e impactos entram no barramento como audição.

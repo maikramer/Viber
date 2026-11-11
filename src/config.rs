@@ -23,13 +23,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bevy::prelude::Resource;
+use bevy::ecs::reflect::ReflectResource;
+use bevy::prelude::{Reflect, Resource};
 use serde::Deserialize;
 
 /// Nome do ficheiro, ao lado do `world.xml`.
 pub const CONFIG_FILE: &str = "config.yaml";
 
-#[derive(Debug, Clone, Resource, Deserialize)]
+#[derive(Debug, Clone, Resource, Deserialize, Reflect)]
+#[reflect(Resource)]
 pub struct GameConfig {
     /// Título da janela (opcional; default = nome do ficheiro do mundo).
     #[serde(default)]
@@ -69,7 +71,7 @@ pub struct GameConfig {
 /// motion blur, lente). Um jogo que não lê os efeitos em movimento pode
 /// desligá-los aqui sem passar o preset `desempenho` inteiro (que também
 /// corta sombras, relva e alcance de render).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, bevy::prelude::Reflect)]
 pub struct PostFxConfig {
     /// Gates a desligar, com os mesmos nomes do bridge
     /// (`viber.debug.postfx{…}`) e de `VIBER_NO_<KEY>`: `volumetrics`, `dof`,
@@ -90,7 +92,7 @@ pub struct PostFxConfig {
 /// chuva, no chão molhado. O chão é o que cobre o ecrã inteiro quando chove;
 /// `wet-ground: false` deixa lá o sheen PBR barato (`walls_b.w` no shader do
 /// terreno) e reserva o raymarch para a água.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, bevy::prelude::Reflect)]
 #[serde(rename_all = "kebab-case")]
 pub struct ReflectionsConfig {
     /// `auto` (default: SSR só no preset `alto`) | `off` | `water` (só água)
@@ -108,7 +110,7 @@ pub struct ReflectionsConfig {
     pub max_distance: Option<f32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, bevy::prelude::Reflect)]
 pub struct AssetsConfig {
     /// Roots extra por ordem, DEPOIS da pasta do jogo (vazio = standalone).
     /// Relativas à pasta do jogo; absolutas ficam tal-qual.
@@ -129,7 +131,7 @@ pub struct AssetsConfig {
 }
 
 /// Diretórios resolvidos contra a pasta do jogo (filesystem direto).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, bevy::prelude::Reflect)]
 pub struct GameDirs {
     /// `script="x.lua"` + hot-reload.
     pub scripts_dir: PathBuf,
@@ -139,7 +141,7 @@ pub struct GameDirs {
     // estilo (caso real 2026-09-08).
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, bevy::prelude::Reflect)]
 pub struct SaveConfig {
     /// Absoluto (com `~` expandido no load); `{dir}/{mundo}.save.json`.
     pub dir: PathBuf,

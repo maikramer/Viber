@@ -20,7 +20,8 @@
 use bevy::prelude::*;
 
 /// Looping motion on one element, parsed from the `anim="…"` attribute.
-#[derive(Debug, Clone, Component, PartialEq)]
+#[derive(Debug, Clone, Component, PartialEq, Reflect)]
+#[reflect(Component)]
 pub struct UiAnim {
     pub kind: AnimKind,
     /// Seconds per cycle.
@@ -32,7 +33,7 @@ pub struct UiAnim {
     t: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum AnimKind {
     Spin,
     Pulse,

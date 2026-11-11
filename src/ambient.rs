@@ -102,7 +102,8 @@ pub fn shadow_light_daylight_max() -> f32 {
 /// profiler). Desligado, o `light_budget_system` tira a sombra a TODAS as
 /// lanternas — o A/B mede o custo das 6 vistas por luz sem reiniciar a
 /// engine.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PointShadowsEnabled(pub bool);
 
 impl Default for PointShadowsEnabled {
@@ -126,7 +127,8 @@ pub const LIGHT_BUDGET_INTERVAL: f32 = 1.0;
 /// sombras só gere estas. Sem o marcador não havia como distinguir "autorada
 /// sem sombra" de "autorada com sombra que o orçamento desligou" — o
 /// `shadow_maps_enabled` perde a informação original no primeiro toggle.
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct AuthoredShadowLight;
 /// Intervalo entre gestos idle de NPC (s, ±jitter).
 pub const GESTURE_MIN_INTERVAL: f32 = 7.0;
@@ -134,7 +136,7 @@ pub const GESTURE_MIN_INTERVAL: f32 = 7.0;
 // ── SFX ─────────────────────────────────────────────────────────────────
 
 /// Clip de SFX curto.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 pub enum SfxClip {
     Hit,
     Whoosh,
@@ -473,7 +475,8 @@ pub const FOG_BASE_DENSITY: f32 = 1.0 / FOG_REFERENCE_M;
 const BIOME_TINT_WEIGHT: f32 = 0.25;
 
 /// Bioma atual do herói (id da região, ou `None` = vale central).
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CurrentBiome {
     pub id: Option<String>,
 }
@@ -882,7 +885,8 @@ fn npc_gesture_system(
 /// de [`SFX_CLIPS_ALL`]; um clip novo no enum entra no preload sozinho. O
 /// asset type é o [`bevy_kira_audio::AudioSource`] (decode symphonia), NÃO
 /// o `bevy_audio::AudioSource` do backend nativo.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SfxHandles {
     clips: HashMap<SfxClip, Handle<bevy_kira_audio::AudioSource>>,
 }
@@ -986,7 +990,8 @@ fn sfx_player_system(
 // splatter/spawner) — fade out a `WATER_AUDIBLE_RADIUS` m.
 
 /// Loop de água ativo (lago OU rio).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct WaterAmbienceLoop {
     /// `true` = o loop de rio (water_flow); `false` = lago (water_lake).
     pub river: bool,
@@ -1084,7 +1089,8 @@ fn water_ambience_driver(
 // ouve-se de longe.
 
 /// Loop posicional de cachoeira (uma entidade por queda).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct WaterfallLoop {
     /// Base da queda (world XZ) — o caldeirão.
     pub at: bevy::math::Vec2,
@@ -1215,7 +1221,8 @@ const RAIN_MAX_GAIN: f32 = 0.4;
 /// Vive num recurso (e não só no preset) porque a afinação é visual e
 /// iterativa: `viber.debug.rain_look{...}` muda-os na engine viva, sem
 /// recompilar nem reiniciar. Os defaults vêm do preset/env.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct RainLook {
     /// Raio (m) do fade junto da câmara (ver `particles::RAIN_NEAR_FADE_M`).
     pub near_fade_m: f32,
@@ -1242,11 +1249,13 @@ impl Default for RainLook {
 /// Marker do emissor de chuva âncora do herói (uma instância por mundo).
 /// A posição âncora vive no próprio `Transform` (a compensação do espaço
 /// local das gotas compara com ela a cada frame).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct RainEmitter;
 
 /// Marker do loop de áudio da chuva.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct RainAmbienceLoop;
 
 fn rain_spec() -> crate::recipes::ParticleSpec {
@@ -1522,7 +1531,8 @@ pub const LANTERN_RANGE: f32 = 12.0;
 const LANTERN_HEIGHT: f32 = 2.2;
 
 /// Marker da lanterna do viajante (uma instância por mundo).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct TravellerLantern;
 
 /// Intensidade da lanterna controlada pelo JOGO (`viber.lantern(intensity)`).
@@ -1531,7 +1541,8 @@ pub struct TravellerLantern;
 /// só existe à noite) e reforça-a à noite. `0` (default) = só a automática.
 /// Vive num recurso para o `lantern_driver` compor sem o Lua tocar em
 /// componentes.
-#[derive(Debug, Clone, Copy, Resource, Default)]
+#[derive(Debug, Clone, Copy, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct TorchLightOverride {
     pub intensity: f32,
 }

@@ -15,7 +15,8 @@ pub static DISPLAY_FONT: &[u8] = include_bytes!("../../assets/fonts/cinzel-700.t
 
 /// Lazily-created HUD art: display font + generated panel gradient + minimap
 /// arrow + minimap markers. Created once per process (single world per run).
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct HudAssets {
     pub font: Handle<Font>,
     pub panel_gradient: Handle<Image>,

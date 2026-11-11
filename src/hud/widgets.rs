@@ -9,13 +9,15 @@ use super::assets::{HudAssets, label};
 
 /// A value line in a stats panel; `kind` discriminates which system writes
 /// A clickable tab button.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct TabButton {
     pub tab: usize,
 }
 
 /// A tab content frame; only the active tab is visible.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct TabContent {
     pub tab: usize,
 }

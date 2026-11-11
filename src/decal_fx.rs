@@ -16,7 +16,7 @@ use bevy::prelude::*;
 pub const MAX_DECALS: usize = 48;
 
 /// Pedido de decal vindo de um script (`viber.decal`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct DecalRequest {
     pub url: String,
     pub position: Vec3,
@@ -27,11 +27,13 @@ pub struct DecalRequest {
 }
 
 /// Fila drenada uma vez por frame; sem o recurso o comando é no-op.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct DecalQueue(pub Vec<DecalRequest>);
 
 /// Decal com tempo de vida; o material é único (o alpha anima por instância).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct DecalFade {
     pub age: f32,
     pub life: f32,

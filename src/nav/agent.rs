@@ -29,7 +29,8 @@ pub const GROUND_TYPE_INDEX: usize = 255;
 ///
 /// This is the whole of "prefer roads": one cost multiplier per profile, priced
 /// on the archipelago, rather than pathing rules sprinkled through the scripts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Component)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Component, Reflect)]
+#[reflect(Component)]
 pub enum NavProfile {
     /// Townsfolk, guards, merchants: going overland costs
     /// [`super::NavConfig::offroad_cost`] times what the road costs, so they
@@ -42,7 +43,8 @@ pub enum NavProfile {
 }
 
 /// Marks the entity that carries the archipelago and its single island.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct NavArchipelago {
     pub archipelago: Entity,
     pub island: Entity,

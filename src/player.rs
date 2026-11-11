@@ -46,7 +46,8 @@ pub const TERMINAL_VELOCITY: f32 = 55.0;
 /// `TerrainCollisionStatus` já diga "pronto" — o collider da coluna de
 /// destino pode demorar alguns frames a assar e uma queda de 40 m/s fura-o
 /// antes disso.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component, Default)]
 pub struct TeleportSettle {
     /// Frames restantes de tutela.
     pub frames: u8,
@@ -335,7 +336,8 @@ pub fn gravity_applies(grounded: bool, vel_y: f32) -> bool {
 }
 
 /// The controllable hero (`PlayerController` subset).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component, Default)]
 pub struct Player {
     /// Walk speed in m/s (default 4).
     pub speed: f32,

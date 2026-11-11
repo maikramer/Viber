@@ -34,7 +34,8 @@ pub use crate::rng::Rng;
 /// mais do que um consumidor: os spawners (colocação) e a relva procedural
 /// (`src/grass.rs`, que desenha um tapete por cima de tudo e ignorava os
 /// discos — um acampamento numa clareira acordava enterrado em tufos).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct SpawnExclusions(pub Vec<SpawnExclusion>);
 
 impl SpawnExclusions {
@@ -49,7 +50,7 @@ impl SpawnExclusions {
 }
 
 /// Global no-spawn circle (`<SpawnExclusion at="x z" radius="n">`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Reflect)]
 pub struct SpawnExclusion {
     pub center: bevy::math::Vec2,
     pub radius: f32,
@@ -115,6 +116,7 @@ struct OccupancyRegister<'a> {
 ///
 /// Buckets por célula XZ mantêm cada consulta nos poucos discos que a podem
 /// tocar — uma lista plana tornava a geração quadrática no nº de props.
+#[derive(Reflect)]
 pub struct SpawnOccupancy {
     /// Discos de instâncias COLOCADAS (footprints de outros grupos).
     cells: HashMap<i64, Vec<(f32, f32, f32)>>,
@@ -737,8 +739,10 @@ impl SpawnGroupState {
 /// All spawner groups collected at startup; consumed by
 /// [`instantiate_spawn_groups`] once the terrain runtime and the template
 /// assets are ready.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PendingSpawnGroups {
+    #[reflect(ignore)]
     pub groups: Vec<SpawnGroupState>,
     /// `<SpawnExclusion>` circles collected across the whole world.
     pub exclusions: Vec<SpawnExclusion>,

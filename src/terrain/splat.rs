@@ -427,7 +427,7 @@ pub struct SplatParams {
 /// Live tuning of the ground noise layers — os knobs que o
 /// `viber.debug.ground{...}` move SEM rebuild (o rebake dos splats lê-os).
 /// Defaults = o comportamento de r7.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Reflect)]
 pub struct SplatTuning {
     /// Escala sobre a `patchiness` do bioma (manchas de terra/folhada).
     pub patchiness: f32,
@@ -480,7 +480,7 @@ impl Default for SplatParams {
 /// weights of every texel are packed by [`SLOT_PACKING`]; the shader reads all
 /// four planes (bilinear + mips — no chunk seams) and samples the strongest
 /// four layers per pixel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SplatMap {
     pub size: u32,
     pub texel: f32,

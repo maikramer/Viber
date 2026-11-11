@@ -601,7 +601,7 @@ pub const SLOT_STYLES: [LayerStyle; super::splat::LAYER_COUNT] = [
 
 /// Per-world chunk shader configuration: the cliff-wall constants (triplanar
 /// gate from `<Terrain cliff-angle>`, strata bands for the sedimentary look).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct TerrainChunkConfig {
     /// Slope (1 − |normal.y|) where the triplanar wall blend starts. Derived
     /// from the cliff trigger angle: `1 − cos(cliff-angle)`. `>= 1` disables

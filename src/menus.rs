@@ -66,7 +66,8 @@ pub fn is_zone_notice(text: &str) -> bool {
     trimmed.starts_with("Entraste em:") || trimmed == "De volta ao vale."
 }
 /// Abre/fecha o estado dos menus que roubam input à hotbar.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct MenusOpen {
     pub modal: bool,
     pub shop: bool,
@@ -100,16 +101,19 @@ pub fn next_tab(current: usize, delta: i32) -> usize {
 
 // ── componentes ─────────────────────────────────────────────────────────
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LoadingScreen;
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ToastPill {
     timer: f32,
     text: String,
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ToastContainer;
 
 /// Empilha o container de toasts em baixo ao centro (uma única vez).
@@ -134,7 +138,8 @@ fn spawn_toast_container(mut commands: Commands) {
     ));
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct CampfireBanner;
 
 // ── plugin ──────────────────────────────────────────────────────────────
@@ -308,7 +313,8 @@ fn toast_display_system(
 }
 
 /// O texto dentro de uma pílula (o fade tem de o alcançar).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ToastLabel;
 
 /// Vida e fade (entrada e saída) dos toasts.

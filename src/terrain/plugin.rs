@@ -35,7 +35,8 @@ use bevy::prelude::*;
 use std::time::{Duration, Instant};
 
 /// Tag on every terrain chunk mesh entity managed by this plugin.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Reflect)]
+#[reflect(Component)]
 pub struct TerrainChunk {
     /// Chunk grid coordinates (x, z), 0-based from the world's -X/-Z corner.
     pub coords: UVec2,
@@ -59,7 +60,8 @@ pub struct TerrainChunk {
 }
 
 /// Per-terrain tracking state for the LOD plugin.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ChunkLodState {
     /// Último passe acabou com trabalho por fazer (colunas a construir) —
     /// público para quem espera pelo streaming (`crate::cinematic`).
@@ -259,7 +261,8 @@ const VOXEL_BUILD_BUDGET_BOOST_MS: f32 = 18.0;
 /// `remaining` esvazia, as caixas velhas morrem e as staged ficam visíveis —
 /// a troca é atómica (nunca dois LODs do mesmo chão desenhados ao mesmo
 /// tempo, nem buraco durante o rebuild).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ColumnBuild {
     target: u8,
     /// Vizinhança com que as caixas `staged` estão a ser meshadas.
@@ -270,6 +273,7 @@ struct ColumnBuild {
     remaining: Vec<super::voxel::VoxelBoxSpec>,
     /// Triângulos das caixas já staged — no swap assa o trimesh da coluna,
     /// para mesh e collider trocarem no MESMO frame.
+    #[reflect(ignore)]
     bake: crate::physics::ColumnColliderBake,
 }
 

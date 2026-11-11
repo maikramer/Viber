@@ -49,7 +49,8 @@ pub const PAN_SCALE: f32 = 0.002;
 /// Pose da câmara de editor — alvo orbital + yaw/pitch/distância. Vive como
 /// resource; `active` distingue "plugin ligado" (câmara spawnada, métodos BRP
 /// disponíveis) de um estado meramente presente (apps mínimas de teste).
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct EditorCamState {
     /// O modo `--camera free` está ativo nesta engine.
     pub active: bool,
@@ -87,12 +88,14 @@ impl EditorCamState {
 }
 
 /// Marker da entidade câmara de editor (`Camera3d` + `Transform`).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct EditorCamera;
 
 /// Câmaras que o modo editor NÃO desativa — as do próprio ViberEditor
 /// in-process (UI do editor, preview do jogo); todas as outras são de jogo.
-#[derive(Debug, Default, Clone, Copy, Component)]
+#[derive(Debug, Default, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct KeepCameraActive;
 
 /// Roda a órbita: `yaw += dx_deg`, `pitch` com clamp. Parâmetros não

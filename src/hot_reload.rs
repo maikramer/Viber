@@ -43,17 +43,29 @@ pub fn is_write_event(kind: &notify::EventKind) -> bool {
 
 /// Estado do watcher — recurso só inserido quando o hot-reload está ON e o
 /// watcher arrancou com sucesso.
-#[derive(Resource)]
+fn idle_event_rx() -> std::sync::Mutex<Receiver<notify::Event>> {
+    std::sync::Mutex::new(std::sync::mpsc::channel().1)
+}
+
+fn idle_watcher() -> notify::RecommendedWatcher {
+    notify::recommended_watcher(|_| {}).expect("watcher de preenchimento")
+}
+
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct HotReloadState {
     /// Raiz vigiada em forma canónica — os eventos do watcher chegam com
     /// ESTE prefixo, e o registry indexa caminhos relativos a ela.
     root: PathBuf,
     /// Caminho absoluto (como chega do watcher) → instant do último evento.
+    #[reflect(ignore)]
     pending: HashMap<PathBuf, Instant>,
     /// `Receiver` não é `Sync` (o Resource do Bevy exige) — o lock é
     /// disputado por um só sistema, é livre na prática.
+    #[reflect(ignore, default = "idle_event_rx")]
     rx: std::sync::Mutex<Receiver<notify::Event>>,
     /// Mantém o watcher vivo (drop = desregistra as watches).
+    #[reflect(ignore, default = "idle_watcher")]
     _watcher: notify::RecommendedWatcher,
 }
 

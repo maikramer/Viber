@@ -30,11 +30,13 @@ use crate::player::Player;
 use crate::project::{MAIN_SCENE, Project};
 
 /// Entidade (raiz) que pertence à cena carregada: morre no próximo descarregamento.
-#[derive(Component, Debug, Default, Clone, Copy)]
+#[derive(Component, Debug, Default, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct SceneEntity;
 
 /// Entidade que sobrevive a trocas de cena (autoloads, câmara de editor, sonda IBL…).
-#[derive(Component, Debug, Default, Clone, Copy)]
+#[derive(Component, Debug, Default, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct Persistent;
 
 /// O schedule que (re)carrega uma cena: os mesmos sistemas do `Startup` que montam o mundo.
@@ -42,16 +44,19 @@ pub struct Persistent;
 pub struct SceneLoad;
 
 /// Conta as cenas carregadas (sistemas "uma vez por cena" comparam com o seu `Local`).
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Reflect)]
+#[reflect(Resource)]
 pub struct SceneEpoch(pub u64);
 
 /// Os fragmentos autoload do projeto, consumidos UMA vez pelo `spawn::startup` antes da
 /// primeira cena.
-#[derive(Resource)]
-pub struct PendingAutoload(pub Vec<crate::recipes::ParsedWorld>);
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
+pub struct PendingAutoload(#[reflect(ignore)] pub Vec<crate::recipes::ParsedWorld>);
 
 /// `<SceneEntry name>` (e cada `<ScenePortal>`): ponto de chegada nomeado.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct SceneEntryPoint {
     pub name: String,
     /// Deslocamento local aplicado à chegada (`arrive-offset` dos portais).
@@ -59,7 +64,7 @@ pub struct SceneEntryPoint {
 }
 
 /// `<ScenePortal>`: dados autorados.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct ScenePortalSpec {
     /// Id da cena alvo (`main`, `interiors/chapel`).
     pub target: String,
@@ -93,11 +98,12 @@ impl Default for ScenePortalSpec {
 }
 
 /// Componente do portal vivo.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct ScenePortal(pub ScenePortalSpec);
 
 /// Como o jogador chega à cena nova.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub enum Arrival {
     /// Entrada nomeada (`None` = a primeira `<SceneEntry>`, senão o primeiro portal).
     Entry(Option<String>),
@@ -120,7 +126,7 @@ impl Arrival {
 }
 
 /// Pedido de troca.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct ChangeScene {
     pub scene: String,
     pub arrival: Arrival,
@@ -151,7 +157,7 @@ impl ChangeScene {
 /// Onde o herói estava (e para onde olhava a câmara) quando saiu de uma cena por um
 /// portal — o `@back` devolve-o exatamente aí, de costas para a porta e com a câmara do
 /// lado de fora (chegar EM CIMA da porta punha a câmara dentro do edifício).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct ReturnPose {
     pub position: Vec3,
     pub rotation: Quat,
@@ -159,7 +165,8 @@ pub struct ReturnPose {
 }
 
 /// A cena carregada.
-#[derive(Resource, Debug, Clone, Serialize)]
+#[derive(Resource, Debug, Clone, Serialize, Reflect)]
+#[reflect(Resource)]
 pub struct CurrentScene {
     pub root: PathBuf,
     /// Id (`main`, `interiors/chapel`); `None` = mundo fora de um projeto declarado.
@@ -203,7 +210,8 @@ impl CurrentScene {
 
 /// Ids das cenas do projeto (barato: só nomes de ficheiro) — `viber.change_scene` valida
 /// contra ele sem tocar no disco.
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct SceneIndex {
     pub ids: Vec<String>,
 }
@@ -224,7 +232,7 @@ impl SceneIndex {
 }
 
 /// Fase da troca.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Reflect)]
 #[serde(rename_all = "snake_case")]
 pub enum LoaderPhase {
     #[default]
@@ -236,7 +244,7 @@ pub enum LoaderPhase {
 }
 
 /// O que o último varrimento apagou (debug: `viber.scene.current`).
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Reflect)]
 pub struct SweepReport {
     pub roots: usize,
     pub entities_before: usize,
@@ -246,7 +254,8 @@ pub struct SweepReport {
 }
 
 /// Máquina da troca de cena.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SceneLoader {
     pub phase: LoaderPhase,
     request: Option<ChangeScene>,
@@ -283,16 +292,19 @@ const SETTLE_TIMEOUT_FRAMES: u32 = 300;
 const SETTLE_MIN_FRAMES: u32 = 4;
 
 /// Overlay preto da troca.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct SceneFadeOverlay;
 
 /// Portais que só armam o `auto-radius` depois de o jogador sair de perto (chegar em cima
 /// de um portal não o pode atravessar outra vez).
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PortalGrace(HashSet<Entity>);
 
 /// Raízes existentes antes do `terrain::runtime::bootstrap` (ver [`mark_bootstrap_roots`]).
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct RootSnapshot(HashSet<Entity>);
 
 /// Antes do bootstrap do terreno: fotografa as raízes.
@@ -437,7 +449,8 @@ fn spawn_fade_overlay(mut commands: Commands) {
 }
 
 /// `viber run --entry`: a entrada de chegada da cena de arranque.
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone, Default, Reflect)]
+#[reflect(Resource)]
 pub struct StartEntry(pub Option<String>);
 
 /// O arranque acabou: o que nascer daqui em diante (fora de um carregamento) é da cena.

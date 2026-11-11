@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
 use bevy::math::Vec2;
+use bevy::reflect::Reflect;
 
 use crate::terrain::TerrainSpec;
 use crate::terrain::cliffs::{CliffProfile, CliffSide, CliffSpec};
@@ -644,7 +645,7 @@ pub struct WeatherConfig {
 
 /// Emitter config of a `<ParticleSystem>`: a preset plus the
 /// `particle-emitter="…"` component-string overrides found in the world.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct ParticleSpec {
     pub preset: String,
     pub emission_rate: Option<f32>,

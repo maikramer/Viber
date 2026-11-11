@@ -193,7 +193,7 @@ pub fn locomotion_weights(speed: f32, gates: MotionGates, speeds: MotionSpeeds) 
 }
 
 /// Nós do blend 1D de locomoção, quando o ficheiro tem idle, walk e run distintos.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Reflect)]
 pub struct LocomotionBlendNodes {
     pub blend: AnimationNodeIndex,
     pub idle: AnimationNodeIndex,
@@ -256,7 +256,8 @@ const CALIBRATION_WALK_FRACTION: f32 = 0.45;
 /// both paths teach it the truth without a single line of authoring. An
 /// explicit `locomotion="walk: 1.1; run: 4.6"` (or `viber.set_locomotion`)
 /// latches [`Self::authored`] and stops the calibration.
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct LocomotionProfile {
     /// Nominal walking speed (m/s) of the rig's walk clip.
     pub walk: f32,
@@ -354,7 +355,7 @@ impl LocomotionProfile {
 }
 
 /// A gameplay animation state, independent of what the file calls its clips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Reflect)]
 pub enum AnimState {
     #[default]
     Idle,
@@ -532,7 +533,8 @@ pub fn next_state_with(
 /// Consumed on bind, and re-inserted by [`rearm_after_scene_swap`] whenever
 /// something swaps the scene under an already-bound character — today the
 /// render-LOD ladder, anything else that mutates `WorldAssetRoot` tomorrow.
-#[derive(Debug, Component, Clone)]
+#[derive(Debug, Component, Clone, Reflect)]
+#[reflect(Component)]
 pub struct AnimatedScene {
     pub gltf: Handle<bevy::gltf::Gltf>,
 }
@@ -544,18 +546,21 @@ pub struct AnimatedScene {
 /// for a frame or two. The search for a player to bind must only ever pick an
 /// unmarked one: binding the old, already-graphed player again is precisely
 /// the dangling-animator bug this module defends against.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct BoundAnimation;
 
 /// Marks a character whose clip is driven by something other than the built-in
 /// motion drivers (a Luau script, a cutscene). [`drive_character_animation`]
 /// skips it.
-#[derive(Debug, Component, Default)]
+#[derive(Debug, Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct ManualAnimation;
 
 /// A bound character: clip names plus the graph node for each one, and the
 /// small amount of per-character playback state the drivers need.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct CharacterAnimator {
     /// Clip names as the file spells them, in file order.
     pub clip_names: Vec<String>,
@@ -1088,11 +1093,13 @@ pub fn tick_animator_actions(time: Res<Time>, mut animators: Query<&mut Characte
 /// Pedido de hit-react: inserido pelas vias de dano (golpe de melee no land,
 /// `PlayerHurt` físico no herói). Consumido por [`hit_react_system`], que o
 /// remove SEMPRE — um pedido órfão nunca re-dispara mais tarde.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct HitReact;
 
 /// Cooldown do hit-react (s restantes, decrementado por frame).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct HitReactCooldown {
     pub timer: f32,
 }
@@ -1450,7 +1457,8 @@ const ANIM_FREEZE_HYSTERESIS: f32 = 0.9;
 /// upload. Taking the `AnimationGraphHandle` away is what makes a rig cost
 /// nothing: its targets bail on the first lookup and the player's clock
 /// stops, so the clip resumes where it left off when the handle comes back.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct FrozenAnimation(pub AnimationGraphHandle);
 
 /// Distance past which a character's rig stops animating.

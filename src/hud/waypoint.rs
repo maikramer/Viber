@@ -12,17 +12,20 @@ use crate::player::Player;
 use crate::recipes::spawn::OrbitCamera;
 
 /// Raiz da seta (posicionada em % do ecrã).
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct WaypointArrowRoot {
     pub margin: f32,
 }
 
 /// O triângulo que roda.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct WaypointArrowPointer;
 
 /// A legenda ("Entregar · 42 m").
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct WaypointArrowCaption;
 
 /// Margem por omissão (px lógicos).

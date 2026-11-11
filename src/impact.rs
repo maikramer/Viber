@@ -35,7 +35,8 @@ pub const RING_TUBE: f32 = 0.016;
 /// Stagger visual do inimigo atingido. `base_scale` tem de ser a escala SEM
 /// recoil — quem insere deve reutilizar a de um recoil em curso (query
 /// `Option<&HitRecoil>`), senão um re-hit a meio compounding a deformação.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct HitRecoil {
     pub elapsed: f32,
     pub duration: f32,
@@ -91,7 +92,8 @@ pub fn hit_recoil_system(
 
 /// Anel de choque em expansão. O material é clonado por anel (o alpha anima
 /// por instância).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct ImpactRing {
     pub elapsed: f32,
     pub duration: f32,

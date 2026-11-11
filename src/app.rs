@@ -10,6 +10,12 @@
 //! depende dos recursos deles), mas com a simulação congelada
 //! (`Time<Virtual>` em pausa), scripts Luau parados ([`scripts_enabled`]),
 //! sem bridge e com a câmara de editor no lugar da de jogo.
+//!
+//! [`AppOptions`] é COMPONÍVEL: um crate que traga as suas próprias regras
+//! (o Vael em Rust) desliga o comportamento de jogo, os scripts e/ou a UI e
+//! fica com os serviços de engine — terreno, navegação, física, render e os
+//! FX de apresentação. [`build_app_with_world`] aceita um mundo já parseado
+//! para quem o carrega por outro caminho.
 
 use std::path::{Path, PathBuf};
 
@@ -43,8 +49,19 @@ pub enum RunMode {
     Edit,
 }
 
+/// De onde vêm os scripts de comportamento.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScriptsMode {
+    /// Host Luau da engine (`scripts/` do config) — o comportamento de sempre.
+    #[default]
+    Compat,
+    /// Sem host Luau: um app que traz o seu próprio comportamento (ex.:
+    /// regras em Rust) não paga a VM nem os sistemas de script.
+    Off,
+}
+
 /// Opções de [`build_app`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AppOptions {
     pub mode: RunMode,
     /// Porta do debug bridge (no modo Edit: agentes a editar dentro do editor).
@@ -62,6 +79,37 @@ pub struct AppOptions {
     /// `viber debug --world <mundo>` via a porta servida por outro mundo (registo
     /// "stale"). Omisso = `path` (editores e apps mínimas).
     pub world_path: Option<PathBuf>,
+    /// Comportamento de jogo da engine (`player`, câmara de jogo, IA, sentidos,
+    /// projéteis, vitais do herói e clamp da borda). `false` deixa o app com
+    /// terreno/nav/física/render/UI e os FX de apresentação — as regras são de
+    /// quem monta a App.
+    pub gameplay: bool,
+    /// Scripts de comportamento: host Luau da engine ([`ScriptsMode::Compat`])
+    /// ou nenhum ([`ScriptsMode::Off`]).
+    pub scripts: ScriptsMode,
+    /// UI declarativa (`ui::UiPlugin`) e o que depende dela (menus do HUD).
+    pub ui: bool,
+    /// Profiler (overlay F3, recursos e âncoras de render). O `timed(...)` dos
+    /// sistemas mede sempre (rings em processo) — sem o plugin só ninguém lê.
+    pub profiler: bool,
+}
+
+impl Default for AppOptions {
+    /// O comportamento de sempre: tudo ligado.
+    fn default() -> Self {
+        Self {
+            mode: RunMode::default(),
+            bridge_port: None,
+            camera_free: false,
+            window_title: None,
+            start_entry: None,
+            world_path: None,
+            gameplay: true,
+            scripts: ScriptsMode::Compat,
+            ui: true,
+            profiler: true,
+        }
+    }
 }
 
 /// Run condition: scripts Luau correm (tudo menos o modo Edit; sem o
@@ -154,6 +202,18 @@ pub fn world_asset_dirs(
 }
 
 pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
+    // Absolute from here on: the asset root and terrain base_dir must not
+    // depend on the CWD (bevy resolves relative asset roots against the exe).
+    let path = std::path::absolute(path)?;
+    let world = load_world(&path)?;
+    build_app_with_world(&path, world, opts)
+}
+
+/// Monta a App a partir de um mundo JÁ parseado (o `build_app` é o par de
+/// [`load_world`]): quem carrega o mundo por outro caminho — um crate com as
+/// suas próprias regras a injetar entidades/recursos — não o parseia duas
+/// vezes. O resto do contrato é o de [`build_app`].
+pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -> Result<App> {
     let AppOptions {
         mode,
         bridge_port,
@@ -161,13 +221,17 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         window_title,
         start_entry,
         world_path,
+        gameplay,
+        scripts,
+        ui,
+        profiler,
     } = opts;
     // Modo Edit: o editor in-process é dono da navegação, do input e da janela — câmara
     // de editor, simulação congelada. O bridge só existe se o editor o pedir
     // (`vibereditor --bridge`): um agente a editar o MESMO documento que o humano.
     let camera_free = camera_free || mode == RunMode::Edit;
-    // Absolute from here on: the asset root and terrain base_dir must not
-    // depend on the CWD (bevy resolves relative asset roots against the exe).
+    // Absolutizado aqui também: esta entrada é pública e o chamador pode vir
+    // com um caminho relativo (o `build_app` já o absolutiza).
     let path = &std::path::absolute(path)?;
     // O `start-scene` troca a CENA carregada, não o mundo que a engine serve:
     // a identidade do bridge/sessão é o caminho que o CLI pediu. Registá-la
@@ -183,7 +247,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         Some(world_path) => std::path::absolute(world_path)?,
         None => path.to_path_buf(),
     };
-    let world = load_world(path)?;
     // O runtime só corre mundos ESTÁTICOS (`<world static="true">`): poses finais, terreno
     // pré-gerado, vegetação em `.vinst`. Um mundo procedural é material para `viber bake`,
     // que o converte no próprio sítio — nada é gerado nem assentado no arranque.
@@ -370,6 +433,10 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         });
     }
     app.add_plugins(plugins);
+    // Reflexão dos tipos de jogo no `AppTypeRegistry` (BRP/`viber.query`):
+    // independente do resto — um app com `gameplay`/`ui`/`scripts` desligados
+    // continua a poder inspecionar o ECS.
+    app.add_plugins(crate::reflect::ReflectPlugin);
     // Picking (DefaultPickingPlugins): o backend de UI alimenta a
     // `Interaction` da UI declarativa (src/ui/interaction.rs). O MESH picking
     // não tem consumidor nenhum na engine e, com `require_markers` false
@@ -538,10 +605,6 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     app.insert_resource(bevy::light::PointLightShadowMap {
         size: point_shadow_size(),
     });
-    // `hud_menu_system` corre sempre (main loop), mas o `HudMenuState` só
-    // nascia dentro de `build_menu` — mundos sem `TabbedModal` (o HUD é agora
-    // declarativo) panicas na validação do `ResMut` todos os frames.
-    app.init_resource::<hud::menu::HudMenuState>();
     // Widgets nativos (minimapa/bússola/seta) também obedecem ao esconder-HUD
     // do jogo (`viber.ui.set_visible("hud", false)`).
     app.init_resource::<hud::HudHidden>();
@@ -592,8 +655,11 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // terreno sob ela (inerte sem a tag).
     app.add_plugins(crate::spawn_gate::SpawnGatePlugin);
     // `<ProjectileTemplate>` + `viber.fire_projectile`: projéteis simples
-    // (linha reta ou arco balístico) com dano por facção.
-    app.add_plugins(crate::projectile::ProjectilePlugin);
+    // (linha reta ou arco balístico) com dano por facção. Comportamento de
+    // JOGO: fora com `gameplay: false`.
+    if gameplay {
+        app.add_plugins(crate::projectile::ProjectilePlugin);
+    }
     // IBL vivo do céu (LightProbe + cubemap da paleta da atmosfera, filtrado
     // na GPU) — ambiente/reflexos que seguem a hora do dia. `VIBER_NO_IBL=1`.
     app.add_plugins(crate::ibl::SkyIblPlugin);
@@ -611,9 +677,13 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Fase 2: Luau — scripts do `scripts_dir` do config, com `on_update(dt)`.
     // O árbitro das interações (`interact::InteractionFocus`) é registado pelo
     // próprio `LuauScriptPlugin` — quem o lê é o `viber.interacted`.
-    app.add_plugins(luau::LuauScriptPlugin {
-        scripts_dir: config.scripts_dir_on(&world_dir),
-    });
+    // `ScriptsMode::Off`: um app com o seu próprio comportamento não paga a
+    // VM nem os sistemas `luau_*` (os consumidores do host são todos `Option`).
+    if scripts == ScriptsMode::Compat {
+        app.add_plugins(luau::LuauScriptPlugin {
+            scripts_dir: config.scripts_dir_on(&world_dir),
+        });
+    }
 
     // Serviços de engine que o movimento, o som e o HUD leem.
     app.init_resource::<menus::MenusOpen>();
@@ -676,25 +746,43 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // Sem ele a FSM entra em chase e o `desired` fica certo, mas ninguém
     // aplica a velocidade — as criaturas atacam paradas. Também traz os
     // sentidos (`SensesPlugin`) e os vitais das criaturas sem script.
-    app.add_plugins(crate::ai::AiPlugin);
+    // Comportamento de JOGO: `gameplay: false` não o regista (nem os sentidos).
+    if gameplay {
+        app.add_plugins(crate::ai::AiPlugin);
+    }
     // Navegação: navmesh Recast num tile que segue o herói, A* + evitamento
     // RVO (bevy_landmass) e preferência por estradas via custo por tipo de
     // polígono. Sem isto a IA volta à linha recta de sempre — o que é
     // exactamente o que `VIBER_NAV=0` faz.
     app.add_plugins(nav::NavPlugin);
-    // LOD de render: culling por distância nas instâncias de spawner +
-    // orçamento de sombras. Sem isto as ~9700 cenas glTF do simple-rpg
-    // (60k entidades) entram todas nas 4 cascatas de sombra a cada frame.
-    // `VIBER_RENDER_LOD=0` desliga o culling + a ladder de LOD: é o A/B
-    // honesto para medir o ganho sem trocar de binário.
+    // LOD de render: culling por distância (Bevy `VisibilityRange`, alimentado
+    // pelo raio de `CullDistance`) nas instâncias de spawner + orçamento de
+    // sombras. Sem isto as ~9700 cenas glTF do simple-rpg (60k entidades)
+    // entram todas nas 4 cascatas de sombra a cada frame.
+    // `VIBER_RENDER_LOD=0` desliga o plugin — logo, também o culling e a
+    // ladder de LOD: é o A/B honesto para medir o ganho sem trocar de binário.
     if std::env::var("VIBER_RENDER_LOD").as_deref() != Ok("0") {
         app.add_plugins(render_lod::RenderLodPlugin);
     }
     // Profiler: overlay F3 (fps/frame/entidades/scripts ativos) + `viber.profiler`.
-    app.add_plugins(profiler::ProfilerPlugin);
+    // `profiler: false` não regista o plugin; o `timed(...)` continua a medir
+    // para os rings globais (ninguém os lê, mas nada panica nem depende de
+    // recursos do profiler).
+    if profiler {
+        app.add_plugins(profiler::ProfilerPlugin);
+    }
     // UI declarativa (XML + folha de estilo + `viber.ui` no Luau): o HUD do
-    // mundo é autoria, não código.
-    app.add_plugins(ui::UiPlugin);
+    // mundo é autoria, não código. Sem ela, os nós `<UiRoot>` ainda podem ser
+    // construídos pelo spawn (é o registry que os endereça) e o
+    // `menus::mirror_ui_modals_open` lê o `UiModalsOpen` em todos os frames —
+    // inicializam-se os dois para nenhum `Res`/`resource_mut` panicas; ficam
+    // inertes.
+    if ui {
+        app.add_plugins(ui::UiPlugin);
+    } else {
+        app.init_resource::<crate::ui::runtime::UiRegistry>()
+            .init_resource::<crate::ui::UiModalsOpen>();
+    }
     // Combate é do JOGO: o melee/chain/dano vivem em `scripts/game/combat.lua`
     // (Vael). A engine só dá os serviços genéricos — vitais, vault, skills,
     // feedback de impacto e a mão armada (apresentação). NÃO voltar a
@@ -704,31 +792,35 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
     // plugin de colheita: os props autorais viajam em `ScriptProps` e o Lua lê.
     // A instalação de `viber.ui` tem de ganhar ao runtime Luau: sem ordem,
     // um script activado no frame 1 via `luau_on_add` podia ver `viber.ui`
-    // nil (morria — `Added` dispara 1×) ou queimar o warn-once.
-    app.add_systems(
-        bevy::app::Update,
-        ui::install_ui_script_api
-            .before(luau::luau_on_add)
-            .before(luau::luau_update),
-    );
-    // As mutações que os scripts enfileiram via `viber.ui.*` têm de ser
-    // aplicadas DEPOIS de `luau_update` as produzir — sem ordem, chegavam um
-    // frame tarde (ou em corrida com o produtor). Ordena-se o SET: o
-    // `apply_ui_commands` já vive no `UiSet::Script` e re-adicioná-lo aqui
-    // duplicava a instância no schedule (pânico "more than one instance").
-    // Sem ciclo: a chain luau não referencia UiSets.
-    app.configure_sets(
-        bevy::app::Update,
-        ui::UiSet::Script.after(luau::luau_update),
-    );
-    // E a UI PUBLICA antes dos scripts lerem: os cliques de um frame chegam
-    // ao `on_update` NO MESMO frame, haja como for a ordem arbitrária entre
-    // plugins — sem isto, `viber.ui.clicked(…)` perdia cliques por corrida
-    // (o publish rodava depois do script e limpava a vista).
-    app.configure_sets(
-        bevy::app::Update,
-        (ui::UiSet::Collect, ui::UiSet::Build, ui::UiSet::Bind).before(luau::luau_update),
-    );
+    // nil (morria — `Added` dispara 1×) ou queimar o warn-once. As três
+    // ordenações seguintes só têm contraparte com a UI E o host Luau: sem um
+    // deles não há `viber.ui` para instalar nem `luau_update` para ordenar.
+    if ui && scripts == ScriptsMode::Compat {
+        app.add_systems(
+            bevy::app::Update,
+            ui::install_ui_script_api
+                .before(luau::luau_on_add)
+                .before(luau::luau_update),
+        );
+        // As mutações que os scripts enfileiram via `viber.ui.*` têm de ser
+        // aplicadas DEPOIS de `luau_update` as produzir — sem ordem, chegavam um
+        // frame tarde (ou em corrida com o produtor). Ordena-se o SET: o
+        // `apply_ui_commands` já vive no `UiSet::Script` e re-adicioná-lo aqui
+        // duplicava a instância no schedule (pânico "more than one instance").
+        // Sem ciclo: a chain luau não referencia UiSets.
+        app.configure_sets(
+            bevy::app::Update,
+            ui::UiSet::Script.after(luau::luau_update),
+        );
+        // E a UI PUBLICA antes dos scripts lerem: os cliques de um frame chegam
+        // ao `on_update` NO MESMO frame, haja como for a ordem arbitrária entre
+        // plugins — sem isto, `viber.ui.clicked(…)` perdia cliques por corrida
+        // (o publish rodava depois do script e limpava a vista).
+        app.configure_sets(
+            bevy::app::Update,
+            (ui::UiSet::Collect, ui::UiSet::Build, ui::UiSet::Bind).before(luau::luau_update),
+        );
+    }
     app.add_systems(bevy::app::Startup, spawn::startup);
     // Trocas de cena (`crate::scene_loader`): o mesmo spawn, num schedule re-executável.
     app.add_systems(crate::scene_loader::SceneLoad, spawn::startup);
@@ -757,37 +849,50 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
             timed(Group::Hud, hud::hud_balloon_update),
             // Acessibilidade: escala das legendas do balão (A11y).
             hud::apply_subtitle_scale,
-            // Modal [Q]: sincroniza abas/conteúdos e trata cliques.
-            timed(Group::Hud, hud::menu::hud_menu_system),
         ),
     );
+    // Comportamento de JOGO: movimento do herói, câmara de jogo, vitais e o
+    // clamp da borda. `gameplay: false` deixa o app com os serviços de engine
+    // (terreno, navegação, física, render, UI e os FX) — quem monta a App traz
+    // as suas próprias regras.
+    if gameplay {
+        app.add_systems(
+            bevy::app::Update,
+            (
+                // Deterministic order: the rigid follow skips third-person
+                // cameras, the player steers their yaw with A/D, then the
+                // third-person camera trails it. All three touch OrbitCamera.
+                (
+                    timed(Group::Camera, spawn::orbit_camera_follow),
+                    // Modo editor (`--camera free`): o WASD não move o herói e a
+                    // terceira-pessoa não disputa a pose — a câmara de editor é
+                    // a única activa (ver `editor_camera`).
+                    timed(Group::Player, player::player_movement)
+                        .run_if(editor_camera::editor_camera_inactive),
+                    timed(Group::Camera, camera::third_person_camera)
+                        .run_if(editor_camera::editor_camera_inactive),
+                    // `viber.camera_free`: substitui a pose DEPOIS do rig de
+                    // terceira pessoa (e publica o snapshot do `camera_state`).
+                    timed(Group::Camera, camera::script_camera)
+                        .run_if(editor_camera::editor_camera_inactive),
+                )
+                    .chain(),
+                // O herói nasce no autoload sem `Health` (o Vael guarda hp/max no
+                // `viber.game()`): sem esta rede, `viber.entity_damage(player)` e o
+                // dano radial avisavam "sem Health" em vez de funcionar. Idempotente
+                // e só insere quando falta.
+                crate::vitals::ensure_player_vitals,
+                timed(Group::Camera, spawn::auto_orbit),
+                // Clamp da borda DEPOIS do movimento do player (mesmo frame):
+                // sem ordem, o clamp viajava um frame atrás do WASD. Ordena
+                // contra um sistema que só existe neste bloco.
+                worldsys::world_border_clamp.after(player::player_movement),
+            ),
+        );
+    }
     app.add_systems(
         bevy::app::Update,
         (
-            // Deterministic order: the rigid follow skips third-person
-            // cameras, the player steers their yaw with A/D, then the
-            // third-person camera trails it. All three touch OrbitCamera.
-            (
-                timed(Group::Camera, spawn::orbit_camera_follow),
-                // Modo editor (`--camera free`): o WASD não move o herói e a
-                // terceira-pessoa não disputa a pose — a câmara de editor é
-                // a única activa (ver `editor_camera`).
-                timed(Group::Player, player::player_movement)
-                    .run_if(editor_camera::editor_camera_inactive),
-                timed(Group::Camera, camera::third_person_camera)
-                    .run_if(editor_camera::editor_camera_inactive),
-                // `viber.camera_free`: substitui a pose DEPOIS do rig de
-                // terceira pessoa (e publica o snapshot do `camera_state`).
-                timed(Group::Camera, camera::script_camera)
-                    .run_if(editor_camera::editor_camera_inactive),
-            )
-                .chain(),
-            // O herói nasce no autoload sem `Health` (o Vael guarda hp/max no
-            // `viber.game()`): sem esta rede, `viber.entity_damage(player)` e o
-            // dano radial avisavam "sem Health" em vez de funcionar. Idempotente
-            // e só insere quando falta.
-            crate::vitals::ensure_player_vitals,
-            timed(Group::Camera, spawn::auto_orbit),
             timed(Group::Spawner, spawn::gltf_scene_spawner),
             hud::compass::hud_compass_update,
             hud::compass::hud_compass_landmarks_update,
@@ -813,14 +918,12 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
             timed(Group::World, worldsys::sun_drive),
         ),
     );
-    // Tuplo dividido: o Bevy limita tuples de sistemas a 20 elementos.
-    // Constraints são explícitas (.after), a separação não muda semântica.
+    // Tuplo dividido: o Bevy limita tuples de sistemas a 20 elementos (e o
+    // bloco de gameplay acima é condicional). Constraints são explícitas
+    // (.after), a separação não muda semântica.
     app.add_systems(
         bevy::app::Update,
         (
-            // Clamp da borda DEPOIS do movimento do player (mesmo frame):
-            // sem ordem, o clamp viajava um frame atrás do WASD.
-            worldsys::world_border_clamp.after(player::player_movement),
             sky::sky_follow_camera,
             hud::hud_toggle,
             // Lifecycle de FX ambiente por proximidade (`src/particles.rs`):
@@ -842,4 +945,31 @@ pub fn build_app(path: &Path, opts: AppOptions) -> Result<App> {
         app.add_systems(bevy::app::Startup, pause_virtual_time);
     }
     Ok(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O default tem de ser o comportamento de sempre: o CLI e o editor não
+    /// passam os gates novos, e um default `false` desligava-lhes o jogo.
+    #[test]
+    fn default_app_options_keep_the_full_engine() {
+        let opts = AppOptions::default();
+        assert!(opts.gameplay, "gameplay liga por omissão");
+        assert_eq!(
+            opts.scripts,
+            ScriptsMode::Compat,
+            "scripts Luau por omissão"
+        );
+        assert!(opts.ui, "UI declarativa liga por omissão");
+        assert!(opts.profiler, "profiler liga por omissão");
+    }
+
+    /// `ScriptsMode::Off` é um modo distinto; o `Default` do enum é `Compat`.
+    #[test]
+    fn scripts_mode_default_is_compat() {
+        assert_eq!(ScriptsMode::default(), ScriptsMode::Compat);
+        assert_ne!(ScriptsMode::Off, ScriptsMode::Compat);
+    }
 }

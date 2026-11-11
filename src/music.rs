@@ -29,28 +29,32 @@ pub fn linear_to_db(v: f32) -> f32 {
 /// Bus de música (`<AudioMixer music>` × master) — BGM e loops de ambiente
 /// musicais? NÃO: só BGM ([`MusicLayerTag`]). Ambiente de água/chuva vai no
 /// bus SFX, como os efeitos.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct MusicBus;
 
 /// Bus de efeitos (`<AudioMixer sfx>` × master) — SFX one-shots + loops de
 /// água/chuva.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct SfxBus;
 
 /// Bus de VOZ (`<AudioMixer voice>` × master) — falas, barks e grunhidos.
 /// Separado do SFX para o ducking de diálogo/cinemática poder baixar música e
 /// efeitos sem calar a voz.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct VoiceBus;
 
 /// Bus de AMBIENTE (`<AudioMixer ambience>` × master) — vento, chuva, água,
 /// fogo. Separado do SFX para o jogador poder baixar o ambiente sem perder
 /// os sons de combate.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AmbienceBus;
 
 /// Parâmetros de um loop de SFX pedido por script (`viber.sound_loop`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Reflect)]
 pub struct ScriptLoopParams {
     pub clip: String,
     pub pitch: f64,
@@ -65,13 +69,15 @@ pub struct ScriptLoopParams {
 
 /// Loops que os scripts querem vivos neste frame. O driver de áudio lê
 /// `wanted` e reconcilia as instâncias; sem o recurso o comando é no-op.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ScriptSoundLoops {
     pub wanted: std::collections::HashMap<String, ScriptLoopParams>,
 }
 
 /// Layer de BGM forçada por script (`viber.music.layer`). `None` = automático.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct MusicLayerOverride(pub Option<String>);
 
 /// Bus volumes from `<AudioMixer master music sfx>`.
@@ -80,7 +86,8 @@ pub struct MusicLayerOverride(pub Option<String>);
 /// default): a derived `Default` would zero every bus — i.e. a silent game —
 /// and any system taking `ResMut<AudioMixerSettings>` used to panic outright
 /// on a world that never declared the tag.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AudioMixerSettings {
     pub master: f32,
     pub music: f32,
@@ -132,7 +139,7 @@ impl AudioBus {
 /// não se cancelam — o gain efetivo é o MENOR e cada um expira por si. Com um
 /// único slot, o pedido mais recente substituía o anterior (o diálogo subia a
 /// meio da fala) ou, com `min`, ficava preso até ao fim do mais longo.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct DuckLevel {
     pub gain: f32,
     pub until: f64,
@@ -162,7 +169,8 @@ impl DuckLevel {
 
 /// Ducking por bus, pedido por scripts (`viber.audio.duck`). O
 /// [`mixer_sync`] multiplica o volume do bus por este fator; expira sozinho.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct AudioDuck {
     pub master: DuckLevel,
     pub music: DuckLevel,
@@ -216,7 +224,7 @@ impl AudioDuck {
 
 /// Presets de reverb genéricos (a engine não conhece "gruta" nem "capela";
 /// o jogo escolhe o preset e a quantidade de molhado).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum ReverbPreset {
     #[default]
     Off,
@@ -248,7 +256,8 @@ impl ReverbPreset {
 }
 
 /// Pedido de reverb (`viber.audio.reverb`). `wet: None` = o mix do preset.
-#[derive(Debug, Clone, Copy, Resource, Default)]
+#[derive(Debug, Clone, Copy, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct AudioReverb {
     pub preset: ReverbPreset,
     pub wet: Option<f32>,
@@ -256,9 +265,12 @@ pub struct AudioReverb {
 
 /// Handles dos reverbs criados nos tracks de SFX/voz. Sem kira (apps de
 /// teste) ficam `None` e o pedido é ignorado.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ReverbHandles {
+    #[reflect(ignore)]
     pub sfx: Option<ReverbHandle>,
+    #[reflect(ignore)]
     pub voice: Option<ReverbHandle>,
 }
 
@@ -293,7 +305,8 @@ pub fn apply_reverb(
 }
 
 /// One playing BGM layer.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct MusicLayerTag {
     pub layer: String,
     pub base_volume: f32,
@@ -303,7 +316,8 @@ pub struct MusicLayerTag {
 /// [`audio_loop_starter`], consome-o, toca o asset em LOOP e insere
 /// [`LoopInstance`]. O asset a carregar não é problema — o bevy_kira_audio
 /// começa a tocar quando o `.ogg` chega.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct AudioLoopPending {
     /// URL do asset de áudio (convenções `assets/audio/bgm/*.ogg` /
     /// `assets/audio/sfx/**`).
@@ -316,16 +330,19 @@ pub struct AudioLoopPending {
 /// (chuva, água, cachoeiras), não no bus de SFX. Sem isto o `<AudioMixer
 /// ambience>` e o duck `ambience` não tinham efeito nenhum — os loops de
 /// ambiente iam todos para o SFX.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct AmbienceLoop;
 
 /// Instância kira de um loop em curso (handle para o `Assets<AudioInstance>`).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct LoopInstance(pub Handle<AudioInstance>);
 
 /// Volume linear corrente de um loop — cache para o [`fade_step`] (o kira
 /// não lê o volume de volta).
-#[derive(Debug, Component, Default)]
+#[derive(Debug, Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct LoopVolume(pub f32);
 
 /// Player context marker for the driver (reuses the `Player` component).
@@ -376,7 +393,8 @@ pub const COMBAT_MUSIC_HOLD: f32 = 8.0;
 ///
 /// O recurso é inicializado no [`crate::ai::AiPlugin`] (que também o
 /// escreve) — worlds sem IA ficam com o crossfade puro por zona.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CombatMusicState {
     /// Instante (`Time.elapsed_secs_f64()`) até ao qual o combate "soa".
     until: f64,
@@ -566,7 +584,8 @@ pub fn mixer_sync(
     }
 }
 
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ScriptLoopPlayback {
     /// `id → (url, handle, bus de ambiente?)`.
     live: std::collections::HashMap<String, (String, Handle<AudioInstance>, bool)>,

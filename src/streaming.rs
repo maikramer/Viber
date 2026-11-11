@@ -32,14 +32,16 @@ pub fn ring_for(distance: f32) -> Ring {
 }
 
 /// Pode ir para o registo frio. Sem isto (jogador, UI, terreno) fica.
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
 pub struct Streamable;
 
 /// Nunca arrefece (`stream="resident"`).
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
 pub struct Resident;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Reflect)]
 pub struct ColdRecord {
     pub key: String,
     /// Pose de MUNDO. A entidade pode ser um `<GltfScene>` filho de uma
@@ -53,7 +55,8 @@ pub struct ColdRecord {
     pub source: crate::scene::SceneSource,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ColdStore {
     pub records: HashMap<String, ColdRecord>,
 }

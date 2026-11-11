@@ -139,6 +139,16 @@ struct BudgetClock {
     ticks: AtomicU32,
 }
 
+impl Default for BudgetClock {
+    fn default() -> Self {
+        Self {
+            epoch: Instant::now(),
+            deadline_ns: AtomicU64::new(0),
+            ticks: AtomicU32::new(0),
+        }
+    }
+}
+
 /// Arma o orçamento enquanto vive; ao sair repõe o prazo anterior.
 pub struct BudgetGuard {
     clock: Arc<BudgetClock>,
@@ -158,16 +168,20 @@ impl Drop for BudgetGuard {
 /// [`LuaScriptHost::load_script`] (code string) or
 /// [`LuaScriptHost::load_script_from_dir`] (disk), then add
 /// [`LuauScriptPlugin`]-equivalent systems.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct LuaScriptHost {
     /// The shared sandboxed Luau VM (`Lua::new()` with the `luau` feature).
+    #[reflect(ignore)]
     pub lua: Lua,
     /// Loaded chunks keyed by script path.
+    #[reflect(ignore)]
     pub registry: LuaScriptRegistry,
     /// Directory scripts are loaded from: `<world_dir>/scripts`.
     pub scripts_dir: PathBuf,
     /// Script paths whose last error was already warned (warn 1x).
     warned: HashSet<String>,
+    #[reflect(ignore)]
     budget: Arc<BudgetClock>,
 }
 
@@ -252,6 +266,30 @@ impl LuaScriptHost {
             ctx.scripts_dir = Some(host.scripts_dir.clone());
         }
         Ok(host)
+    }
+
+    /// Semeia o registo de tipos que `viber.ecs` valida (whitelist) e lê.
+    /// Chamado pelo [`super::LuauScriptPlugin`]; sem ele `viber.ecs` responde
+    /// com um erro claro em vez de aceitar paths arbitrários.
+    pub fn set_ecs_registry(&mut self, registry: bevy::reflect::TypeRegistryArc) {
+        if let Some(mut ctx) = self.lua.app_data_mut::<ScriptCtx>() {
+            ctx.ecs_registry = Some(registry);
+        }
+    }
+
+    /// Partilha o pool de entidades vazias usado por `viber.ecs.spawn`.
+    pub fn set_ecs_pool(&mut self, queue: Arc<std::sync::Mutex<Vec<Entity>>>) {
+        if let Some(mut ctx) = self.lua.app_data_mut::<ScriptCtx>() {
+            ctx.ecs_pool = Some(queue);
+        }
+    }
+
+    /// Semeia o espelho refletido do frame (`viber.ecs.get/query`). Usado
+    /// pela REPL do bridge, que reconstrói o espelho à chamada.
+    pub fn set_ecs_mirror(&mut self, mirror: Arc<super::ecs::EcsMirrorData>) {
+        if let Some(mut ctx) = self.lua.app_data_mut::<ScriptCtx>() {
+            ctx.ecs_mirror = Some(mirror);
+        }
     }
 
     /// Arma o [`SCRIPT_CALL_BUDGET`] até o guard sair de escopo. Entradas na

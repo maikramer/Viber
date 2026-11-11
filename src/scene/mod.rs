@@ -27,7 +27,8 @@ mod tests;
 
 use std::sync::Arc;
 
-use bevy::prelude::Component;
+use bevy::ecs::reflect::ReflectComponent;
+use bevy::prelude::{Component, Reflect};
 use serde_json::{Value, json};
 
 use crate::xml::NodeOrigin;
@@ -35,13 +36,15 @@ use doc::{NodeRef, SceneDoc, node_label};
 
 /// A entidade é o ROOT de uma instância `<Use prototype="…">` — o editor
 /// distingue instância da definição (banner, reset aos overrides).
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Reflect)]
+#[reflect(Component)]
 pub struct PrototypeInstance(pub String);
 
 /// O nó XML que declarou uma entidade viva (posto pelo spawn a partir de
 /// `EntitySpec::source`). [`SceneDoc::node_ref_for`] converte-o num [`NodeRef`].
-#[derive(Component, Debug, Clone, PartialEq)]
-pub struct SceneSource(pub Arc<NodeOrigin>);
+#[derive(Component, Debug, Clone, PartialEq, Reflect)]
+#[reflect(Component)]
+pub struct SceneSource(#[reflect(ignore)] pub Arc<NodeOrigin>);
 
 /// Os filhos de `node` (até `depth` níveis), cada um com seletor, tag, rótulo e atributos.
 /// Um `<Include>` lista os nós do ficheiro incluído.

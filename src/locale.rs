@@ -9,7 +9,8 @@ use std::path::Path;
 
 use bevy::prelude::*;
 
-#[derive(Resource, Clone, Debug, Default)]
+#[derive(Resource, Clone, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct Locale {
     pub lang: String,
     pub table: HashMap<String, String>,

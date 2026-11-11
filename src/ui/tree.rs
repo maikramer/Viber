@@ -22,11 +22,15 @@
 //! element can also carry `anim="spin|pulse|bob|shake"` (motion, `ui::anim`)
 //! and `tooltip="…"` (hover hint, `ui::widgets`).
 
+use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::prelude::*;
 // Bevy 0.20: `Interaction`/`Button` do prelude são aliases de tipos privados.
 use crate::ui::interaction::{Button, Interaction};
-use bevy::ui::FocusPolicy;
+use bevy::text::EditableText;
+use bevy::ui::auto_directional_navigation::AutoDirectionalNavigation;
 use bevy::ui::widget::ImageNode;
+use bevy::ui::{Checked, FocusPolicy};
+use bevy::ui_widgets::{Checkbox, ScrollArea, TextInput};
 
 use super::anim::UiAnim;
 use super::list::{UiList, UiLists, is_empty_tag, is_template_tag};
@@ -36,7 +40,9 @@ use super::runtime::{
 };
 use super::style::Measure;
 use super::style::parse_declarations;
-use super::widgets::{UiCheck, UiInput, UiSlider, UiTooltipText, normalized_range};
+use super::widgets::{
+    UiBevyWidget, UiCheck, UiInput, UiSlider, UiPickThrough, UiTooltipText, normalized_range,
+};
 use crate::xml::XmlNode;
 
 /// Tags this module knows how to build (lowercased).
@@ -90,7 +96,8 @@ fn element_text(node: &XmlNode) -> String {
 /// Texto original de um `<UiText>` cuja fonte pode ser uma chave `@nome`.
 /// O sistema de localização resolve-o para o idioma ativo (e re-resolve
 /// quando o idioma muda); binds dinâmicos correm depois e ganham.
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone, Debug, Reflect)]
+#[reflect(Component)]
 pub struct UiTextKey(pub String);
 
 /// Spawns `node` and its children under `parent`, returning the root entity.
@@ -227,6 +234,9 @@ pub fn build_ui_tree(
                 vertical,
                 ..Default::default()
             },
+            // A roda é do observer `scrollarea_on_scroll` do Bevy; o
+            // `ScrollPosition` é o estado que ele move.
+            ScrollArea,
             ScrollPosition::default(),
             // Scrolling without clipping just draws outside the box, and the
             // wheel handler needs the element to be pickable.
@@ -275,22 +285,49 @@ pub fn build_ui_tree(
             }
         }
         "uibutton" => {
-            entity.insert((Button, Interaction::default()));
-        }
-        "uicheck" => {
             entity.insert((
                 Button,
                 Interaction::default(),
-                UiCheck {
-                    checked: attr(node, "value").is_some_and(is_truthy),
-                },
+                // O widget do Bevy dá activação por Enter/Espaço e o evento
+                // `Activate`; o clique continua a chegar por `Interaction`.
+                bevy::ui_widgets::Button::default(),
+                TabIndex(0),
+                AutoDirectionalNavigation::default(),
+                UiBevyWidget,
             ));
         }
+        "uicheck" => {
+            let checked = attr(node, "value").is_some_and(is_truthy);
+            entity.insert((
+                Button,
+                Interaction::default(),
+                UiCheck { checked },
+                Checkbox::default(),
+                TabIndex(0),
+                AutoDirectionalNavigation::default(),
+                UiBevyWidget,
+            ));
+            if checked {
+                entity.insert(Checked);
+            }
+        }
         "uislider" => {
-            entity.insert((Button, Interaction::default()));
+            entity.insert((
+                Button,
+                Interaction::default(),
+                TabIndex(0),
+                AutoDirectionalNavigation::default(),
+                UiBevyWidget,
+            ));
         }
         "uiinput" => {
-            entity.insert((Button, Interaction::default()));
+            entity.insert((
+                Button,
+                Interaction::default(),
+                TabIndex(0),
+                AutoDirectionalNavigation::default(),
+                UiBevyWidget,
+            ));
         }
         "uimodal" => {
             if attr(node, "id").is_none() {
@@ -494,6 +531,8 @@ fn build_slider(world: &mut World, node: &XmlNode, track: Entity) {
             UiInlineStyle(fill_inline),
             UiStyleDirty,
             BackgroundColor(Color::WHITE),
+            UiPickThrough,
+            bevy::picking::Pickable::IGNORE,
             ChildOf(track),
         ))
         .id();
@@ -524,6 +563,9 @@ fn build_slider(world: &mut World, node: &XmlNode, track: Entity) {
             handle_classes,
             UiInlineStyle(handle_inline),
             UiStyleDirty,
+            UiPickThrough,
+            bevy::ui_widgets::SliderThumb,
+            bevy::picking::Pickable::IGNORE,
             ChildOf(track),
         ))
         .id();
@@ -532,22 +574,51 @@ fn build_slider(world: &mut World, node: &XmlNode, track: Entity) {
         registry.by_id.insert(format!("{id}.fill"), fill);
         registry.by_id.insert(format!("{id}.handle"), handle);
     }
-    world.entity_mut(track).insert(UiSlider {
-        value,
-        min,
-        max,
-        step: attr_f32(node, "step").unwrap_or(0.0),
-        vertical,
-        fill,
-        handle,
-    });
+    let step = attr_f32(node, "step").unwrap_or(0.0);
+    world.entity_mut(track).insert((
+        UiSlider {
+            value,
+            min,
+            max,
+            step,
+            vertical,
+            fill,
+            handle,
+        },
+        // O arrasto/teclado é do widget do Bevy. O `SliderStep` NUNCA pode ser
+        // 0 (o `step="0"` autoral significa contínuo): um passo de teclado
+        // pequeno mantém as setas úteis sem quantizar o arrasto — quem
+        // quantiza é o `UiSlider::snap`.
+        bevy::ui_widgets::Slider {
+            // Um clique na track salta para a posição (o contrato antigo);
+            // arrastar continua a ajustar a partir daí.
+            track_click: bevy::ui_widgets::TrackClick::Snap,
+            orientation: if vertical {
+                bevy::ui_widgets::SliderOrientation::Vertical
+            } else {
+                bevy::ui_widgets::SliderOrientation::Horizontal
+            },
+        },
+        bevy::ui_widgets::SliderValue(value),
+        bevy::ui_widgets::SliderRange::new(min, max),
+        bevy::ui_widgets::SliderStep(if step > 0.0 {
+            step
+        } else {
+            ((max - min) / 100.0).max(0.001)
+        }),
+    ));
 }
 
-/// Field + its `<UiText>` child. The text child is authored-invisible: this
-/// widget owns its content (`text` / `placeholder`) and `ui::widgets` keeps it
-/// in sync.
+/// Field + its editable `<UiText>` child. O texto autorado é o VALOR; o
+/// `TextInput`/`EditableText` do Bevy edita-o e `ui::widgets` espelha-o de
+/// volta em `UiInput.text`. O placeholder é um irmão absoluto e escondido
+/// enquanto houver texto.
 fn build_input(world: &mut World, node: &XmlNode, field: Entity, font: &Handle<Font>) {
     let source = element_text(node);
+    let placeholder = attr(node, "placeholder").map(String::from);
+    let max_len = attr_f32(node, "max-length").map(|n| n.max(0.0) as usize);
+    let mut editable = EditableText::new(&source);
+    editable.max_characters = max_len;
     let text = world
         .spawn((
             Node::default(),
@@ -559,28 +630,70 @@ fn build_input(world: &mut World, node: &XmlNode, field: Entity, font: &Handle<F
                 ..Default::default()
             }),
             UiStyleDirty,
-            Text::new(source.clone()),
             TextColor(Color::WHITE),
             TextFont {
                 font: font.clone().into(),
                 ..Default::default()
             },
             TextLayout::default(),
-            UiTextKey(source),
+            TextInput,
+            editable,
+            // O pointer-focus do Bevy precisa de um `TabIndex` no alvo
+            // directo; clicar na moldura foca a raiz e o sync leva o foco
+            // ao nó editável.
+            TabIndex(0),
             ChildOf(field),
         ))
         .id();
+    let placeholder_child = placeholder.as_ref().map(|label| {
+        world
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    ..Default::default()
+                },
+                FocusPolicy::Pass,
+                UiTag("uitext".to_string()),
+                UiClasses::parse("input-text input-placeholder"),
+                UiInlineStyle(super::style::StyleProps {
+                    width: Some(Measure::plain(Val::Percent(100.0))),
+                    ..Default::default()
+                }),
+                UiStyleDirty,
+                Text::new(label.clone()),
+                TextColor(Color::WHITE),
+                TextFont {
+                    font: font.clone().into(),
+                    ..Default::default()
+                },
+                TextLayout::default(),
+                // O placeholder nunca pode apanhar o pointer: o clique tem
+                // de chegar ao nó editável (caret) ou à raiz (foco).
+                super::widgets::UiPickThrough,
+                Visibility::Hidden,
+                ChildOf(field),
+            ))
+            .id()
+    });
     if let Some(id) = attr(node, "id") {
         let mut registry = world.resource_mut::<UiRegistry>();
         registry.by_id.insert(format!("{id}.text"), text);
+        if let Some(placeholder) = placeholder_child {
+            registry
+                .by_id
+                .insert(format!("{id}.placeholder"), placeholder);
+        }
     }
     world.entity_mut(field).insert(UiInput {
-        // The authored content is the *value*; the mirror pass overwrites the
-        // child with it (or the placeholder) on the first frame.
-        text: element_text(node),
+        // The authored content is the *value*; the editable node already
+        // carries it and the mirror keeps the two equal.
+        text: source,
         child: text,
-        placeholder: attr(node, "placeholder").map(String::from),
-        max_len: attr_f32(node, "max-length").map(|n| n.max(0.0) as usize),
+        placeholder,
+        placeholder_child,
+        max_len,
     });
 }
 
@@ -725,6 +838,103 @@ mod tests {
                     .is_some()
             );
         }
+    }
+
+    #[test]
+    fn test_widgets_are_backed_by_bevy_widget_components() {
+        let mut app = tree_app();
+
+        // <UiCheck value="1"> é um Checkbox do Bevy já ligado.
+        let mut check = test_node("uicheck", "mute");
+        check.attrs.push(("value".into(), "1".into()));
+        let check_entity = build_test_node(&mut app, &check);
+        assert!(app.world().get::<Checkbox>(check_entity).is_some());
+        assert!(app.world().get::<Checked>(check_entity).is_some());
+        assert!(app.world().get::<TabIndex>(check_entity).is_some());
+        assert!(
+            app.world()
+                .get::<AutoDirectionalNavigation>(check_entity)
+                .is_some()
+        );
+
+        // <UiSlider> é um Slider do Bevy: valor/intervalo/passo + thumb.
+        let mut slider = test_node("uislider", "volume");
+        slider.attrs.extend([
+            ("min".into(), "10".into()),
+            ("max".into(), "20".into()),
+            ("step".into(), "2".into()),
+            ("value".into(), "14".into()),
+        ]);
+        let track = build_test_node(&mut app, &slider);
+        let widget = app
+            .world()
+            .get::<bevy::ui_widgets::Slider>(track)
+            .expect("slider do Bevy");
+        assert_eq!(
+            widget.orientation,
+            bevy::ui_widgets::SliderOrientation::Horizontal
+        );
+        assert_eq!(
+            app.world().get::<bevy::ui_widgets::SliderValue>(track).unwrap().0,
+            14.0
+        );
+        let range = app
+            .world()
+            .get::<bevy::ui_widgets::SliderRange>(track)
+            .unwrap();
+        assert_eq!((range.start(), range.end()), (10.0, 20.0));
+        assert_eq!(
+            app.world().get::<bevy::ui_widgets::SliderStep>(track).unwrap().0,
+            2.0
+        );
+        let ui_slider = app.world().get::<UiSlider>(track).unwrap();
+        assert!(
+            app.world()
+                .get::<bevy::ui_widgets::SliderThumb>(ui_slider.handle)
+                .is_some(),
+            "o .handle é o thumb medido pelo widget"
+        );
+        assert_eq!(
+            app.world()
+                .get::<bevy::picking::Pickable>(ui_slider.handle)
+                .copied(),
+            Some(bevy::picking::Pickable::IGNORE),
+            "o handle não pode apanhar o press (a track tem de arrastar)"
+        );
+        assert!(
+            app.world().get::<UiPickThrough>(ui_slider.fill).is_some(),
+            "o .fill é transparente ao pointer"
+        );
+
+        // <UiInput> é um TextInput/EditableText do Bevy, com placeholder.
+        let mut input = test_node("uiinput", "hero");
+        input.text = "Ana".into();
+        input.attrs.extend([
+            ("placeholder".into(), "nome".into()),
+            ("max-length".into(), "8".into()),
+        ]);
+        let field = build_test_node(&mut app, &input);
+        let ui_input = app.world().get::<UiInput>(field).expect("UiInput");
+        assert_eq!(ui_input.text, "Ana");
+        assert_eq!(ui_input.max_len, Some(8));
+        assert!(app.world().get::<TextInput>(ui_input.child).is_some());
+        let editable = app
+            .world()
+            .get::<EditableText>(ui_input.child)
+            .expect("EditableText");
+        assert_eq!(editable.value().to_string(), "Ana");
+        assert_eq!(editable.max_characters, Some(8));
+        let placeholder = ui_input.placeholder_child.expect("nó do placeholder");
+        assert!(
+            app.world().get::<Visibility>(placeholder).is_some(),
+            "o placeholder é um nó próprio"
+        );
+
+        // <UiPanel scroll="y"> é um ScrollArea do Bevy.
+        let mut scroll = test_node("uipanel", "scroll");
+        scroll.attrs.push(("scroll".into(), "y".into()));
+        let panel = build_test_node(&mut app, &scroll);
+        assert!(app.world().get::<ScrollArea>(panel).is_some());
     }
 
     #[test]
@@ -903,7 +1113,7 @@ mod tests {
         // authored placeholder — silent, and easy to miss by eye.
         let data = crate::ui::bind::UiData::default();
         let lists = [
-            "quests", "bag", "skills", "shop", "controls", "system", "a11y",
+            "quests", "bag", "skills", "shop", "forge", "controls", "system", "a11y",
         ];
         // Binds de SCRIPT: os nomes que os `.lua` do mundo alimentam com
         // `viber.ui.set("nome", …)` literal (barra de chefe, cooldowns das

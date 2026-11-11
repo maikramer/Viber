@@ -1,8 +1,9 @@
 //! Save/load & opções (loop 7 do port simple-rpg) — o análogo nativo do
 //! `SaveLoadPlugin` original (localStorage + msgpackr):
 //!
-//! - **[`SaveGame`]**: XP, posição, vault (recursos + itens), estados das
-//!   quests e marcos da Nota — serializado em JSON.
+//! - **[`SaveGame`]**: envelope genérico (pose, volumes, cena, idioma,
+//!   recortes de terreno) + `world_kv` (o `viber.game()` do Luau) + uma
+//!   secção opaca `game` para o jogo. Nada de XP/ouro/quests hardcoded.
 //! - **Disco**: `~/.local/share/viber/<world>.save.json` (fallback
 //!   `./<world>.save.json` sem HOME).
 //! - **UI**: no modal [Q], tab **Opções** — ↑↓ escolhe a linha (volumes
@@ -12,7 +13,6 @@
 //! Os `defs` das quests são estáticos (embutidos) — só os ESTADOS viajam no
 //! ficheiro, como os serializers por módulo da referência.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -25,7 +25,8 @@ use crate::player::Player;
 
 /// Nome do save deste mundo ([`world_save_key`]), inserido pelo `run` a
 /// partir do caminho do world.xml; `None` = o nome global histórico.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct WorldSaveKey(pub Option<String>);
 
 /// Chave do save de um ficheiro de mundo: a pasta do jogo para `world.xml`
@@ -57,7 +58,8 @@ pub fn world_save_key(world_file: &Path) -> Option<String> {
 
 /// Diretório de saves do `config.yaml` do jogo (`save.dir`); `None` = o
 /// histórico `~/.local/share/viber` (apps mínimas de teste).
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SaveDir(pub Option<PathBuf>);
 
 /// Nome do ficheiro de save fallback (quando o mundo é desconhecido).
@@ -127,7 +129,7 @@ pub fn save_path_for_slot(
 }
 
 /// Sumário de um slot para o menu (o jogo não abre o JSON à mão).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Reflect)]
 pub struct SaveSlotInfo {
     pub slot: u32,
     pub path: String,
@@ -165,8 +167,8 @@ pub fn list_save_slots(world_key: Option<&str>, save_dir: Option<&Path>) -> Vec<
             exists,
             bytes,
             saved_at: game.saved_at.or(mtime),
-            level: game.level,
-            gold: game.gold,
+            level: game.level(),
+            gold: game.gold(),
             scene: game.scene.clone(),
             playtime: game.playtime,
             title: game.title.clone(),
@@ -185,12 +187,12 @@ pub fn list_save_slots(world_key: Option<&str>, save_dir: Option<&Path>) -> Vec<
 
 // ── estrutura do save ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Reflect)]
 pub struct SaveGame {
     /// Versão do schema do save. Saves antigos (sem o campo) carregam como 0;
     /// um save de versão MAIS NOVA que a engine [`SAVE_VERSION`] carrega na
-    /// mesma (campos a mais são ignorados pelo serde) mas o load avisa — os
-    /// campos novos perdem-se ao regravar por cima.
+    /// mesma (campos a mais são preservados na secção opaca `game`) mas o load
+    /// avisa — os campos novos perdem-se ao regravar por cima.
     #[serde(default)]
     pub version: u32,
     /// Unix seconds da gravação. Saves antigos não têm; o menu cai no mtime.
@@ -203,46 +205,18 @@ pub struct SaveGame {
     /// Rótulo do slot (ex. "Discórdia — Capítulo I").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    // Campos nucleares com `#[serde(default)]`: um save antigo/parcial sem
-    // `volumes`/`nota_marked`/`items`/… carrega em vez de ser recusado inteiro.
-    // XP, vitais, posição e volumes são `Option`: o zero do tipo matava o
-    // herói (health 0/0), punha-o na origem, parava os level-ups (next 0) e
+    // ── envelope genérico ───────────────────────────────────────────────
+    // Nada aqui é de um jogo em particular: pose, volumes, cena e o estado
+    // world-scoped do Luau. XP, ouro, quests, inventário e talentos vivem na
+    // secção opaca `game` (ou em `world_kv`, que é o contrato do `viber.game()`).
+    //
+    // Os campos nucleares têm `#[serde(default)]`: um save antigo/parcial sem
+    // `volumes`/`world_kv`/… carrega em vez de ser recusado inteiro. Posição e
+    // volumes são `Option`: o zero do tipo punha o herói na origem e
     // silenciava o áudio. Ausentes, o load mantém o estado da sessão; o JSON
     // de `Some` é o mesmo array de sempre.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub xp: Option<(u32, u32)>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health: Option<(f32, f32)>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
-    #[serde(default)]
-    pub gold: u32,
-    #[serde(default)]
-    pub wood: u32,
-    #[serde(default)]
-    pub stone: u32,
-    #[serde(default)]
-    pub items: HashMap<String, u32>,
-    /// Estados das quests ativas: id → progresso + marcos visitados.
-    #[serde(default)]
-    pub quest_states: HashMap<String, (u32, Vec<String>)>,
-    #[serde(default)]
-    pub quest_done: Vec<String>,
-    /// Marcos da Nota assinados.
-    #[serde(default)]
-    pub nota_marked: Vec<String>,
-    /// Biomas revelados por atalaias de agrimensura (travel::RevealedBiomes)
-    /// — sem isto, carregar voltava a esconder os marcos já cartografados.
-    #[serde(default)]
-    pub revealed_biomes: Vec<String>,
-    /// Skills aprendidas (ids) + pontos disponíveis + nível — sem isto,
-    /// carregar apagava a árvore comprada.
-    #[serde(default)]
-    pub skill_learned: Vec<String>,
-    #[serde(default)]
-    pub skill_points: u32,
-    #[serde(default)]
-    pub level: u32,
     /// Volumes (master, music, sfx) 0..=1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<(f32, f32, f32)>,
@@ -254,7 +228,15 @@ pub struct SaveGame {
     /// (string/número/bool). É o gancho de persistência para lógica de jogo
     /// que vive em Lua — sem ele, scripts não conseguiam guardar nada.
     #[serde(default)]
+    #[reflect(ignore)]
     pub world_kv: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Secção OPACA do jogo: um blob JSON que a engine não interpreta
+    /// (progressão, inventário, quests — o que o jogo quiser). `None` num
+    /// save novo; os saves antigos migram para aqui os campos de topo que
+    /// esta engine já não conhece (ver [`SaveGame::migrate_legacy`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[reflect(ignore)]
+    pub game: Option<serde_json::Value>,
     /// Cena onde o herói estava (projetos com cenas, `crate::project`); `position` é
     /// relativa a ELA. Ausente (saves v1) = a cena principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,25 +247,106 @@ pub struct SaveGame {
     /// Idioma do save (`pt`, `en`); ausente = o do arranque.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
-    /// LEGADO: nomes de props colhidos. A colheita atual guarda a marca no
-    /// `world_kv` do jogo; o campo fica só para ler saves antigos.
-    #[serde(default)]
-    pub harvested: Vec<String>,
-    /// Nó corrente de cada diálogo com grafo (`dialogue id → node`).
-    #[serde(default)]
-    pub dialogue_nodes: std::collections::HashMap<String, String>,
     /// Recortes de terreno editados em jogo.
     #[serde(default)]
     pub terrain_patches: Vec<crate::terrain::delta::DeltaPatch>,
     /// Rebinds do mapa de ações (`ação → tecla`).
     #[serde(default)]
     pub action_keys: std::collections::HashMap<String, String>,
+    /// Campos de saves ANTIGOS apanhados pelo `flatten` (XP, ouro, items,
+    /// quests, …). Só entra por desserialização e nunca é escrito: o load
+    /// chama [`SaveGame::migrate_legacy`] e move tudo para `game`/`world_kv`.
+    #[serde(flatten, default, skip_serializing)]
+    #[reflect(ignore)]
+    pub legacy: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-/// Versão do schema [`SaveGame`] que ESTA engine escreve. Incrementar ao
-/// acrescentar campos cuja ausência muda a leitura (hoje tudo tem default —
-/// o 1 existe para o save mais novo que a engine avisar no load).
-pub const SAVE_VERSION: u32 = 2;
+/// Escalares antigos que ficam directamente legíveis em `world_kv` (o jogo
+/// lê-os com `viber.game()`); objectos/arrays viajam só na secção `game`.
+///
+/// O contrato do `viber.game()` é plano: espelhar todos os primitivos antigos
+/// preserva `hp`, `max_hp`, `xp`, `level`, ouro e afins sem obrigar o jogo a
+/// conhecer a secção opaca. Os tipos compostos (quests, inventário) ficam em
+/// `game.legacy` para o Rust do jogo os migrar.
+impl SaveGame {
+    /// Move os campos de topo de um save ANTIGO para o envelope novo.
+    ///
+    /// Os saves anteriores gravavam o estado do RPG no topo do JSON (`gold`,
+    /// `items`, `quest_states`, `health`, …). Nada é descartado: tudo viaja
+    /// para `game.legacy` (o jogo lê o que quiser de lá) e todos os escalares
+    /// são espelhados em `world_kv`, se o jogo ainda não tiver a chave. A
+    /// gravação seguinte escreve só o schema novo.
+    pub fn migrate_legacy(&mut self) {
+        if self.legacy.is_empty() {
+            return;
+        }
+        let legacy = std::mem::take(&mut self.legacy);
+        for (key, value) in &legacy {
+            if matches!(
+                value,
+                serde_json::Value::Bool(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::String(_)
+            ) {
+                self.world_kv
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        let game = self
+            .game
+            .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if !game.is_object() {
+            *game = serde_json::Value::Object(Default::default());
+        }
+        let map = game.as_object_mut().expect("object ensured above");
+        let slot = map
+            .entry("legacy")
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if !slot.is_object() {
+            *slot = serde_json::Value::Object(Default::default());
+        }
+        let slot = slot.as_object_mut().expect("object ensured above");
+        for (key, value) in legacy {
+            slot.insert(key, value);
+        }
+    }
+
+    /// Nível mostrado no menu de slots: `save_level` do `world_kv` (o jogo
+    /// publica-o em `viber.game()`) ou o `level` de um save antigo migrado.
+    pub fn level(&self) -> u32 {
+        self.kv_u32("save_level")
+            .or_else(|| self.legacy_u32("level"))
+            .unwrap_or(0)
+    }
+
+    /// Ouro mostrado no menu de slots — mesma precedência do [`Self::level`].
+    pub fn gold(&self) -> u32 {
+        self.kv_u32("save_gold")
+            .or_else(|| self.legacy_u32("gold"))
+            .unwrap_or(0)
+    }
+
+    fn kv_u32(&self, key: &str) -> Option<u32> {
+        self.world_kv
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(u32::MAX as u64) as u32)
+    }
+
+    fn legacy_u32(&self, key: &str) -> Option<u32> {
+        self.game
+            .as_ref()?
+            .get("legacy")?
+            .get(key)?
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32)
+    }
+}
+
+/// Versão do schema [`SaveGame`] que ESTA engine escreve (3 = envelope
+/// genérico com secção `game`; os campos de RPG saíram do topo).
+pub const SAVE_VERSION: u32 = 3;
 
 /// Captura pose, volumes e o envelope do ficheiro. Ouro, quests, talentos
 /// e marcos vivem em `world_kv` (`viber.game()`), que o caller preenche.
@@ -320,10 +383,13 @@ pub fn save_to_disk(path: &std::path::Path, game: &SaveGame) -> Result<(), Strin
     })
 }
 
-/// Lê o save do disco.
+/// Lê o save do disco. Saves antigos migram os campos de RPG para a secção
+/// opaca `game` (ver [`SaveGame::migrate_legacy`]).
 pub fn load_from_disk(path: &std::path::Path) -> Result<SaveGame, String> {
     let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
+    let mut game: SaveGame = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    game.migrate_legacy();
+    Ok(game)
 }
 
 // ── plugin ──────────────────────────────────────────────────────────────
@@ -356,7 +422,8 @@ impl Plugin for SavePlugin {
 /// próprio campo). Ficam pendentes; [`apply_pending_save_patches`] importa-os
 /// no primeiro runtime vivo fora de uma troca (na mesma cena: no fim do
 /// próprio frame do load).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PendingSavePatches(pub Vec<crate::terrain::delta::DeltaPatch>);
 
 /// Consome [`PendingSavePatches`] assim que haja terreno vivo e nenhuma troca
@@ -384,7 +451,8 @@ pub fn apply_pending_save_patches(
 /// o `LuaScriptHost` não pode chamar o sistema de save de dentro do Luau, e o
 /// host sem ficheiro `world_kv` não teria como persistir num mundo
 /// `gameplay: none`. Consumido (e limpo) pelo `options_system`.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct SaveRequest {
     pub save: bool,
     pub load: bool,
@@ -394,15 +462,17 @@ pub struct SaveRequest {
 
 /// Linha selecionada na tab Opções (0=master, 1=música, 2=sfx, 3=save,
 /// 4=load).
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct OptionsRows {
     pub selected: usize,
 }
 
 pub const OPTIONS_ROWS: usize = 5;
 
-/// Aplica volumes. Campos de RPG no JSON antigo ficam no struct e não
-/// entram em nenhum recurso — o jogo lê-os de `world_kv` se os tiver gravado.
+/// Aplica volumes. O estado do JOGO (ouro, quests, talentos, …) viaja no
+/// `world_kv`/secção `game` e é o `json_to_game` que o repõe em Lua; aqui só
+/// se tocam os buses de áudio.
 pub fn apply_save(game: &SaveGame, mixer: &mut AudioMixerSettings) {
     if let Some((master, music, sfx)) = game.volumes {
         mixer.master = master.clamp(0.0, 1.0);
@@ -427,6 +497,7 @@ fn options_system(
     open: Res<MenusOpen>,
     ui_tabs: Option<Res<crate::ui::UiTabs>>,
     mut ui_actions: MessageReader<crate::ui::actions::UiAction>,
+    action_owners: Option<Res<crate::ui::actions::UiActionOwners>>,
     mut rows: ResMut<OptionsRows>,
     mut mixer: ResMut<AudioMixerSettings>,
     mut locale: Option<ResMut<crate::locale::Locale>>,
@@ -449,6 +520,15 @@ fn options_system(
     let mut save_requested = false;
     let mut load_requested = false;
     for action in ui_actions.read() {
+        // Ação reclamada por um script (`viber.own_action`): o handler nativo
+        // cala-se e a lógica corre em Lua (a ação já foi encaminhada por
+        // `forward_ui_actions`).
+        if action_owners
+            .as_deref()
+            .is_some_and(|owners| owners.owns(&action.name))
+        {
+            continue;
+        }
         match action.name.as_str() {
             "save" => save_requested = true,
             "load" => load_requested = true,
@@ -523,6 +603,8 @@ fn options_system(
             }
             // Metadados que o menu lê sem abrir o JSON: hora da gravação,
             // tempo de jogo e rótulo (o jogo escreve-os em `viber.game()`).
+            // `level`/`gold` NÃO se copiam para o envelope: `SaveGame::level()`
+            // e `gold()` lêem-nos do `world_kv` na altura de listar os slots.
             game.saved_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -531,17 +613,6 @@ fn options_system(
                 .world_kv
                 .get("playtime_secs")
                 .and_then(serde_json::Value::as_f64);
-            // Metadados genéricos que um jogo pode publicar no `game()`.
-            game.level = game
-                .world_kv
-                .get("save_level")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            game.gold = game
-                .world_kv
-                .get("save_gold")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
             game.title = game
                 .world_kv
                 .get("save_title")
@@ -740,13 +811,28 @@ mod tests {
         let legacy: SaveGame = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.version, 0);
 
-        let future: SaveGame = serde_json::from_str(r#"{"version": 99, "gold": 7}"#).unwrap();
+        // Um save MAIS NOVO que a engine: os campos que não conhecemos ficam
+        // na secção opaca, não são apagados.
+        let mut future: SaveGame =
+            serde_json::from_str(r#"{"version": 99, "gold": 7, "new_field": [1]}"#).unwrap();
         assert_eq!(future.version, 99);
-        assert_eq!(future.gold, 7);
-        let chopped: SaveGame =
+        assert_eq!(future.legacy.get("gold"), Some(&serde_json::json!(7)));
+        future.migrate_legacy();
+        assert_eq!(future.gold(), 7);
+        assert!(future.legacy.is_empty());
+        assert_eq!(
+            future.game.as_ref().and_then(|g| g.get("legacy")).and_then(|l| l.get("new_field")),
+            Some(&serde_json::json!([1])),
+            "campos desconhecidos viajam para a secção do jogo"
+        );
+        let mut chopped: SaveGame =
             serde_json::from_str(r#"{"harvested":["inst-grp-18-0001"]}"#).unwrap();
-        assert_eq!(chopped.harvested, vec!["inst-grp-18-0001".to_string()]);
-        assert!(legacy.harvested.is_empty());
+        chopped.migrate_legacy();
+        assert_eq!(
+            chopped.game.as_ref().and_then(|g| g.get("legacy")).and_then(|l| l.get("harvested")),
+            Some(&serde_json::json!(["inst-grp-18-0001"]))
+        );
+        assert!(legacy.legacy.is_empty());
     }
 
     #[test]
@@ -756,7 +842,9 @@ mod tests {
         game.came_from = Some(("wilds".into(), "gate".into()));
         game.world_kv
             .insert("item.gold".into(), serde_json::json!(80));
+        game.game = Some(serde_json::json!({ "quests": { "wolves": 2 } }));
         let json = serde_json::to_string(&game).unwrap();
+        assert!(!json.contains("\"legacy\""), "o campo de migração nunca é escrito");
         let loaded: SaveGame = serde_json::from_str(&json).unwrap();
         let mut mixer = AudioMixerSettings::default();
         apply_save(&loaded, &mut mixer);
@@ -768,16 +856,19 @@ mod tests {
             loaded.world_kv.get("item.gold"),
             Some(&serde_json::json!(80))
         );
-        assert_eq!(loaded.gold, 0, "o capture já não grava ouro de recurso");
+        assert_eq!(
+            loaded.game,
+            Some(serde_json::json!({ "quests": { "wolves": 2 } })),
+            "a secção opaca do jogo faz roundtrip inteira"
+        );
+        assert_eq!(loaded.gold(), 0, "o capture não grava ouro no envelope");
     }
 
     #[test]
     fn test_partial_save_keeps_session_state() {
         let loaded: SaveGame = serde_json::from_str(r#"{ "gold": 5 }"#).unwrap();
-        assert_eq!(loaded.health, None);
-        assert_eq!(loaded.xp, None);
         assert_eq!(loaded.position, None);
-        assert_eq!(loaded.gold, 5, "o campo antigo ainda desserializa");
+        assert_eq!(loaded.volumes, None);
         let mut mixer = AudioMixerSettings {
             master: 0.6,
             music: 0.4,
@@ -859,8 +950,8 @@ mod tests {
         assert_eq!(slot1, dir.path().join("vael.slot1.save.json"));
 
         let mut game = capture([1.0, 2.0, 3.0], (1.0, 1.0, 1.0));
-        game.level = 7;
-        game.gold = 123;
+        game.world_kv.insert("save_level".into(), serde_json::json!(7));
+        game.world_kv.insert("save_gold".into(), serde_json::json!(123));
         game.saved_at = Some(42.0);
         game.playtime = Some(3_600.0);
         game.title = Some("Discórdia".into());
@@ -879,16 +970,26 @@ mod tests {
         assert_eq!(row.title.as_deref(), Some("Discórdia"));
     }
 
-    /// Um save antigo (sem campos de skills) carrega sem falhar.
+    /// Um save antigo (campos de RPG no topo) carrega, migra para a secção
+    /// `game` e é relido pelo `world_kv` — nada é apagado.
     #[test]
-    fn test_old_save_without_skills_loads() {
+    fn test_old_save_fields_migrate_into_the_game_section() {
         let json = r#"{ "xp": [10, 100], "health": [100.0, 100.0],
             "position": [0.0, 0.0, 0.0], "gold": 5, "wood": 0, "stone": 0,
             "items": {}, "quest_states": {}, "quest_done": [],
             "nota_marked": [], "volumes": [1.0, 1.0, 1.0] }"#;
-        let loaded: SaveGame = serde_json::from_str(json).unwrap();
-        assert!(loaded.skill_learned.is_empty());
-        assert_eq!(loaded.skill_points, 0);
+        let mut loaded: SaveGame = serde_json::from_str(json).unwrap();
+        loaded.migrate_legacy();
+        assert_eq!(loaded.gold(), 5);
+        assert_eq!(loaded.world_kv.get("wood"), Some(&serde_json::json!(0)));
+        let legacy = loaded.game.as_ref().unwrap().get("legacy").unwrap();
+        assert_eq!(legacy.get("xp"), Some(&serde_json::json!([10, 100])));
+        assert_eq!(legacy.get("quest_states"), Some(&serde_json::json!({})));
+        // Gravar por cima escreve só o schema novo: `quest_states` já não é
+        // uma chave de topo (vive dentro de `game.legacy`).
+        let json = serde_json::to_string(&loaded).unwrap();
+        let top: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(top.get("quest_states").is_none(), "{json}");
     }
 
     #[test]
@@ -896,13 +997,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("viber-save-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.json");
-        let game = SaveGame {
-            gold: 42,
-            ..Default::default()
-        };
+        let mut game = SaveGame::default();
+        game.world_kv.insert("save_gold".into(), serde_json::json!(42));
         save_to_disk(&path, &game).unwrap();
         let loaded = load_from_disk(&path).unwrap();
-        assert_eq!(loaded.gold, 42);
+        assert_eq!(loaded.gold(), 42);
         assert!(!dir.join("s.json.tmp").exists(), "sem .tmp órfão");
         std::fs::remove_file(&path).ok();
     }
@@ -914,22 +1013,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("viber-save-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.json");
-        let game = SaveGame {
-            gold: 42,
-            ..Default::default()
-        };
+        let mut game = SaveGame::default();
+        game.world_kv.insert("save_gold".into(), serde_json::json!(42));
         save_to_disk(&path, &game).unwrap();
         // Sabotar o caminho do tmp com um diretório: File::create falha
         // ANTES do rename.
         let tmp = dir.join("s.json.tmp");
         std::fs::create_dir_all(&tmp).unwrap();
-        let bad = SaveGame {
-            gold: 999,
-            ..Default::default()
-        };
+        let mut bad = SaveGame::default();
+        bad.world_kv.insert("save_gold".into(), serde_json::json!(999));
         assert!(save_to_disk(&path, &bad).is_err());
         assert_eq!(
-            load_from_disk(&path).unwrap().gold,
+            load_from_disk(&path).unwrap().gold(),
             42,
             "save anterior sobrevive à falha"
         );
@@ -937,18 +1032,17 @@ mod tests {
         std::fs::remove_dir(&tmp).ok();
     }
 
-    /// Preset `gameplay: none`: sem Vault/QuestLog/Nota/SkillTree o capture
-    /// grava os campos por omissão e o `world_kv` viaja — é a promessa do
-    /// `viber.game()` persistir em qualquer preset.
+    /// Sem recursos de RPG no mundo, o `capture` grava o envelope por omissão
+    /// e o `world_kv` viaja — é a promessa do `viber.game()` persistir em
+    /// qualquer preset.
     #[test]
-    fn test_capture_and_apply_without_rpg_resources() {
+    fn test_capture_and_apply_without_game_resources() {
         let mut game = capture([3.0, 1.5, -2.0], (1.0, 1.0, 1.0));
         game.world_kv
             .insert("score".to_string(), serde_json::json!(4));
-        assert_eq!(game.gold, 0);
-        assert!(game.quest_states.is_empty());
+        assert!(game.game.is_none(), "sem secção de jogo até o jogo escrever");
         // Roundtrip por JSON: o world_kv volta e o apply não panica sem
-        // recursos RPG (só o mixer é aplicado).
+        // recursos de jogo (só o mixer é aplicado).
         let json = serde_json::to_string(&game).unwrap();
         let loaded: SaveGame = serde_json::from_str(&json).unwrap();
         let mut mixer = AudioMixerSettings::default();
@@ -958,10 +1052,10 @@ mod tests {
         assert!((mixer.master - 1.0).abs() < 1e-6);
     }
 
-    /// Save ANTIGO (com campos RPG) carrega num mundo `gameplay: none` sem
-    /// erro: os campos extra são simplesmente ignorados pelo apply.
+    /// Save ANTIGO (com campos de RPG no topo) carrega num mundo sem esses
+    /// recursos sem erro: a migração preserva tudo e o apply só toca o mixer.
     #[test]
-    fn test_rpg_save_loads_in_none_preset() {
+    fn test_legacy_game_save_loads_without_game_resources() {
         let json = r#"{ "xp": [10, 100], "health": [88.0, 100.0],
             "position": [1.0, 2.0, 3.0], "gold": 250, "wood": 3, "stone": 1,
             "items": {"potion": 2}, "quest_states": {"city_wolves": [1, []]},
@@ -969,12 +1063,23 @@ mod tests {
             "skill_learned": ["vitality1"], "skill_points": 2, "level": 3,
             "volumes": [0.5, 0.5, 0.5],
             "world_kv": {"score": 9} }"#;
-        let loaded: SaveGame = serde_json::from_str(json).unwrap();
+        let mut loaded: SaveGame = serde_json::from_str(json).unwrap();
+        loaded.migrate_legacy();
         let mut mixer = AudioMixerSettings::default();
         apply_save(&loaded, &mut mixer);
-        assert_eq!(loaded.gold, 250);
+        assert_eq!(loaded.gold(), 250);
+        assert_eq!(loaded.level(), 3);
         assert_eq!(loaded.world_kv.get("score"), Some(&serde_json::json!(9)));
+        assert_eq!(loaded.world_kv.get("skill_points"), Some(&serde_json::json!(2)));
         assert!((mixer.master - 0.5).abs() < 1e-6);
+        // O que não é escalar (inventário, quests) fica acessível na secção
+        // opaca, com a forma original.
+        let legacy = loaded.game.as_ref().unwrap().get("legacy").unwrap();
+        assert_eq!(legacy.get("items"), Some(&serde_json::json!({"potion": 2})));
+        assert_eq!(
+            legacy.get("quest_states"),
+            Some(&serde_json::json!({"city_wolves": [1, []]}))
+        );
     }
 
     /// Os recortes de terreno de um load ESPERAM por terreno vivo: importá-los

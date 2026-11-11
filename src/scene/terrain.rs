@@ -20,7 +20,7 @@ use crate::terrain::heightmap::{AhgtMeta, HeightMapU16};
 use crate::terrain::paint::CellWindow;
 
 /// O pincel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bevy::prelude::Reflect)]
 #[serde(rename_all = "snake_case")]
 pub enum BrushMode {
     /// `h += amount · falloff` (metros).
@@ -75,7 +75,7 @@ impl From<CellWindow> for CellRect {
 }
 
 /// Retângulo de células `[i0, i0+cols) × [j0, j0+rows)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bevy::prelude::Reflect)]
 pub struct CellRect {
     pub i0: usize,
     pub j0: usize,

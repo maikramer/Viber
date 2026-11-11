@@ -18,7 +18,8 @@ pub const HEAD_LOOK_WEIGHT: f32 = 0.35;
 pub const HEAD_LOOK_MAX: f32 = 40.0_f32.to_radians();
 
 /// Marca um personagem cujos pés assentam no terreno.
-#[derive(Component, Debug, Default)]
+#[derive(Component, Debug, Default, Reflect)]
+#[reflect(Component)]
 pub struct FootIk;
 
 /// Peso do IK de pés para um estado de locomoção. No ar e em one-shots é 0.
@@ -449,7 +450,8 @@ pub fn foot_ik_system(
 }
 
 /// Envelope de voz que abre a mandíbula enquanto o clip toca.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct VoiceEnvelope {
     pub level: f32,
 }
@@ -502,7 +504,8 @@ pub fn jaw_system(
 /// congelar a locomoção: o clipe escreve a pose, isto soma uma rotação local
 /// por cima. A chave é o nome do osso (`"upperarm_r"`, `"clavicle_r"`, …);
 /// `Quat::IDENTITY` remove a entrada.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PlayerBoneOffsets {
     pub entries: Vec<(String, Quat)>,
 }

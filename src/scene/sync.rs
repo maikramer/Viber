@@ -36,7 +36,8 @@ pub const POSE_KEYS: &[&str] = &[
 ];
 
 /// Mudanças que o mundo vivo não conseguiu refletir (o editor mostra "recarregar").
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct SceneSyncStatus {
     pub needs_reload: Vec<String>,
 }

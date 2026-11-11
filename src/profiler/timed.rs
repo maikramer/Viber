@@ -1,7 +1,17 @@
 //! Instrumentação de sistemas — o equivalente nativo do `recordSystemTiming`
-//! do profiler original. O Bevy 0.19 não expõe tempos por sistema (removidos
-//! a montante), por isso [`timed`] embrulha qualquer `System` e mede o
-//! `run_unsafe` dele: mesma assinatura, mesmo acesso, +2 leituras de relógio.
+//! do profiler original. O Bevy não expõe tempos por sistema na API pública
+//! (`ScheduleData` dá nomes/reads/writes, não durações), por isso [`timed`]
+//! embrulha qualquer `System` e mede o `run_unsafe` dele: mesma assinatura,
+//! mesmo acesso, +2 leituras de relógio.
+//!
+//! TODO(migration): o Bevy 0.20 instrumenta cada sistema com um span de
+//! `tracing` (`bevy_ecs::system::system_span`). Um `Layer` que recolhesse
+//! esses spans substituiria o wrapper de `run_unsafe` — mas o subscriber
+//! desta engine é o logger do `viber debug logs` e o perfil guarda
+//! avg/min/max/p95 por sistema numa janela de 120 frames (o `tracing` só dá
+//! eventos completos, que teriam de ser acumulados à parte). Fica para um
+//! passe próprio; `timed(...)` mantém a API e os dados que o overlay/CLI
+//! consomem.
 //!
 //! Os registos vivem em globais porque sistemas correm em paralelo e o wrapper
 //! não tem acesso ao `World`; é um `Mutex` por *frame* por sistema (~20 ns).
@@ -230,9 +240,10 @@ pub fn current_frame() -> u64 {
 
 /// Uma linha do "topo do frame": quanto um sistema/script somou no frame
 /// actual. `pct` é relativo ao frame medido (não à média da janela).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Reflect)]
 pub struct FrameHotspot {
     pub name: String,
+    #[reflect(ignore)]
     pub group: &'static str,
     pub ms: f32,
     pub calls: u32,
@@ -556,7 +567,8 @@ impl<S: System> System for Timed<S> {
 // ---------------------------------------------------------------- âncoras física
 
 /// Instante de início do step de física (escrito pela âncora `before`).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PhysicsStepClock {
     start: Option<Instant>,
 }
@@ -605,7 +617,8 @@ const PHASES: [&str; 6] = [
 /// instante diferente — as seis leituras eram todas "desde o início do
 /// PostUpdate" e somavam 27 ms num frame de 44). Com uma marca ÚNICA e
 /// encadeada, cada linha é a fatia daquele set e a soma é o `PostUpdate`.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PhaseClocks {
     mark: Option<Instant>,
 }
@@ -681,7 +694,8 @@ const SCHEDULES: [&str; 7] = [
 /// Nome da fatia entre frames (fim do `Last` → início do `First`).
 const RENDER_WAIT: &str = "sched.render_wait";
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct FrameTimeline {
     mark: Option<Instant>,
 }
@@ -768,7 +782,8 @@ const RENDER_PHASES: [&str; 11] = [
 ];
 
 /// Marca da cadeia do render app (vive no mundo do sub-app).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct RenderPhaseClock {
     mark: Option<Instant>,
 }
@@ -836,7 +851,8 @@ const CORE3D_PHASES: [&str; 5] = [
 
 /// Marca da cadeia do `Core3d` (vive no mundo do render app, como a do
 /// `Render`; são schedules diferentes, por isso precisa de recurso próprio).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct Core3dPhaseClock {
     mark: Option<Instant>,
 }

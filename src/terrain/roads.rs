@@ -97,7 +97,7 @@ pub const RIBBON_WOBBLE: f32 = 0.08;
 pub const ROAD_MITER_LIMIT: f32 = 3.0;
 
 /// Road profiles (`road/profiles.ts`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, bevy::prelude::Reflect)]
 pub enum RoadProfile {
     /// Main streets: full flattening.
     #[default]
@@ -664,7 +664,7 @@ pub struct RoadSurface {
 }
 
 /// Registry entry for one carved road (queries + ribbon generation).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, bevy::prelude::Reflect)]
 pub struct RoadPath {
     pub name: Option<String>,
     /// Smoothed stations (world XZ). Closed roads end with an explicit copy

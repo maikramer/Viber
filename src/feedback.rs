@@ -51,7 +51,8 @@ pub struct AttackAlert {
 // ── componentes / recursos ──────────────────────────────────────────────
 
 /// Slot do pool de números de dano.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 struct DamageNumberSlot {
     world_pos: Vec3,
     age: f32,
@@ -64,7 +65,8 @@ struct DamageNumberSlot {
 /// Flash de impacto no inimigo: enquanto `timer > 0`, a subárvore do modelo
 /// acende em branco-quente (`HIT_FLASH_EMISSIVE` no pico, queda quadrática).
 /// Inserido pelas vias de dano do combate (melee, fireball).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct HitFlash {
     pub timer: f32,
 }
@@ -165,7 +167,8 @@ impl Plugin for FeedbackPlugin {
 
 /// Vinheta de HP baixo: acorda quando a fração de HP passa abaixo de
 /// [`LOW_HP_FRACTION`].
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LowHpVignette;
 
 fn spawn_low_hp_vignette(mut commands: Commands) {

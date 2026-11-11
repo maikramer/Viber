@@ -71,15 +71,18 @@ pub const HITCH_CAPACITY: usize = 32;
 pub const DEFAULT_HITCH_MS: f32 = 50.0;
 
 /// Marker da raiz do overlay (toggle de visibilidade).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ProfilerOverlay;
 
 /// Marker do nó de texto (corpo reescrito a cada refrescamento).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ProfilerText;
 
 /// Estado do overlay mínimo: refresh throttle + visibilidade (**F3**).
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 struct HudState {
     timer: f32,
     visible: bool,
@@ -96,7 +99,8 @@ impl Default for HudState {
 
 /// Estado partilhado do profiler: aba activa da janela, congelação, raio de
 /// "entidades próximas" e última mensagem de estado (caminho de export, etc.).
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct ProfilerState {
     pub tab: usize,
     pub frozen: bool,
@@ -116,12 +120,14 @@ impl Default for ProfilerState {
 }
 
 /// Contador global de frames (o `frameCount` do snapshot).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct FrameCounter(pub u64);
 
 /// Janela deslizante de frame-times (ms) — média/pico/min-fps recentes,
 /// independentes do histórico exponencial do `DiagnosticsStore`.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct FrameStats {
     samples: VecDeque<f32>,
 }
@@ -290,7 +296,7 @@ pub fn collect_counters(world: &mut World) -> GameCounters {
 /// Um frame acima do limiar, com a atribuição do que o compôs. É a peça que
 /// falta ao snapshot médio: `frame_ms.max` diz QUE houve um pico, `top` diz
 /// QUEM o fez.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Reflect)]
 pub struct Hitch {
     pub frame: u64,
     pub frame_ms: f32,
@@ -308,7 +314,8 @@ pub struct Hitch {
 }
 
 /// Ring dos últimos hitches + limiar configurável.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct HitchLog {
     /// Acima disto o frame entra no ring (`VIBER_HITCH_MS`, default 50 ms).
     pub threshold_ms: f32,
@@ -776,8 +783,10 @@ impl std::fmt::Debug for ProfilerExtra {
 }
 
 /// Registos de extras (populado no build do plugin; mundos podem acrescentar).
-#[derive(Resource, Default, Clone)]
+#[derive(Resource, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct ProfilerExtras {
+    #[reflect(ignore)]
     pub items: Vec<ProfilerExtra>,
 }
 

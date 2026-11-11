@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use crate::recipes::spawn::GltfScenePending;
 
 /// Pedido de attach/detach vindo de um script.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct AttachmentRequest {
     /// Dono; `None` = herói.
     pub owner: Option<Entity>,
@@ -29,11 +29,13 @@ pub struct AttachmentRequest {
 }
 
 /// Fila de pedidos (o runtime Luau empurra; `apply_attachments` consome).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AttachmentRequests(pub Vec<AttachmentRequest>);
 
 /// `(dono, slot)` → entidade anexada (para trocar/remover sem órfãos).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AttachmentSlots(pub HashMap<(Entity, String), Entity>);
 
 pub struct AttachmentPlugin;

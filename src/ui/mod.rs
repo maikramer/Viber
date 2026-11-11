@@ -83,6 +83,18 @@ pub struct UiPlugin;
 impl bevy::app::Plugin for UiPlugin {
     fn build(&self, app: &mut bevy::app::App) {
         interaction::ensure_plugin(app);
+        // Navegação direccional (D-pad/stick) usa o `DirectionalNavigationMap`
+        // do bevy_input_focus; o `DefaultPlugins` não o instala.
+        if !app.is_plugin_added::<bevy::input_focus::directional_navigation::DirectionalNavigationPlugin>()
+        {
+            app.add_plugins(bevy::input_focus::directional_navigation::DirectionalNavigationPlugin);
+        }
+        // O `UiScroll::speed` autoral (26 px por linha) era aplicado pelo
+        // driver antigo; o `ScrollArea` do Bevy usa esta razão global.
+        let mut scroll_pixels_per_line =
+            bevy::input::mouse::MouseScrollPixelsPerLine::default();
+        *scroll_pixels_per_line = 26.0;
+        app.insert_resource(scroll_pixels_per_line);
         app.init_resource::<StyleSheet>()
             .init_resource::<UiRegistry>()
             .init_resource::<UiData>()
@@ -102,6 +114,13 @@ impl bevy::app::Plugin for UiPlugin {
             .init_resource::<UiEvents>()
             .init_resource::<script::UiScriptBinds>()
             .add_message::<actions::UiAction>()
+            // Observers dos widgets Bevy: cada evento do `bevy_ui_widgets`
+            // aterra no componente Viber e daí no diff de `UiEvents`.
+            .add_observer(widgets::on_check_value_change)
+            .add_observer(widgets::on_slider_value_change)
+            .add_observer(modal::activate_ui_tab)
+            .add_observer(modal::close_modal_on_request)
+            .add_observer(events::pump_keyboard_activate)
             .configure_sets(
                 Update,
                 (
@@ -137,7 +156,6 @@ impl bevy::app::Plugin for UiPlugin {
                     modal::seed_ui_tabs,
                     modal::drive_ui_tab_keys,
                     modal::drive_ui_tabs,
-                    modal::drive_ui_scroll,
                 )
                     .chain()
                     .after(script::apply_ui_commands)
@@ -230,14 +248,19 @@ impl bevy::app::Plugin for UiPlugin {
                     // ticks and slider fills live below.
                     modal::sync_tab_pages,
                     // Interactive widgets run after the style pass: they read
-                    // fresh Interaction state and write Node data (slider fill,
+                    // fresh Bevy widget state and write Node data (slider fill,
                     // input mirror) the cascade must not immediately overwrite.
+                    widgets::sync_ui_disabled,
                     widgets::drive_ui_checks,
                     widgets::sync_check_ticks,
+                    widgets::mirror_ui_sliders,
                     widgets::drive_ui_sliders,
+                    widgets::sync_pick_through,
+                    widgets::blur_ui_inputs_on_enter,
                     widgets::sync_ui_input_focus,
+                    widgets::apply_ui_input_text,
                     widgets::sync_ui_input_text,
-                    widgets::drive_ui_input,
+                    widgets::sync_ui_focused_class,
                     widgets::drive_ui_tooltip,
                     widgets::drive_ui_cursors,
                     // Motion gets the last word on rotate/scale/translate.

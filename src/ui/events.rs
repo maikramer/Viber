@@ -110,6 +110,36 @@ pub fn clear_ui_events(mut events: ResMut<UiEvents>) {
     events.0.clear();
 }
 
+/// `Activate` do Bevy por TECLADO (Enter/Espaço num botão focado) entra na
+/// mesma fila de cliques dos scripts.
+///
+/// Os cliques de rato/gamepad continuam a chegar por `Interaction` (o
+/// `collect_ui_clicks`); o filtro pelo `just_pressed` evita contar o
+/// `Activate` que o widget emite no release do pointer, que seria um segundo
+/// clique para a mesma carregadela.
+pub fn pump_keyboard_activate(
+    activate: On<bevy::ui_widgets::Activate>,
+    keys: Res<ButtonInput<KeyCode>>,
+    ids: Query<&UiId>,
+    mut events: Option<ResMut<UiEvents>>,
+    mut clicks: Option<ResMut<super::runtime::UiClicks>>,
+) {
+    if !(keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space)) {
+        return;
+    }
+    let Ok(id) = ids.get(activate.entity) else {
+        return;
+    };
+    if let Some(ref mut events) = events {
+        events.push_click(&id.0);
+    }
+    if let Some(ref mut clicks) = clicks
+        && !clicks.0.contains(&id.0)
+    {
+        clicks.0.push(id.0.clone());
+    }
+}
+
 /// Emissores de eventos de WIDGET — mudanças de valor (slider), texto (input),
 /// estado (check), foco e abas. Compara com o frame anterior via `Local`s: os
 /// drivers escrevem componentes todos os frames (`Changed` dispara sempre), o

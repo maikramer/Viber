@@ -11,7 +11,8 @@ pub const OCCLUSION_RAYS: usize = 8;
 /// Ganho quando o raio acerta geometria antes da fonte.
 pub const OCCLUDED_GAIN: f32 = 0.35;
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct SpatialOneShot {
     pub pos: Vec3,
     /// Ganho extra da oclusão, 1 = livre.

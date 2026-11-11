@@ -19,7 +19,8 @@ use super::mods::Bounds3;
 use super::transvoxel_mesh::{VOXEL_CHUNK_CELLS, VoxelChunkParams, build_voxel_mesh};
 
 /// A meshed box of the voxel field.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct VoxelChunk {
     /// Box index inside the terrain grid (unique, stable, used for the name).
     pub coords: IVec3,
@@ -94,7 +95,7 @@ pub fn lod_shape(lod0_cell: f32, chunk_edge: f32, lod: u8) -> VoxelLodShape {
 }
 
 /// Uma caixa transvoxel de uma coluna, pronta para meshar.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct VoxelBoxSpec {
     /// Coordenada da caixa na grelha lógica da coluna (nome/identidade).
     pub pos: IVec3,

@@ -55,7 +55,7 @@ pub const LOWEST_TIER: u8 = 3;
 pub const DEFAULT_TARGET_FPS: f32 = 55.0;
 
 /// `auto` escalona; os outros prendem um tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum QualityMode {
     Auto,
     Pinned(u8),
@@ -128,7 +128,8 @@ pub fn tier_levers(tier: u8) -> (QualityGates, Option<usize>) {
 
 /// Estado do escalonador — a decisão é pura ([`Self::step`]) para os testes
 /// não dependerem do relógio.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AdaptiveQuality {
     pub target_fps: f32,
     pub mode: QualityMode,

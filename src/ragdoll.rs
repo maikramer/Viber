@@ -17,11 +17,13 @@ use crate::corpse::Corpse;
 pub const RAGDOLL_SECS: f32 = 2.5;
 
 /// Pedido autoral: esta criatura cai com volume em vez de só o clip.
-#[derive(Component, Debug, Default)]
+#[derive(Component, Debug, Default, Reflect)]
+#[reflect(Component)]
 pub struct RagdollDeath;
 
 /// Corpos da cadeia enquanto o ragdoll está vivo.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct RagdollActive {
     pub until: f32,
     pub bodies: Vec<Entity>,
@@ -277,7 +279,8 @@ pub fn drive_ragdolls(
 /// despawnado antes dos 2,5 s (corpse lifetime 1,4 s, troca de cena), o
 /// `RagdollActive` desaparecia com ele e os corpos ficavam para sempre no
 /// mundo da física.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct RagdollBodyOf(pub Entity);
 
 /// Recolhe corpos cujo dono já não tem ragdoll ativo.

@@ -245,6 +245,9 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub bone_offsets: Option<bevy::ecs::system::ResMut<'w, crate::ik::PlayerBoneOffsets>>,
     /// Prompt de mundo publicado por um controller (`viber.prompt`).
     pub ui_prompt: Option<bevy::ecs::system::ResMut<'w, crate::ui::UiPrompt>>,
+    /// Espelho refletido do frame (`viber.ecs.get/query`) — reconstruído por
+    /// [`super::ecs::mirror_system`] antes deste sistema no mesmo schedule.
+    pub ecs_mirror: Option<bevy::ecs::system::Res<'w, super::ecs::EcsMirror>>,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -253,6 +256,20 @@ pub struct LuauRuntimeLocals<'w, 's> {
 /// ficava negativo e a entidade deixava de poder morrer.
 fn apply_heal(current: f32, max: f32, amount: f32) -> f32 {
     (current + amount.max(0.0)).clamp(0.0, max.max(0.0))
+}
+
+/// Fallback de `viber.set_visible` quando a reflexão não tem `Visibility`
+/// (app mínima de teste sem `ReflectPlugin`): o comportamento antigo de
+/// inserir o componente. `Inherited` (e não `Visible`) para a entidade voltar
+/// a respeitar o pai escondido quando é uma subárvore.
+fn insert_visibility(world: &mut World, entity: Entity, visible: bool) {
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.insert(if visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
 }
 
 pub fn luau_update(
@@ -494,6 +511,13 @@ pub fn luau_update(
             ctx.scene_ids = std::sync::Arc::new(index.ids.clone());
         }
         ctx.surfaces = locals.surfaces.clone();
+        // Espelho refletido do frame para `viber.ecs.get/query` — o `Arc` é
+        // trocado por um inteiro; as leituras do script vêem o estado do
+        // INÍCIO do frame (uma escrita de `viber.ecs.set` aparece no
+        // seguinte, como todo o snapshot da API).
+        if let Some(mirror) = locals.ecs_mirror.as_ref() {
+            ctx.ecs_mirror = Some(mirror.0.clone());
+        }
         // Snapshots de nomes e HP para `viber.find`/`entity_hp` — início de
         // frame: entidades novas são vistas no frame seguinte (como tudo).
         // SEM cap: o `.take(4096)` antigo cortava por ordem arbitrária de
@@ -1169,21 +1193,29 @@ pub fn luau_update(
                 });
             }
             ScriptCommand::SetScale { entity, scale } => {
-                // `scripts` exige `LuaScriptRef` e exclui o herói: sem os
-                // fallbacks, `viber.set_scale` era um no-op silencioso em
-                // props, NPCs sem script e no próprio jogador.
-                if let Ok((_, _, Some(mut transform), _, _, _)) = scripts.get_mut(entity) {
-                    transform.scale = Vec3::splat(scale);
-                } else if player_components
-                    .as_ref()
-                    .is_some_and(|(id, _, _)| *id == entity)
-                {
-                    if let Some((_, Some(transform), _)) = player_components.as_mut() {
-                        transform.scale = Vec3::splat(scale);
+                // TODO(migration): o nome Lua mantém-se; a escrita passa pela
+                // reflexão (`viber.ecs`), que já não depende de a entidade
+                // estar na query `scripts`/`poses` — funciona em props, NPCs
+                // sem script e no próprio herói.
+                commands.queue(move |world: &mut World| {
+                    let patch = super::ecs::EcsValue::Map(vec![(
+                        "scale".to_string(),
+                        super::ecs::EcsValue::Vec3([scale, scale, scale]),
+                    )]);
+                    if let Err(error) = super::ecs::patch_component(
+                        world,
+                        entity,
+                        super::ecs::TRANSFORM_PATH,
+                        &patch,
+                    ) {
+                        // Sem `ReflectPlugin`/`Transform` no registo (app
+                        // mínima): mantém a escrita directa de sempre.
+                        warn!(target: "viber::luau", "viber.set_scale: {error}");
+                        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                            transform.scale = Vec3::splat(scale);
+                        }
                     }
-                } else if let Ok(mut transform) = locals.poses.get_mut(entity) {
-                    transform.scale = Vec3::splat(scale);
-                }
+                });
             }
             ScriptCommand::EntitySetMaxHp { entity, max } => {
                 // O herói NÃO entra em `externals.healths` (query
@@ -1491,12 +1523,28 @@ pub fn luau_update(
                 }
             }
             ScriptCommand::SetVisible { entity, visible } => {
-                // `Inherited` (e não `Visible`) para a entidade voltar a
-                // respeitar o pai escondido quando é uma subárvore.
-                commands.entity(entity).insert(if visible {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
+                // TODO(migration): shim Lua mantido; o caminho principal é a
+                // reflexão (`Visibility` é um enum: a variante é o patch).
+                commands.queue(move |world: &mut World| {
+                    let variant = if visible { "Inherited" } else { "Hidden" };
+                    let patch = super::ecs::EcsValue::Enum(variant.to_string());
+                    match super::ecs::patch_component(
+                        world,
+                        entity,
+                        super::ecs::VISIBILITY_PATH,
+                        &patch,
+                    ) {
+                        Ok(true) => {}
+                        // Entidade sem `Visibility`, ou app mínima sem o
+                        // `ReflectPlugin`: mantém o comportamento antigo de a
+                        // inserir. `Inherited` (e não `Visible`) para a
+                        // entidade voltar a respeitar o pai escondido.
+                        Ok(false) => insert_visibility(world, entity, visible),
+                        Err(error) => {
+                            warn!(target: "viber::luau", "viber.set_visible: {error}");
+                            insert_visibility(world, entity, visible);
+                        }
+                    }
                 });
             }
             ScriptCommand::Say { text, secs } => {
@@ -1589,28 +1637,37 @@ pub fn luau_update(
                 }
             }
             ScriptCommand::SetPose { entity, pos, yaw } => {
-                let apply = |transform: &mut Transform| {
-                    let scale = transform.scale;
-                    transform.translation = pos;
-                    transform.rotation = Quat::from_rotation_y(yaw);
-                    transform.scale = scale;
-                };
-                // `players` já está emprestado em `player_components` desde o
-                // início do frame — um segundo `get_mut` não compila.
-                let mut applied = false;
-                if let Some((p_entity, Some(transform), _)) = player_components.as_mut()
-                    && *p_entity == entity
-                {
-                    apply(transform);
-                    applied = true;
-                }
-                if !applied {
-                    if let Ok((_, _, Some(mut transform), _, _, _)) = scripts.get_mut(entity) {
-                        apply(&mut transform);
-                    } else if let Ok(mut transform) = locals.poses.get_mut(entity) {
-                        apply(&mut transform);
+                // TODO(migration): shim Lua mantido; a escrita passa pela
+                // reflexão. Um patch parcial preserva a escala e cobre
+                // qualquer entidade com `Transform` (script, herói, prop).
+                commands.queue(move |world: &mut World| {
+                    let patch = super::ecs::EcsValue::Map(vec![
+                        (
+                            "translation".to_string(),
+                            super::ecs::EcsValue::Vec3([pos.x, pos.y, pos.z]),
+                        ),
+                        (
+                            "rotation".to_string(),
+                            super::ecs::EcsValue::Quat(Quat::from_rotation_y(yaw).to_array()),
+                        ),
+                    ]);
+                    if let Err(error) = super::ecs::patch_component(
+                        world,
+                        entity,
+                        super::ecs::TRANSFORM_PATH,
+                        &patch,
+                    ) {
+                        // Sem reflexão (app mínima): escrita directa de
+                        // sempre, preservando a escala.
+                        warn!(target: "viber::luau", "viber.set_pose: {error}");
+                        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                            let scale = transform.scale;
+                            transform.translation = pos;
+                            transform.rotation = Quat::from_rotation_y(yaw);
+                            transform.scale = scale;
+                        }
                     }
-                }
+                });
             }
             ScriptCommand::SoundLoop {
                 id,
@@ -1714,6 +1771,16 @@ pub fn luau_update(
                             loudness,
                             from: None,
                         });
+                    }
+                });
+            }
+            // `viber.ecs.*`: a escrita genérica por reflexão. O erro (campo
+            // inválido, entidade sem o componente) vira warn — a validação
+            // da chamada já aconteceu na closure Lua.
+            ScriptCommand::Ecs(op) => {
+                commands.queue(move |world: &mut World| {
+                    if let Err(error) = super::ecs::apply_op(world, &op) {
+                        warn!(target: "viber::luau", "viber.ecs: {error}");
                     }
                 });
             }

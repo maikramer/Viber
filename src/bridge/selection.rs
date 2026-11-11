@@ -21,7 +21,8 @@ use super::fork_compat::{entity_bits_to_string, entity_string_to_bits};
 use super::invalid;
 
 /// Entidade selecionada pelo editor (`viber.select`).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct SelectedEntity(pub Option<Entity>);
 
 /// `viber.pick {x, y}` — clique em coordenadas da janela do jogo →

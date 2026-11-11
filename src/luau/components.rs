@@ -14,7 +14,8 @@ use bevy::prelude::*;
 ///
 /// WIRED-BY-ORCHESTRATOR: inserted by the spawn step; this module only
 /// observes it (`on_add` / update / `on_remove`).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct LuaScriptRef {
     /// Script path relative to `world_dir/scripts/` (e.g. `"doors/gate.lua"`).
     pub path: String,
@@ -23,18 +24,21 @@ pub struct LuaScriptRef {
 /// Valores por instância dos props exportados pelo script (atributos
 /// `prop-<nome>` do nó, sem o prefixo, texto cru). O tipo vem das anotações
 /// `--@export` do script ([`super::exports`]) e é aplicado em `viber.prop`.
-#[derive(Debug, Clone, Default, Component, PartialEq)]
-pub struct ScriptProps(pub std::sync::Arc<Vec<(String, String)>>);
+#[derive(Debug, Clone, Default, Component, PartialEq, Reflect)]
+#[reflect(Component, Default)]
+pub struct ScriptProps(#[reflect(ignore)] pub std::sync::Arc<Vec<(String, String)>>);
 
 /// Grupos da entidade (`groups="guardas aldeia"`) — `viber.group`,
 /// `viber.in_group`, `viber.call_group` e os alvos `@grupo` das conexões.
-#[derive(Debug, Clone, Default, Component, PartialEq)]
-pub struct Groups(pub std::sync::Arc<Vec<String>>);
+#[derive(Debug, Clone, Default, Component, PartialEq, Reflect)]
+#[reflect(Component, Default)]
+pub struct Groups(#[reflect(ignore)] pub std::sync::Arc<Vec<String>>);
 
 /// Conexões de sinal do EMISSOR (`connect-<sinal>="alvo:método; …"`): o que
 /// um `viber.emit(sinal, …)` desta entidade chama.
-#[derive(Debug, Clone, Default, Component, PartialEq)]
-pub struct SignalConnections(pub std::sync::Arc<Vec<(String, Vec<super::exports::Connection>)>>);
+#[derive(Debug, Clone, Default, Component, PartialEq, Reflect)]
+#[reflect(Component, Default)]
+pub struct SignalConnections(#[reflect(ignore)] pub std::sync::Arc<Vec<(String, Vec<super::exports::Connection>)>>);
 
 impl SignalConnections {
     pub fn of(&self, signal: &str) -> &[super::exports::Connection] {
@@ -72,7 +76,8 @@ pub struct ScriptToast(pub String);
 /// Raio de ativação do script ("LOD de IA"): além deste raio do player o
 /// `on_update` NEM RODA — inimigo congelado (lógica + animação paradas).
 /// Autoria via `activation-radius` no spawner; default 45 m.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component, Default)]
 pub struct ScriptActivation {
     pub radius: f32,
 }
@@ -89,7 +94,8 @@ impl Default for ScriptActivation {
 pub const DEFAULT_ACTIVATION_RADIUS: f32 = 45.0;
 /// Alvo de interação registado por script (`viber.set_interaction`): o prompt
 /// "[tecla] label" aparece quando o player está perto.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct ScriptInteraction {
     pub label: String,
     pub key: KeyCode,

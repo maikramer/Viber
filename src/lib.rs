@@ -61,6 +61,7 @@ pub mod prop_tint;
 pub mod prune;
 pub mod ragdoll;
 pub mod recipes;
+pub mod reflect;
 pub mod render_lod;
 pub mod rng;
 pub mod save;

@@ -60,7 +60,7 @@ pub fn connect_attr(name: &str) -> String {
 }
 
 /// Alvo de uma conexão: uma entidade por nome, ou todos os membros de um grupo.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bevy::prelude::Reflect)]
 pub enum ConnTarget {
     Name(String),
     Group(String),
@@ -76,7 +76,7 @@ impl fmt::Display for ConnTarget {
 }
 
 /// Uma ligação `alvo:método` de um sinal.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bevy::prelude::Reflect)]
 pub struct Connection {
     pub target: ConnTarget,
     pub method: String,

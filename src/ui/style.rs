@@ -32,7 +32,7 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 use super::palette;
 
 /// Interaction state a rule can be scoped to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum StyleState {
     /// Applies always.
     #[default]
@@ -50,7 +50,7 @@ pub enum StyleState {
 ///
 /// Empty everywhere means `*`. Pseudo-classes compound: `.btn:hover:focus` é
 /// hover E foco ao mesmo tempo.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Reflect)]
 pub struct Compound {
     pub tag: Option<String>,
     pub classes: Vec<String>,
@@ -71,7 +71,7 @@ pub struct Compound {
 }
 
 /// Posição entre irmãos que um composto pode exigir.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum Position {
     FirstChild,
     LastChild,
@@ -180,7 +180,7 @@ pub struct ElementRef<'a> {
 }
 
 /// Como um composto se liga ao anterior num selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum Combinator {
     /// Espaço — descendente a qualquer profundidade.
     #[default]
@@ -197,7 +197,7 @@ pub enum Combinator {
 /// Sibling (`+`/`~`) and attribute (`[…]`) combinators remain deliberately
 /// absent: descendant + child + classes has covered every rule the examples
 /// needed without the cost of a real selector engine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Reflect)]
 pub struct Selector {
     pub parts: Vec<Compound>,
     /// `parts.len() - 1` combinadores; `combinators[i]` liga `parts[i]` a
@@ -256,7 +256,7 @@ impl Selector {
 }
 
 /// A parsed `selector { declarations }` block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct Rule {
     pub selector: Selector,
     pub props: StyleProps,
@@ -276,7 +276,7 @@ pub struct Rule {
 /// Suporta `min-width`/`max-width`/`min-height`/`max-height` (píxeis lógicos),
 /// `min-aspect`/`max-aspect` (largura ÷ altura) e as palavras `portrait`
 /// (proporção < 1) e `landscape` (≥ 1), ligadas por `and`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
 pub struct MediaCond {
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
@@ -465,7 +465,7 @@ pub const DEFAULT_FONT_PX: f32 = 16.0;
 /// largura do pai, para `%`) no `resolve_viewport` — os píxeis da expressão
 /// falam o MESMO espaço (janela÷escala) que tudo o resto. Subconjunto do CSS
 /// documentado: número nu = px.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub enum Measure {
     Plain(Val),
     Expr(Expr),
@@ -488,7 +488,7 @@ impl Measure {
 
 /// Expressão aritmética de medidas — o subconjunto do `calc()` que um HUD
 /// precisa, com precedência normal e parêntesis.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub enum Expr {
     Px(f32),
     Vw(f32),
@@ -499,15 +499,26 @@ pub enum Expr {
     /// para width/padding/margin/gaps; um `height` com `%` em calc() é a
     /// divergência documentada).
     Percent(f32),
-    Add(Box<Expr>, Box<Expr>),
-    Sub(Box<Expr>, Box<Expr>),
+    Add(#[reflect(ignore)] Box<Expr>, #[reflect(ignore)] Box<Expr>),
+    Sub(#[reflect(ignore)] Box<Expr>, #[reflect(ignore)] Box<Expr>),
     /// CSS exige número × medida; aqui multiplica-se o que vier (subconjunto).
-    Mul(Box<Expr>, Box<Expr>),
-    Div(Box<Expr>, Box<Expr>),
+    Mul(#[reflect(ignore)] Box<Expr>, #[reflect(ignore)] Box<Expr>),
+    Div(#[reflect(ignore)] Box<Expr>, #[reflect(ignore)] Box<Expr>),
     Min(Vec<Expr>),
     Max(Vec<Expr>),
     /// `clamp(min, valor, max)`.
-    Clamp(Box<Expr>, Box<Expr>, Box<Expr>),
+    Clamp(
+        #[reflect(ignore)] Box<Expr>,
+        #[reflect(ignore)] Box<Expr>,
+        #[reflect(ignore)] Box<Expr>,
+    ),
+}
+
+impl Default for Expr {
+    /// Só para o `FromReflect` dos campos recursivos ignorados.
+    fn default() -> Self {
+        Self::Px(0.0)
+    }
 }
 
 impl Expr {
@@ -779,7 +790,7 @@ impl ExprParser<'_> {
 
 /// This is a *patch*, not a full style: rules are merged in cascade order and
 /// only the fields a rule mentions overwrite the ones below it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
 pub struct StyleProps {
     // ── layout ──────────────────────────────────────────────────────────
     pub display: Option<Display>,
@@ -903,7 +914,7 @@ pub struct StyleProps {
 }
 
 /// Uma entrada de `transition: <prop> <duração> [easing] [atraso]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct TransitionSpec {
     pub property: super::tween::StyleField,
     pub duration: f32,
@@ -912,7 +923,7 @@ pub struct TransitionSpec {
 }
 
 /// Quantas vezes uma `animation` corre.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum Iterations {
     Count(f32),
     Infinite,
@@ -920,7 +931,7 @@ pub enum Iterations {
 
 /// A spec de `animation: <nome> <duração> [easing] [atraso] [infinite|n]
 /// [alternate] [reverse] [forwards]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct AnimationSpec {
     pub name: String,
     pub duration: f32,
@@ -933,7 +944,7 @@ pub struct AnimationSpec {
 }
 
 /// Um frame de `@keyframes`: offset 0..1 + as declarações desse ponto.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Keyframe {
     pub offset: f32,
     pub props: StyleProps,
@@ -941,7 +952,7 @@ pub struct Keyframe {
 
 /// Um bloco `@keyframes nome { … }` — associado à folha que o declarou
 /// (mesmo scoping das regras).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Keyframes {
     pub name: String,
     pub frames: Vec<Keyframe>,
@@ -949,14 +960,14 @@ pub struct Keyframes {
 }
 
 /// Espaçamento entre letras: píxeis absolutos ou fração da fonte (`0.1em`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum LetterSpacingSpec {
     Px(f32),
     Em(f32),
 }
 
 /// Transformação de caixa do texto (`text-transform`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum TextTransform {
     Uppercase,
     Lowercase,
@@ -964,7 +975,7 @@ pub enum TextTransform {
 }
 
 /// Omissão de transbordo do texto.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum TextOverflowKind {
     /// Trunca com `…` quando o texto não cabe na largura da caixa.
     Ellipsis,
@@ -1000,7 +1011,7 @@ impl TextTransform {
 /// Gradiente autoral — o subconjunto do CSS que o `BackgroundGradient` da
 /// Bevy pinta: linear (ângulo + stops) e radial (forma + stops). Os stops sem
 /// posição ficam espaçados uniformemente pela Bevy, como no browser.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub enum GradientSpec {
     Linear {
         /// Graus CSS: 0 = para cima, 90 = para a direita (`to right`).
@@ -1016,7 +1027,7 @@ pub enum GradientSpec {
 }
 
 /// Um stop: cor + posição opcional (`red 30%`, `#fff 40px`, `blue`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct GradientStop {
     pub color: Color,
     pub point: Option<Val>,
@@ -1024,7 +1035,7 @@ pub struct GradientStop {
 
 /// Estado de um sublinhado/riscado: desligado, ligado com a cor do texto, ou
 /// ligado com cor própria.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum Decoration {
     Off,
     On(Option<Color>),
@@ -1334,7 +1345,8 @@ impl StyleProps {
 /// lhe foram atribuídas no build (ver `UiRootSheets`), como uma shadow-DOM
 /// vê só os seus estilos. Sem isso, uma classe comum a duas folhas (`.empty`
 /// do menu vs. um slot do HUD) vaza de uma para a outra.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct StyleSheet {
     pub rules: Vec<Rule>,
     /// Blocos `@keyframes` declarados (mesma folha/scoping das regras).
@@ -2163,7 +2175,7 @@ fn apply_declaration(props: &mut StyleProps, name: &str, value: &str) -> bool {
 /// The HUD has to stay legible over a white desert and a black forest at the
 /// same time, and a 1 px dark offset does that for a fraction of the cost of an
 /// outlined font.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct TextShadowSpec {
     pub offset: Vec2,
     pub color: Color,
@@ -2172,7 +2184,7 @@ pub struct TextShadowSpec {
 /// `outline: <width> <colour>` — desenhado FORA da borda pelo bevy_ui
 /// (`Outline`), é o rim que separa a forma do fundo sem engrossar a
 /// própria borda.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct OutlineSpec {
     pub width: f32,
     pub color: Color,

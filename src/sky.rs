@@ -67,7 +67,7 @@ const CONFIG_END: &str = "// === END WORLD CONFIG ===";
 /// (comportamento histórico), `nishita` é o scattering físico do
 /// `bevy_atmosphere` ([`crate::sky_nishita`]) com as mesmas features por
 /// cima. O `VIBER_SKY_MODEL` sobrepõe o attr do XML.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum SkyModel {
     #[default]
     Analytic,
@@ -87,7 +87,8 @@ impl SkyModel {
 /// O modelo do mundo em runtime, para o IBL ([`crate::ibl`]) saber que
 /// radiância pintar no cubemap. Inserido como resource no `run` depois da
 /// resolução do attr + env.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct SkyModelState {
     pub model: SkyModel,
     pub nishita: crate::sky_nishita::NishitaModel,
@@ -165,7 +166,8 @@ impl Default for SkyModelState {
 }
 
 /// Marker for the sky dome entity.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct SkyDome;
 
 /// Estado per-frame do céu, empacotado para o shader.

@@ -22,17 +22,32 @@ use bevy::prelude::*;
 use bevy::remote::{BrpError, BrpResult, RemoteMethodSystemId, RemoteMethods};
 use serde_json::Value;
 
+/// `SystemId` de preenchimento para o `FromReflect` (campos ignorados).
+fn idle_system_id<I: bevy::ecs::system::SystemInput, O>() -> SystemId<I, O> {
+    SystemId::from_entity(Entity::PLACEHOLDER)
+}
+
 /// Os ids dos sistemas builtin ORIGINAIS, guardados para os shims invocarem.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ForkCompat {
+    #[reflect(ignore, default = "idle_system_id")]
     query: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     get_components: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     insert_components: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     remove_components: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     mutate_components: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     spawn_entity: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     despawn_entity: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     reparent_entities: SystemId<In<Option<Value>>, BrpResult>,
+    #[reflect(ignore, default = "idle_system_id")]
     list_components: SystemId<In<Option<Value>>, BrpResult>,
 }
 

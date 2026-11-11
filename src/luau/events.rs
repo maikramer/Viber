@@ -21,7 +21,7 @@ pub const EVENT_QUEUE_CAP: usize = 64;
 /// `luau_update` fan-out para as filas por-path (cada script que chamou
 /// `viber.events()` pelo menos uma vez) e o script drena com
 /// `viber.events()` → array `{type=..., ...}`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub enum ScriptGameEvent {
     /// Criatura morreu (`kill_creature` do melee, ou HP de entidade a zero
     /// por `viber.entity_damage`). `name` = nome da entidade; `entity` = bits.
@@ -134,7 +134,8 @@ impl ScriptGameEvent {
 /// Fila de entrada dos eventos engine→Lua (producers → `luau_update`). Os
 /// produtores usam `Option<ResMut>`: apps mínimas de teste sem o recurso
 /// continuam a compilar e a correr.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ScriptEventQueue(pub Vec<ScriptGameEvent>);
 
 impl ScriptEventQueue {

@@ -40,6 +40,7 @@ pub mod host;
 pub mod input;
 pub mod nlu;
 pub mod decision;
+pub mod ecs;
 pub mod ownership;
 pub mod props;
 pub mod runtime;
@@ -88,8 +89,28 @@ impl Default for LuauScriptPlugin {
 
 impl bevy::app::Plugin for LuauScriptPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        let host = LuaScriptHost::new(self.scripts_dir.clone())
+        let mut host = LuaScriptHost::new(self.scripts_dir.clone())
             .expect("failed to initialize Luau VM (LuaScriptHost)");
+        // `viber.ecs`: o registo de tipos da app (a whitelist é validada
+        // contra ele) e o pool de entidades vazias para `viber.ecs.spawn`.
+        // O `Arc` do registo é partilhado: o `ReflectPlugin` pode registar
+        // mais tipos depois deste plugin ser construído.
+        if let Some(registry) = app.world().get_resource::<bevy::ecs::reflect::AppTypeRegistry>() {
+            host.set_ecs_registry(registry.0.clone());
+        }
+        let spawn_queue = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        host.set_ecs_pool(spawn_queue.clone());
+        app.insert_resource(ecs::EcsSpawnPool::new(spawn_queue));
+        app.init_resource::<ecs::EcsMirror>();
+        app.add_systems(
+            Update,
+            // Antes de qualquer `on_update`: o espelho é o snapshot que
+            // `viber.ecs.get/query` leem no frame. Exclusivo (precisa do
+            // `&mut World` para a travessia por arquétipo/reflexão).
+            ecs::mirror_system
+                .before(luau_on_add)
+                .run_if(crate::app::scripts_enabled),
+        );
         // Garante o clock mesmo sem TimePlugin (plugin autossuficiente em apps mínimos).
         app.init_resource::<Time>();
         // Input para `viber.interacted` + evento de toasts de script.
@@ -118,6 +139,9 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         app.init_resource::<crate::attachment::AttachmentSlots>();
         // Posse de sistemas nativos por scripts (`viber.own_system`).
         app.init_resource::<ScriptSystemOwners>();
+        // Nomes aceites-por-compatibilidade que já não têm handler nativo:
+        // avisa 1× em vez de aceitar em silêncio.
+        app.add_systems(Update, ownership::warn_dead_system_claims);
         // Fila de spawns de prototypes (viber.spawn_prototype) — consumida
         // pelo sistema exclusivo registado no `run`; sem ele os pedidos
         // acumulam aqui (bounded pelos pedidos do jogo).

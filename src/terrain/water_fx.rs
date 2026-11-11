@@ -77,7 +77,8 @@ const _: () = {
 
 /// Anything that should splash. Inserted by [`tag_swimmers`] on the hero and
 /// on every AI creature; also fine to add by hand.
-#[derive(Debug, Clone, Component, Default)]
+#[derive(Debug, Clone, Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct WaterContact {
     /// Submerged on the previous tick.
     pub wet: bool,
@@ -88,7 +89,8 @@ pub struct WaterContact {
 }
 
 /// One expanding surface ring.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct Ripple {
     pub age: f32,
     pub life: f32,
@@ -97,7 +99,8 @@ pub struct Ripple {
 }
 
 /// Shared ring mesh + a cheap way to make ripple materials.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct RippleAssets {
     pub mesh: Handle<Mesh>,
     /// Materiais dos anéis RECICLADOS. Cada anel anima o SEU alpha (o fade é

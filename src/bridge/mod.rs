@@ -71,10 +71,14 @@ pub const METHOD_PICK: &str = "viber.pick";
 pub const METHOD_SELECT: &str = "viber.select";
 
 /// Estado partilhado entre os handlers BRP (PreUpdate) e os sistemas (Update).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct BridgeShared {
+    #[reflect(ignore)]
     pub captures: Arc<Mutex<CaptureStore>>,
+    #[reflect(ignore)]
     pub bursts: Arc<Mutex<burst::BurstStore>>,
+    #[reflect(ignore)]
     pub logs: Arc<Mutex<VecDeque<logs::LogEntry>>>,
 }
 
@@ -92,7 +96,8 @@ impl BridgeShared {
 /// e devolvida no `viber.ping`. O cliente `viber debug --world` valida-a
 /// contra o `engine.json` para apanhar um registo stale (a porta passou a
 /// pertencer a outra engine — sem isto, comandos iam para o mundo errado).
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct BridgeIdentity {
     pub world: String,
 }
@@ -312,7 +317,8 @@ impl Plugin for BridgePlugin {
 /// EXATAMENTE N frames à speed 1 e fica pausado. A op aplica-se em
 /// `RemoteLast`, depois do `PostUpdate` desse frame, por isso o orçamento
 /// começa no Update seguinte — `skip` fica desligado.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct FrameStepper {
     pub remaining: u32,
     /// Speed a restaurar pelo `play` — `None` até o primeiro `step` da
@@ -353,7 +359,8 @@ fn frame_stepper_system(world: &mut World) {
 
 /// Clique sintético em curso: o PRESS à espera de injecção e o botão a
 /// libertar no frame seguinte — ver [`deferred_mouse_release`].
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 struct PendingMouseClick {
     press: Option<(f32, f32, MouseButton)>,
     release: Option<MouseButton>,

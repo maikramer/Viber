@@ -13,7 +13,8 @@ pub const HIT_STOP_KILL: f32 = 0.09;
 
 /// Hit-stop em curso (tempo REAL; o resto do mundo corre a
 /// [`HIT_STOP_SCALE`] da velocidade).
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct HitStop {
     pub timer: f32,
 }
@@ -23,7 +24,8 @@ pub struct HitStop {
 /// [`hit_stop_system`] compõe `relative_speed = base × hit_stop_scale`
 /// enquanto há hit-stop e não escreve nada fora dele — assim a base escolhida
 /// por outra via persiste.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct BaseTimeScale(pub f32);
 
 impl Default for BaseTimeScale {

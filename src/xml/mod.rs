@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 /// Tag and attribute names are preserved exactly as written; recipe matching
 /// lowercases them. Attribute values stay strings until a recipe interprets
 /// them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bevy::prelude::Reflect)]
 pub struct XmlNode {
     pub tag: String,
     pub attrs: Vec<(String, String)>,
@@ -30,6 +30,7 @@ pub struct XmlNode {
     /// [`include::load_world`]. Atravessa a expansão de includes até ao spawn, e é o que
     /// liga uma entidade viva ao nó XML que a declarou (`crate::scene`). `None` em nós
     /// criados por código.
+    #[reflect(ignore)]
     pub origin: Option<std::sync::Arc<NodeOrigin>>,
 }
 
@@ -45,12 +46,21 @@ impl PartialEq for XmlNode {
 }
 
 /// Posição de um nó no seu ficheiro de origem.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bevy::prelude::Reflect)]
 pub struct NodeOrigin {
     /// Caminho canónico do ficheiro.
     pub file: std::sync::Arc<Path>,
     /// Índices de filhos a partir do elemento raiz (vazio = o próprio raiz).
     pub path: Vec<u32>,
+}
+
+impl Default for NodeOrigin {
+    fn default() -> Self {
+        Self {
+            file: std::sync::Arc::from(Path::new("")),
+            path: Vec::new(),
+        }
+    }
 }
 
 /// Carimba `origin` em todos os nós de um ficheiro acabado de ler.
@@ -80,7 +90,7 @@ impl XmlNode {
 }
 
 /// A parsed document: the root element plus its expanded children.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bevy::prelude::Reflect)]
 pub struct XmlDocument {
     /// Root tag, lowercased (`world`, `scene`, …).
     pub root_tag: String,

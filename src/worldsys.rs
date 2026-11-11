@@ -10,7 +10,8 @@ use bevy::math::Vec3;
 use bevy::prelude::*;
 
 /// `<DayCycle>` clock: advances minute-of-day and ramps the ambient light.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct DayCycleState {
     pub minute_of_day: f32,
     pub minutes_per_real_second: f32,
@@ -124,7 +125,8 @@ pub fn daylight_factor(minute: f32, dawn: f32, dusk: f32) -> f32 {
 /// Com `cycle` a falso é estática como autorada (backwards compat); com
 /// `cycle` a verdadeiro o [`weather_drive`] rola novos alvos e faz o lerp
 /// de [`WEATHER_TRANSITION_SECS`].
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct WeatherState {
     pub wind: [f32; 2],
     pub wind_strength: f32,
@@ -145,7 +147,8 @@ pub const WEATHER_TRANSITION_SECS: f32 = 10.0;
 
 /// Estado do scheduler do `<Weather cycle>` — criado preguiçosamente pelo
 /// [`weather_drive`] quando o mundo declara o ciclo.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct WeatherScheduler {
     /// Seed do mundo (a do `<Terrain>`, 0 sem terreno) — "mesma seed, mesmo
     /// mundo" é lei: o k-ésimo ciclo produz SEMPRE o mesmo alvo.
@@ -266,7 +269,8 @@ pub fn rain_scale_at(regions: Option<&BiomeRegions>, x: f32, z: f32) -> Option<f
 }
 
 /// `<BiomeRegion>` polygon + fog/tint data (fog rendering follow-up).
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct BiomeRegionData {
     pub id: String,
     /// `display-name`: nome de exposição da zona no HUD (`zone.name`).
@@ -289,13 +293,15 @@ pub struct BiomeRegionData {
 }
 
 /// Todas as `<BiomeRegion>` do mundo (loop 9: fog/tint por bioma).
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct BiomeRegions {
     pub list: Vec<BiomeRegionData>,
 }
 
 /// `<WorldBorder>` config.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct WorldBorderConfig {
     pub radius: f32,
     pub warn_seconds: f32,
@@ -303,7 +309,8 @@ pub struct WorldBorderConfig {
 }
 
 /// Generic engine config element kept as raw data.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct EngineConfigData {
     pub tag: String,
     pub attrs: Vec<(String, String)>,
@@ -331,7 +338,8 @@ impl EngineConfigData {
 /// One resource for all of them: a world declares `<NavMesh>`, `<SpawnGate>`,
 /// `<PostFxDebugToggle>`… side by side (and `<ProjectileTemplate>` many
 /// times), so a resource per element would keep only the last one.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct EngineConfigs {
     pub list: Vec<EngineConfigData>,
 }
@@ -349,7 +357,8 @@ impl EngineConfigs {
 }
 
 /// Deferred world-system requests collected while spawning entities.
-#[derive(Debug, Resource, Default)]
+#[derive(Debug, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct PendingWorldSystems {
     pub day_cycle: Option<DayCycleState>,
     pub weather: Option<WeatherState>,
@@ -374,7 +383,8 @@ pub struct PendingWorldSystems {
 /// `world_size/2`), onde o terreno já não gera colunas nem colliders — ver
 /// `TerrainRuntime::in_field`. A distância faz o resto: conteúdo a >2 km não
 /// entra em render-distance, em cull-distance nem em raio de ativação.
-#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Resource)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct InteriorSceneConfig {
     /// Canto mínimo do retângulo (XZ, metros).
     pub min: [f32; 2],
@@ -404,7 +414,8 @@ pub struct InteriorSceneConfig {
 /// do mundo lá fora não faz sentido nenhum e tirava a leitura toda (pedido do
 /// utilizador 2026-09-13: "desligar o escurecimento da noite, deixar só luz do
 /// ambiente"). Enquanto o herói está na bolsa: ambiente FIXO e tint de dia.
-#[derive(Debug, Resource, Default, Clone, Copy)]
+#[derive(Debug, Resource, Default, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct InteriorLighting {
     /// O herói está dentro de uma bolsa de interior.
     pub active: bool,
@@ -579,7 +590,8 @@ impl PendingWorldSystems {
 
 /// Marks entities authored at y≈0 that must sit on the terrain surface once
 /// the carved world exists (the original engine seated statics via CCT).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct SeatOnTerrain;
 
 /// Marcador de "assenta como UNIDADE": em cima de [`SeatOnTerrain`], força o
@@ -587,7 +599,8 @@ pub struct SeatOnTerrain;
 /// [`SEAT_CENTER_MAX_EXTENT_M`] — é o contrato das `<Composition>` (um
 /// objeto inteiro nunca é partido em partes para assentar; uma caixa de
 /// 240 m continua a subir em bloco).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct SeatAsUnit;
 
 /// One-shot: seat authored groups on the carved terrain surface.
@@ -751,6 +764,14 @@ fn seat_group(
 /// seat escreve a cota do chão como Y LOCAL; dentro de um grupo elevado ou de
 /// um `<Include translation>`, escrever o Y mundo somava o offset do pai (a
 /// cena subia uma segunda vez).
+///
+/// ASSUNÇÃO: hierarquia só com TRANSLATION (rotação/escala identidade) — a
+/// convenção de todos os grupos autorais. Por isso se somam os
+/// `Transform::translation.y` locais e não se lê `GlobalTransform`: o seat
+/// escreve os `Transform` no mesmo frame (a propagação ainda não correu) e
+/// um `TransformHelper` colidiria com o `&mut Transform` desta query. Com
+/// rotação/escala, o offset certo seria `parent_global * local`, não a soma
+/// dos Y.
 fn ancestor_world_y(
     entity: Entity,
     parents: &Query<(Entity, &ChildOf)>,
@@ -847,7 +868,8 @@ fn has_seated_ancestor(
 /// - a cota é definida exatamente (sobe E desce), não apenas para cima;
 /// - `align-to-terrain` orienta o +Y do objeto à normal do terreno
 ///   (yaw autoral preservado) — cadeiras numa ladeira assentam na ladeira.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct PendingPlace {
     /// Ponto de amostragem em XZ mundo.
     pub at: Vec2,
@@ -990,14 +1012,16 @@ pub const MOON_COLOR: [f32; 3] = [0.40, 0.54, 0.86];
 
 /// Iluminância/cor que o mundo autorou para uma `DirectionalLight`, capturada
 /// antes de [`sun_drive`] começar a escrevê-las.
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct SunLightBase {
     pub illuminance: f32,
     pub color: Color,
 }
 
 /// Posição do sol (e estado dia/noite) calculada a partir do relógio.
-#[derive(Debug, Clone, Copy, Resource, Default)]
+#[derive(Debug, Clone, Copy, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct SunState {
     /// Direção PARA o sol, normalizada (mundo, Y-up).
     pub dir: Vec3,
@@ -1301,7 +1325,8 @@ const SUN_TINT_LOW: Rgb = [1.0, 0.46, 0.14];
 const MOON_TINT: Rgb = [0.62, 0.72, 1.0];
 
 /// Paleta atmosférica da hora corrente — publicada por [`atmosphere_drive`].
-#[derive(Debug, Clone, Copy, Resource)]
+#[derive(Debug, Clone, Copy, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct AtmosphereState {
     /// Direção PARA o sol (mundo, Y-up) — a astronómica, pode estar abaixo.
     pub sun_dir: Vec3,

@@ -11,36 +11,43 @@ use crate::recipes::spawn::OrbitCamera;
 use crate::terrain::runtime::TerrainRuntime;
 
 /// The minimap player arrow (rotation mirrors the camera heading).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapArrow;
 
 /// A quest dot on the minimap (positioned at a nearby NPC's world spot).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapDot;
 
 /// The signed landmark ("A Nota", `travel::Waypoint`): an anchor pinned to
 /// the map (clamped to the rim when the landmark is out of range).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapAnchor;
 
 /// The baked terrain underlay (one `ImageNode` child of the map panel).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapTerrain;
 
 /// Um hostil próximo no mapa.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapThreat;
 
 /// Marco da Nota disponível (atalaia ou bioma revelado) no minimapa —
 /// losango de tinta-teal, vocabulário distinto do pin dourado (waypoint
 /// assinado) e do "!" (quest). Pool fixo, alimentado por
 /// `travel::LandmarkBlips`.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapLandmark;
 
 /// Atalaia de agrimensura no minimapa — maior e mais brilhante que o marco
 /// comum: é o "vai aí" que estrutura a exploração.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapTower;
 
 /// Quantos blips de marcos/atalaias o painel desenha (mais perto 1.º).
@@ -161,7 +168,8 @@ fn bake_terrain_image(runtime: &TerrainRuntime) -> Image {
 }
 
 /// Radius of the minimap in world meters (authored `range` attribute).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct MinimapRange(pub f32);
 
 /// Minimap position (UI px offsets from the map center) for a world delta

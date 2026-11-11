@@ -16,12 +16,13 @@ use super::components::LuaScriptRef;
 use super::host::{ContactHook, LuaScriptHost};
 
 /// Par (dono do script, outra entidade) ainda em contacto.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ContactBook {
     pairs: HashMap<(Entity, Entity), LivePair>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Reflect)]
 struct LivePair {
     event: bool,
     controller: bool,

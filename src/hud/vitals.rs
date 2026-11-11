@@ -5,11 +5,13 @@ use bevy::prelude::*;
 use crate::vitals::{Health, health_fraction};
 
 /// Marker for the healthbar fill node (width mirrors the player's `Health`).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct HudHealthFill;
 
 /// Marker for the healthbar label node ("100/100").
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct HudHealthLabel;
 
 /// Label text for the healthbar ("{cur}/{max}", hp rounded for display).

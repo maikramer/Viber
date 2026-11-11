@@ -890,7 +890,8 @@ pub fn soft_sprite_image() -> Image {
 }
 
 /// Handle partilhado do sprite (criado uma vez por processo).
-#[derive(Debug, Resource)]
+#[derive(Debug, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ParticleSprite {
     pub texture: Handle<Image>,
 }
@@ -898,7 +899,8 @@ pub struct ParticleSprite {
 /// Marca emissores cujo material já recebeu o sprite (o `spawn_*` não tem
 /// `Assets<Image>` — assinaturas estáveis, o WS-D chama-as — por isso o bind
 /// é post-hoc, um frame depois do spawn no pior caso: impercetível).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub(crate) struct SpriteBound;
 
 /// Liga o sprite radial ao material de cada emissor ainda não marcado.
@@ -988,8 +990,10 @@ pub fn cull_state(distance: f32, previously_culled: bool) -> bool {
 }
 
 /// Per-emitter component: simulation state plus its mesh capacity.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component, from_reflect = false)]
 pub struct ParticleEmitter {
+    #[reflect(ignore)]
     pub sim: EmitterSim,
     pub capacity: usize,
     /// Set while the emitter is beyond [`EMITTER_CULL_DISTANCE`]; its mesh has
@@ -1124,7 +1128,8 @@ impl EmitterSim {
 }
 
 /// Burst em curso: despawna a entidade quando o timer esgota.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct ParticleBurst {
     pub timer: f32,
 }
@@ -1160,7 +1165,8 @@ fn mesh_bucket(requested: usize) -> usize {
 /// partilhadas — o `particle_emitter_update` reescreve a malha de cada
 /// emissor por frame) e há exactamente DOIS materiais (`Add` e `Blend` —
 /// `emitter_material` só depende de `resolved.additive`).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct BurstPool {
     meshes: std::collections::HashMap<usize, Vec<bevy::asset::Handle<bevy::mesh::Mesh>>>,
     material_add: Option<Handle<StandardMaterial>>,
@@ -1308,7 +1314,8 @@ pub fn spawn_looping_in_world(world: &mut World, spec: &ParticleSpec, position: 
 /// render; [`ambient_fx_manager`] monta/desmonta o bundle
 /// (`Mesh3d`/material/`Visibility`/`ParticleEmitter`) pela distância da
 /// câmara, com histerese.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct AmbientFx {
     pub spec: ParticleSpec,
 }

@@ -25,7 +25,7 @@ pub const SNAPSHOT_TAIL: usize = 256;
 const DAMAGE_PER_FRAME_CAP: usize = 32;
 
 /// Um evento de jogo estruturado.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct BridgeEvent {
     /// Monotónico por engine — o cursor do cliente (`--since`).
     pub seq: u64,
@@ -35,13 +35,16 @@ pub struct BridgeEvent {
     /// level-up, travel) vivem no Lua do jogo e não têm message na engine —
     /// NENHUM evento desses tipos é emitido (o `kind` é `&'static str`; um
     /// valor novo exige um produtor em [`collect_bridge_events`]).
+    #[reflect(ignore)]
     pub kind: &'static str,
+    #[reflect(ignore)]
     pub data: Json,
 }
 
 /// Ring partilhado (mesmo padrão do `logs` ring): escrito pelo coletor,
 /// lido pelo handler da REPL/BRP.
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct BridgeEventLog {
     buffer: VecDeque<BridgeEvent>,
     next_seq: u64,

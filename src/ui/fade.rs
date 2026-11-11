@@ -32,7 +32,8 @@ use super::runtime::{UiBind, UiStyleDirty};
 use super::script::UiScriptBinds;
 
 /// Fade state of one element (and, through inheritance, its subtree).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiFade {
     /// Seconds to go from invisible to fully drawn.
     pub in_secs: f32,

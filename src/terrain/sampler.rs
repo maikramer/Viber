@@ -28,7 +28,7 @@ const TEXEL_INFLUENCE_REACH: f32 = core::f32::consts::SQRT_2;
 const MIN_FALLOFF_TEXELS: f32 = 1.5;
 
 /// Resolved pad: the declarative spec with the auto height filled in.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, bevy::prelude::Reflect)]
 pub struct ResolvedPad {
     pub at: Vec2,
     pub size: Vec2,

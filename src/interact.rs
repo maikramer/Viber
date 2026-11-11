@@ -60,7 +60,8 @@ pub fn default_range() -> f32 {
 /// próxima do herói dentro do seu alcance.
 ///
 /// Uma tecla, um alvo: é o que faz `[E]` ser previsível numa praça cheia.
-#[derive(Resource, Default, Debug, Clone)]
+#[derive(Resource, Default, Debug, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct InteractionFocus {
     by_key: HashMap<KeyCode, (Entity, f32)>,
 }

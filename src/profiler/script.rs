@@ -30,9 +30,11 @@ const PUBLISH_INTERVAL: f32 = 0.25;
 
 /// Recurso partilhado entre as closures Lua e os sistemas da engine.
 /// Mesma forma do `UiScriptState`: clonável, locks sem contenção.
-#[derive(Clone, Default, Resource)]
+#[derive(Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ProfilerScriptState {
     /// Último snapshot publicado (`None` = modal fechado, nada a mostrar).
+    #[reflect(ignore)]
     pub view: Arc<Mutex<Option<Value>>>,
     /// Comandos enfileirados por `viber.profiler_cmd` (aplicados pós-frame).
     pub queue: Arc<Mutex<Vec<String>>>,
@@ -132,7 +134,8 @@ pub fn publish_profiler_view(world: &mut World) {
 }
 
 /// Throttle do publicador (o sistema é exclusivo; estado em recurso).
-#[derive(Default, Resource)]
+#[derive(Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PublishThrottle(pub f32);
 
 /// Aplica os comandos enfileirados por `viber.profiler_cmd` — pós-frame,

@@ -34,7 +34,7 @@ pub const CHEST_HEIGHT: f32 = 1.1;
 /// Altura da boca de disparo acima da origem do atirador.
 pub const MUZZLE_HEIGHT: f32 = 1.2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum Faction {
     /// Acerta o herói.
     Enemy,
@@ -44,7 +44,7 @@ pub enum Faction {
     Neutral,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct ProjectileTemplate {
     pub id: String,
     pub speed: f32,
@@ -135,11 +135,12 @@ impl ProjectileTemplate {
 }
 
 /// Os `<ProjectileTemplate>` do mundo, por `id`.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ProjectileTemplates(pub HashMap<String, ProjectileTemplate>);
 
 /// Um disparo pedido (por script) e ainda por nascer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct ProjectileRequest {
     pub template: String,
     /// Boca de disparo (mundo).
@@ -151,13 +152,15 @@ pub struct ProjectileRequest {
 }
 
 /// Fila de disparos (`viber.fire_projectile` → [`spawn_projectiles`]).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ProjectileQueue {
     pub requests: Vec<ProjectileRequest>,
 }
 
 /// Um projétil em voo.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct Projectile {
     pub vel: Vec3,
     pub life: f32,
@@ -270,7 +273,8 @@ fn install_templates(
 /// Resource (e não `Local`) para o `install_templates` o poder limpar na
 /// troca de cena: um mundo seguinte que redefine o mesmo `id` com outro
 /// tamanho/cor herdava a mesh/material antigos.
-#[derive(Default, bevy::prelude::Resource)]
+#[derive(Default, bevy::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 struct ProjectileVisuals(HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>);
 
 #[allow(clippy::too_many_arguments)]

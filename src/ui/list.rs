@@ -40,7 +40,8 @@ use crate::xml::XmlNode;
 pub type ListRow = HashMap<String, String>;
 
 /// Named list sources, fed by the engine or by scripts.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiLists {
     lists: HashMap<String, Vec<ListRow>>,
     /// Bumped whenever a list's content actually changes.
@@ -113,7 +114,8 @@ impl UiLists {
 
 /// A repeater element: rebuilds its children from `source` whenever the list
 /// version changes.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiList {
     /// Name of the list in [`UiLists`].
     pub source: String,

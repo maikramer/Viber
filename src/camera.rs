@@ -289,7 +289,8 @@ pub const SHAKE_MAX_ROLL: f32 = 0.03;
 /// Trauma acumulado (0..1). A amplitude é `trauma²` — golpes pequenos mal se
 /// leem, o finisher/KO abana a sério. Aditivo: `add_camera_shake` soma com
 /// clamp; vários pedidos no mesmo frame mantêm o mais forte via trauma alto.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CameraShake {
     pub trauma: f32,
 }
@@ -330,7 +331,8 @@ pub const FOV_KICK_IMPACT: f32 = 5.0;
 /// FOV kick em curso: graus extra sobre o FOV base da câmara. Pedidos por
 /// [`fov_kick`] (dash, land/kill do melee); consumidos por
 /// [`fov_kick_system`].
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CameraFx {
     kick: f32,
     peak: f32,
@@ -373,7 +375,8 @@ impl CameraFx {
 /// `ThirdPersonCamera`/`OrbitCamera` (o simple-rpg pede 64°) sem o assumir.
 /// `pub` só porque aparece na assinatura do sistema público; tratar como
 /// interno (o [`fov_kick_system`] é quem o cria e consome).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct BaseFov(pub(crate) f32);
 
 /// Aplica o kick ao FOV de todas as câmaras orbitais. Nada mais escreve o
@@ -421,7 +424,8 @@ pub const KICK_DAMPING: f32 = 14.0;
 /// golpe integrado por uma mola subamortecida — a câmara dá um solavanco
 /// para o alvo e regressa. Complemento do shake (ruído omnidirecional) e do
 /// FOV kick ([`CameraFx`]): o kick é o que faz o golpe "empurrar" a imagem.
-#[derive(Debug, Clone, Resource, Default)]
+#[derive(Debug, Clone, Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CameraKick {
     pub offset: Vec3,
     pub vel: Vec3,
@@ -678,7 +682,8 @@ pub fn third_person_camera(
 /// mapping): o modo livre só substitui a POSE que o `third_person_camera`
 /// escreveria, correndo depois dele. `active = false` devolve o controlo ao
 /// rig de terceira pessoa sem recriar entidades nem perder o look da cena.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct ScriptCameraFree {
     /// O script está a conduzir a câmara de jogo.
     pub active: bool,
@@ -704,7 +709,8 @@ impl Default for ScriptCameraFree {
 /// é `(sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)`, a convenção que o
 /// `camera_pose` de script usa. Atualizada todos os frames no
 /// [`script_camera`].
-#[derive(Debug, Clone, Copy, Resource)]
+#[derive(Debug, Clone, Copy, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct CameraSnapshot {
     pub pos: Vec3,
     pub yaw_deg: f32,

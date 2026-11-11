@@ -531,7 +531,7 @@ pub struct FallHint {
 /// névoa/spray (na base, escalados por [`Self::drop`]), o áudio
 /// (posição/força) e a anotação de parede (rio × cliff, feita no bootstrap
 /// quando a banda correspondente existe).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Reflect)]
 pub struct CascadeInfo {
     /// Estação LIP — onde a queda começa (borda de montante).
     pub lip: usize,
@@ -553,14 +553,14 @@ pub struct CascadeInfo {
 }
 
 /// Kind of a registered [`WaterBody`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bevy::prelude::Reflect)]
 pub enum WaterKind {
     Lake,
     River,
 }
 
 /// Query registry entry produced by every water carve.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, bevy::prelude::Reflect)]
 pub struct WaterBody {
     pub kind: WaterKind,
     /// Anchor point (lake center; river centroid).
@@ -783,7 +783,7 @@ impl WaterBody {
 /// outros ovais com baías e lóbulos. O contorno é RADIAL (star-shaped) de
 /// propósito: rim, mesh do espelho, pedras de margem, parede gorge, espuma e
 /// o audit amostram todos `r(θ)` — um contorno não-estrela partia-os.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Reflect)]
 pub struct LakeShape {
     /// Direção do alongamento (radianos).
     axis: f32,

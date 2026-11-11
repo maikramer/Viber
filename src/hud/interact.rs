@@ -4,14 +4,16 @@
 use bevy::prelude::*;
 
 /// Marker for the interaction prompt node (shown near a `<DialogueNPC>`).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct HudPrompt {
     /// Range in meters at which the prompt appears (authored on the tag).
     pub range: f32,
 }
 
 /// Dialogue balloon state (`E` near a `<DialogueNPC>` shows it for a while).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct HudBalloon {
     /// Seconds left before the balloon hides again.
     pub timer: f32,
@@ -23,11 +25,12 @@ pub const BALLOON_DURATION: f32 = 4.0;
 /// — valor AUTORADO; o efetivo sai de `interact::default_range()`.
 pub const BALLOON_RANGE_M: f32 = crate::interact::BASE_RANGE_M;
 
-/// Marker for nodes toggled by a key (e.g. `<TabbedModal key="q">`).
-#[derive(Component)]
+/// Marker for nodes toggled by a key (e.g. `<HudToggle key="q">`).
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct HudToggle(pub KeyCode);
 
-/// Toggle HUD elements with their authored key (e.g. TabbedModal on Q).
+/// Toggle HUD elements with their authored key.
 pub fn hud_toggle(
     keys: Res<ButtonInput<KeyCode>>,
     mut toggles: Query<(&mut Visibility, &HudToggle)>,

@@ -46,11 +46,13 @@ const INFLUENCE_MAX: f32 = 140.0;
 const INFLUENCE_HEIGHT: f32 = 45.0;
 
 /// Tint regional do probe (guardado para o repaint por fase do dia).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct ProbeTint([f32; 3]);
 
 /// Marcador dos probes regionais (o mundial do IBL não o tem).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct RegionalProbe;
 
 /// Gate: `VIBER_PROBES=0` desliga (default ON — caminho raster oficial).

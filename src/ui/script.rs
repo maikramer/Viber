@@ -34,7 +34,7 @@ use super::style::{StyleState, parse_declarations};
 use super::widgets::{UiCheck, UiFocusedInput, UiInput, normalized_range};
 
 /// A UI mutation queued by a script, applied once per frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub enum UiCommand {
     SetText {
         id: String,
@@ -132,18 +132,20 @@ pub enum UiCommand {
 /// `Arc<Mutex<…>>` rather than Lua app data: the UI API is installed onto a
 /// host owned by another module, so it cannot extend that module's context
 /// struct — and the lock is uncontended (scripts run on one thread).
-#[derive(Clone, Default, Resource)]
-pub struct UiCommandQueue(pub Arc<Mutex<Vec<UiCommand>>>);
+#[derive(Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
+pub struct UiCommandQueue(#[reflect(ignore)] pub Arc<Mutex<Vec<UiCommand>>>);
 
 /// Fila de CRIAÇÃO de elementos (`viber.ui.create`) — separada dos comandos
 /// porque só um sistema EXCLUSIVO pode construir a subárvore (o construtor
 /// da árvore declarativa lê recursos do `World` e spawna diretamente).
-#[derive(Clone, Default, Resource)]
-pub struct UiCreateQueue(pub Arc<Mutex<Vec<UiCreateSpec>>>);
+#[derive(Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
+pub struct UiCreateQueue(#[reflect(ignore)] pub Arc<Mutex<Vec<UiCreateSpec>>>);
 
 /// Um pedido de criação: um `XmlNode` sintético (mesmo caminho do XML!) e o
 /// id do pai onde entra (None = topo da cena UI).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct UiCreateSpec {
     pub node: crate::xml::XmlNode,
     pub parent: Option<String>,
@@ -152,8 +154,9 @@ pub struct UiCreateSpec {
 /// Fila de binds de script (`viber.ui.set`) — escrita no resource
 /// [`UiScriptBinds`] pelo apply, leitura pelos class-binds e por
 /// `get`/`number`.
-#[derive(Clone, Default, Resource)]
-pub struct UiBindQueue(pub Arc<Mutex<Vec<(String, ScriptBindValue)>>>);
+#[derive(Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
+pub struct UiBindQueue(#[reflect(ignore)] pub Arc<Mutex<Vec<(String, ScriptBindValue)>>>);
 
 impl UiBindQueue {
     fn push(&self, pair: (String, ScriptBindValue)) {
@@ -166,7 +169,7 @@ impl UiBindQueue {
 /// Um valor de bind vindo de Lua — guarda as três faces que os consumidores
 /// leem (texto para `bind=`/`get`, número para barras/`number`, flag para
 /// visibilidade/class-binds).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub enum ScriptBindValue {
     Text(String),
     Number(f64),
@@ -208,7 +211,8 @@ impl ScriptBindValue {
 
 /// Binds definidos por script — consultados DEPOIS do [`UiData`] (os nomes da
 /// engine vencem; colisão = warn 1× e recusa no `viber.ui.set`).
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiScriptBinds(pub HashMap<String, ScriptBindValue>);
 
 impl UiScriptBinds {
@@ -302,8 +306,10 @@ pub struct UiElementNode {
 }
 
 /// Resource wrapper so the snapshot can be refreshed from a system.
-#[derive(Clone, Default, Resource)]
+#[derive(Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiScriptState {
+    #[reflect(ignore)]
     pub view: UiScriptView,
     pub queue: UiCommandQueue,
     /// Criações de elementos (`viber.ui.create`) — consumidas pelo sistema

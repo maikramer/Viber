@@ -27,15 +27,18 @@ pub use super::style::{
 };
 
 /// Author-facing id (`id="hp-fill"`), unique per world.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiId(pub String);
 
 /// The element's XML tag, lowercased — what tag selectors match against.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTag(pub String);
 
 /// Class list (`class="chip gold"`), lowercased.
-#[derive(Debug, Clone, Default, Component)]
+#[derive(Debug, Clone, Default, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiClasses(pub Vec<String>);
 
 impl UiClasses {
@@ -82,7 +85,8 @@ impl UiClasses {
 
 /// Declarations from the element's own `style="…"` attribute, or pushed at
 /// runtime by a script. Highest precedence in the cascade.
-#[derive(Debug, Clone, Default, Component)]
+#[derive(Debug, Clone, Default, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiInlineStyle(pub StyleProps);
 
 /// Position of an element among its siblings, as authored.
@@ -91,17 +95,20 @@ pub struct UiInlineStyle(pub StyleProps);
 /// them, so a world that spawns and despawns while building hands them out in
 /// an arbitrary sequence. Anything that needs "the order the author wrote
 /// these in" (tab bars, keyboard navigation) reads this instead.
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiOrder(pub usize);
 
 /// Binds an element to a named engine value (`bind="health"`), fed each frame
 /// by [`crate::ui::bind`]. Bars take the 0..1 fraction, texts the formatted
 /// string, and any element can bind to a boolean to drive its visibility.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiBind(pub String);
 
 /// Marks an element whose style has to be recomputed on the next pass.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiStyleDirty;
 
 /// O estilo FINAL de um elemento — cascata + inline + viewport + herança já
@@ -110,7 +117,8 @@ pub struct UiStyleDirty;
 /// (via [`StyleProps::apply_inherited`]), na passada de aplicação — e o motor
 /// de motion (`ui::tween`) escreve aqui os valores interpolados, deixando o
 /// fan-out para os componentes por conta do re-estilo.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiComputed(pub super::style::StyleProps, pub f32);
 
 /// Folhas de estilo que alimentam ESTA raiz (índices [`StyleSheet::parse_into`]).
@@ -118,7 +126,8 @@ pub struct UiComputed(pub super::style::StyleProps, pub f32);
 /// Shadow-DOM-lite: uma regra só combina com elementos de raízes que carregam
 /// a folha que a produziu — o `.empty` do menu nunca volta a estilizar um slot
 /// do HUD. Raízes sem este componente veem TUDO (compatibilidade).
-#[derive(Debug, Clone, Component, Default)]
+#[derive(Debug, Clone, Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct UiRootSheets(pub Vec<usize>);
 
 /// Fonte computada em px, se houver (`Measure::Plain(Val::Px)` pós-resolução).
@@ -153,12 +162,14 @@ fn resolve_relative_font(
 
 /// Marks an element scripts have flagged as disabled (`:disabled` rules, and
 /// clicks are swallowed).
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiDisabled;
 
 /// Marks an element with `pointer-events: none`: no `:hover` state, no clicks,
 /// no tooltips — the pointer goes through it.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiPointerNone;
 
 /// Decorative nodes must explicitly pass focus: Bevy treats an absent policy
@@ -192,7 +203,8 @@ pub(super) fn ui_pickable(
 }
 
 /// A progress bar: `value` in 0..1 drives the width of the `fill` child.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiBar {
     pub value: f32,
     pub fill: Entity,
@@ -202,7 +214,8 @@ pub struct UiBar {
 
 /// A radial-style cooldown veil: `value` 0..1 is the *remaining* fraction and
 /// drives the height of an overlay that wipes downward.
-#[derive(Debug, Component)]
+#[derive(Debug, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiCooldown {
     pub value: f32,
     pub veil: Entity,
@@ -210,12 +223,14 @@ pub struct UiCooldown {
 
 /// Clicks observed on an element this frame, keyed by id — drained by scripts
 /// through `viber.ui.clicked(id)`.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiClicks(pub Vec<String>);
 
 /// Maps author ids to entities so scripts (and engine systems) can address
 /// elements by name.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct UiRegistry {
     pub by_id: HashMap<String, Entity>,
 }
@@ -229,7 +244,8 @@ impl UiRegistry {
 /// Editor state PREVIEW: when present, overrides the interaction state in the
 /// cascade so `:hover`/`:active` styles can be previewed without a pointer.
 /// Only the editor's UI canvas sets it; the game never does.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct UiPreviewState(pub StyleState);
 
 /// Interaction state of an element, from its `Interaction` and `UiDisabled`.
@@ -301,7 +317,8 @@ type PaintQuery<'w, 's> = Query<
 /// forma transformada no `Text` e guarda aqui o que o autor (ou script)
 /// escreveu. `written` é a última coisa que O ESPELHO escreveu: qualquer
 /// divergência entre `Text` e `written` é escrita externa (novo original).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTextMirror {
     pub original: String,
     pub written: String,
@@ -1002,7 +1019,8 @@ fn to_bevy_gradient(spec: &GradientSpec, opacity: f32) -> bevy::ui::Gradient {
 /// O texto completo de um elemento com `text-overflow: ellipsis`, a truncagem
 /// em curso e a largura de conteúdo medida do texto COMPLETO (para saber
 /// restaurar quando a caixa cresce).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTextOverflowMirror {
     pub full: String,
     /// A última coisa que ESTE sistema escreveu — divergência = escrita

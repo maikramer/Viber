@@ -13,6 +13,8 @@
 //! * [`interact`] — prompt, dialogue balloon, key-toggled panels;
 //! * [`compass`] / [`minimap`] — the animated widgets.
 
+use bevy::ecs::reflect::{ReflectComponent, ReflectResource};
+
 pub mod assets;
 pub mod compass;
 pub mod elements;
@@ -29,7 +31,7 @@ pub use compass::{
     CompassDistance, CompassLetter, CompassTick, compass_offset_px, heading_bearing_deg,
     sector_distance, world_bearing_deg,
 };
-pub use elements::{spawn_hud, spawn_resource_chip};
+pub use elements::spawn_hud;
 pub use interact::{
     BALLOON_DURATION, BALLOON_RANGE_M, HudBalloon, HudPrompt, HudToggle, apply_subtitle_scale,
     balloon_tick, hud_balloon_update, hud_toggle,
@@ -44,7 +46,8 @@ pub use vitals::{HudHealthFill, HudHealthLabel, health_label_text, hud_health_sy
 /// Painéis do HUD que só fazem sentido no MUNDO aberto (bússola, minimapa):
 /// dentro de uma sala da bolsa de interior mostravam distâncias de 2,6 km e
 /// um mapa vazio.
-#[derive(bevy::prelude::Component, Debug, Clone, Copy, Default)]
+#[derive(bevy::prelude::Component, Debug, Clone, Copy, Default, bevy::prelude::Reflect)]
+#[reflect(Component)]
 pub struct HideInInterior;
 
 /// HUD suprimido por script (`viber.ui.set_visible("hud", false)`).
@@ -52,7 +55,8 @@ pub struct HideInInterior;
 /// O `#hud` declarativo é só uma parte do HUD: minimapa, bússola e seta são
 /// widgets NATIVOS. O título/morte escondem o HUD inteiro; sem isto os
 /// widgets nativos ficavam por cima do véu.
-#[derive(bevy::prelude::Resource, Debug, Clone, Copy, Default)]
+#[derive(bevy::prelude::Resource, Debug, Clone, Copy, Default, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct HudHidden(pub bool);
 
 /// Esconde/repõe os [`HideInInterior`] quando o herói entra/sai de um interior —

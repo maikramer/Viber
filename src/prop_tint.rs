@@ -30,7 +30,8 @@ use crate::grass::day_tint;
 use crate::profiler::{Group, timed};
 
 /// Originais de albedo capturados por material + último tint aplicado.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 struct PropTintState {
     originals: HashMap<AssetId<StandardMaterial>, LinearRgba>,
     last_tint: Option<[f32; 3]>,
@@ -63,7 +64,8 @@ impl Plugin for PropTintPlugin {
 /// Marcador inserido pelo spawn quando a URL do glTF contém "crystal"/"glass"
 /// — os materiais da cena ganham transmissão especular quando o glTF carrega
 /// (cristais que refratam o mundo + refletem o IBL do céu).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct TransmissiveGltf;
 
 /// Patch UMA VEZ por material dos glTFs marcados: `specular_transmission`

@@ -53,7 +53,7 @@ pub const NISHITA_GAIN: f32 = 0.2;
 pub const NIGHT_FLOOR: f32 = 0.06;
 
 /// Instância do modelo com os coeficientes já escalados pelo mundo.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Reflect)]
 pub struct NishitaModel {
     /// Coeficiente Rayleigh (1/m, RGB), já multiplicado pelo attr `rayleigh`.
     pub rayleigh: [f32; 3],

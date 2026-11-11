@@ -39,7 +39,7 @@ use crate::xml::values::parse_vec3;
 // ── dados ───────────────────────────────────────────────────────────────
 
 /// Curva de um plano.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum Ease {
     Linear,
     In,
@@ -83,7 +83,7 @@ impl Ease {
 }
 
 /// Referencial das posições de um plano.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Reflect)]
 pub enum Anchor {
     World,
     Player,
@@ -113,7 +113,7 @@ impl Anchor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Shot {
     pub start: f32,
     pub duration: f32,
@@ -126,7 +126,7 @@ pub struct Shot {
     pub fov: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Line {
     pub at: f32,
     pub duration: f32,
@@ -134,7 +134,7 @@ pub struct Line {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct TitleCard {
     pub at: f32,
     pub duration: f32,
@@ -142,7 +142,7 @@ pub struct TitleCard {
     pub sub: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Fade {
     pub at: f32,
     pub duration: f32,
@@ -150,14 +150,14 @@ pub struct Fade {
     pub to: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct SoundCue {
     pub at: f32,
     pub clip: String,
 }
 
 /// Uma cinemática lida do XML.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct CinematicSpec {
     pub id: String,
     pub skippable: bool,
@@ -417,7 +417,8 @@ pub fn shot_xml(eye: Vec3, look: Vec3, duration: f32) -> String {
 // ── runtime ─────────────────────────────────────────────────────────────
 
 /// Biblioteca das cinemáticas do mundo (do XML, no arranque).
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
 pub struct CinematicLibrary(pub HashMap<String, CinematicSpec>);
 
 /// Pedido para tocar. `inline` (editor/bridge) toca a versão do documento em vez da
@@ -441,12 +442,13 @@ pub struct CinematicEnded {
 }
 
 /// O que está a tocar.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct CinematicPlayback {
     pub active: Option<Active>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct Active {
     pub spec: CinematicSpec,
     pub t: f32,
@@ -479,7 +481,7 @@ pub struct Active {
 }
 
 /// Espera em negro com fade de entrada.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Reflect)]
 struct Hold {
     elapsed: f32,
     frames: u32,
@@ -514,7 +516,8 @@ const PRE_CUT_RAMP: f32 = 0.3;
 /// Orçamentos de streaming (terreno, LOD de malhas) multiplicados — vale
 /// enquanto uma cinemática espera em negro por um destino distante OU na
 /// janela pós-respawn ([`RespawnStreaming`]).
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Reflect)]
+#[reflect(Resource)]
 pub struct StreamingBoost(pub bool);
 
 /// Janela de boost pós-respawn (segundos restantes). O respawn teleporta o
@@ -525,7 +528,8 @@ pub struct StreamingBoost(pub bool);
 /// r1 apanhou `14-boss-sul`/`15-respawn` assim). Escrito por
 /// `feedback::respawn_system` no salto; [`tick_cinematic`] desce o timer e
 /// funde-o no [`StreamingBoost`] que o terreno/render LOD/relva já leem.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Reflect)]
+#[reflect(Resource)]
 pub struct RespawnStreaming(pub f32);
 
 /// Duração do boost de streaming após o respawn (s). Com o orçamento de
@@ -612,21 +616,29 @@ type HudRoots<'w, 's> = Query<
 >;
 
 /// Raiz do overlay de cinema (barras, legenda, título, fade).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct CinematicOverlay;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LetterboxBar;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct FadeVeil;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct TitleText;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct TitleSub;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LineSpeaker;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LineText;
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct LinePanel;
 
 /// Altura das barras de cinema (% do ecrã).
@@ -673,8 +685,9 @@ impl Plugin for CinematicPlugin {
 }
 
 /// Nº de pipelines de render à espera de compilar (escrito pelo mundo de render).
-#[derive(Resource, Debug, Default, Clone)]
-pub struct PipelinesPending(pub std::sync::Arc<std::sync::atomic::AtomicUsize>);
+#[derive(Resource, Debug, Default, Clone, Reflect)]
+#[reflect(Resource)]
+pub struct PipelinesPending(#[reflect(ignore)] pub std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl PipelinesPending {
     pub fn get(&self) -> usize {

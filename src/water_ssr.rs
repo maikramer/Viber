@@ -256,7 +256,8 @@ fn ssr_max_distance() -> f32 {
 }
 
 /// Marcador na câmara 3D que recebe o passe (postfx insere com o gate on).
-#[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
+#[derive(Component, ExtractComponent, Clone, Copy, Default, Debug, Reflect)]
+#[reflect(Component)]
 #[extract_app(RenderApp)]
 pub struct WaterSsr;
 
@@ -552,13 +553,19 @@ fn fragment(in: FullscreenVertexOutput) -> SsrOut {
 // ── GPU side ────────────────────────────────────────────────────────────────
 
 /// Uniform por view (288 B, layout manual — ver `pack_view_uniform`).
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 struct WaterSsrPipeline {
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     layout: BindGroupLayoutDescriptor,
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     sampler: Sampler,
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     variants: Variants<RenderPipeline, WaterSsrSpecializer>,
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     params_buf: Buffer,
     /// 1×1 a zero quando a câmara não tem motion vectors.
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     motion_fallback: TextureView,
 }
 
@@ -570,8 +577,9 @@ struct WaterSsrPipelineKey {
 
 struct WaterSsrSpecializer;
 
-#[derive(Component)]
-pub(crate) struct WaterSsrPipelineId(CachedRenderPipelineId);
+#[derive(Component, Reflect)]
+#[reflect(Component, from_reflect = false)]
+pub(crate) struct WaterSsrPipelineId(#[reflect(ignore)] CachedRenderPipelineId);
 
 /// Uma textura de histórico do reflexo (rgb = cor acumulada, a = confiança).
 struct SsrHistory {
@@ -582,18 +590,24 @@ struct SsrHistory {
 /// Bind groups das DUAS views do ping-pong (qual é source troca a cada
 /// efeito da cadeia — criamos ambos e escolhemos pelo id no render) + o
 /// histórico temporal do reflexo (duas texturas alternadas por frame).
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component, from_reflect = false)]
 pub(crate) struct WaterSsrViewGpu {
+    #[reflect(ignore)]
     view_buf: Buffer,
+    #[reflect(ignore)]
     a: (TextureViewId, BindGroup),
+    #[reflect(ignore)]
     b: (TextureViewId, BindGroup),
+    #[reflect(ignore)]
     hist: [SsrHistory; 2],
     /// Qual das duas é LIDA neste frame (a outra é escrita).
     parity: usize,
     size: bevy::math::UVec2,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 struct ExtractedSsrScene {
     surfaces: Vec<f32>,
     rain: f32,

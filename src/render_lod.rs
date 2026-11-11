@@ -9,45 +9,53 @@
 //! Two knobs, both mirroring what [`crate::luau::ScriptActivation`] already
 //! does for AI:
 //!
-//! * [`CullDistance`] on a **scene root** hides the whole subtree past a
-//!   radius. Visibility is inherited in Bevy, so toggling the root is enough
-//!   — no per-mesh component and no propagation walk.
+//! * [`CullDistance`] on a **scene root** is the authored radius. Bevy's
+//!   [`VisibilityRange`] does the actual culling: a one-shot pass
+//!   ([`propagate_cull_ranges`]) copies the radius on every renderable of the
+//!   subtree once the scene has spawned. `VisibilityRange` is read on the
+//!   entity that owns the mesh, so — like the shadow marker below — it needs
+//!   a propagation pass and is re-armed after an LOD swap.
 //! * [`NoShadowSubtree`] tags a root whose meshes must not cast. Unlike
 //!   visibility, `NotShadowCaster` is read on the *mesh* entity, so this one
 //!   does need a one-shot propagation pass once the scene has spawned.
 
 use crate::profiler::{Group, timed};
+use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::Gltf;
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
-/// Hides the entity (and, by inheritance, its whole subtree) once the camera
-/// is further than `radius` meters away.
+/// Raio de corte (metros) de uma raiz de cena — a especificação autoral.
 ///
-/// The band between `radius * HYSTERESIS` and `radius` is sticky: an object
-/// walking the boundary does not flicker on and off with camera jitter.
-#[derive(Component, Debug, Clone, Copy)]
+/// O culling em si é do Bevy: [`propagate_cull_ranges`] copia o raio para um
+/// [`VisibilityRange`] em cada malha/luz da subárvore e o
+/// `CheckVisibility` do Bevy esconde o que passa do limite. O componente fica
+/// na raiz porque é lá que o spawner/`AutoCull` o conhece; os filhos é que o
+/// consomem.
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct CullDistance {
     /// Distance (meters) past which the subtree stops rendering.
     pub radius: f32,
-    /// O `Hidden` atual foi posto pelo cull. Um `Hidden` de outra origem
-    /// (QA a esconder, um script) não é revertido quando a câmara chega
-    /// perto.
-    pub hidden_by_cull: bool,
 }
 
 impl CullDistance {
     pub fn new(radius: f32) -> Self {
-        Self {
-            radius,
-            hidden_by_cull: false,
-        }
+        Self { radius }
     }
 }
 
+/// Marca que a subárvore atual já recebeu o [`VisibilityRange`] de
+/// [`propagate_cull_ranges`]. Removida no `WorldInstanceReady` de uma troca
+/// de tier: a cena nova nasce sem ranges.
+#[derive(Component, Debug, Default, Reflect)]
+#[reflect(Component)]
+pub struct CullRangeApplied;
+
 /// Raiz de uma `<GltfScene>` estática à espera de ganhar [`CullDistance`]
 /// pelo tamanho, quando as malhas da cena tiverem `Aabb`.
-#[derive(Component, Debug, Default)]
+#[derive(Component, Debug, Default, Reflect)]
+#[reflect(Component)]
 pub struct AutoCull;
 
 /// Píxeis de altura (a 720p, FOV ~64°) abaixo dos quais um objeto sai de
@@ -190,9 +198,6 @@ fn auto_cull_per_radius() -> f32 {
     })
 }
 
-/// Fraction of `radius` at which a hidden object becomes visible again.
-const CULL_HYSTERESIS: f32 = 0.94;
-
 /// Default cull radius (meters) for `<StaticSpawner>` props — trees, rocks,
 /// crates. Far enough that a treeline still reads at the fog line.
 pub const DEFAULT_STATIC_CULL: f32 = 320.0;
@@ -207,7 +212,8 @@ pub const DEFAULT_DYNAMIC_CULL: f32 = 160.0;
 
 /// Marks a scene root whose meshes must not cast shadows. Removed once the
 /// propagation lands (the scene spawns asynchronously, so the marker waits).
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
 pub struct NoShadowSubtree;
 
 /// Mesh LOD ladder for one spawned instance.
@@ -220,7 +226,8 @@ pub struct NoShadowSubtree;
 /// new one (`world_instance_spawner` reacts to `Changed<WorldAssetRoot>`),
 /// so only one tier is resident per instance at a time — triangles *and*
 /// VRAM, not just draw calls.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct MeshLod {
     /// Scene per tier, coarsest last. Tier 0 is always present.
     pub tiers: Vec<Handle<bevy::world_serialization::WorldAsset>>,
@@ -297,7 +304,8 @@ fn swap_budget() -> usize {
 /// A swap is the expensive half of the ladder (despawn + respawn of a glTF
 /// subtree); `pending` staying pegged means the budget is saturated and the
 /// queue never drains, which reads as a permanent stutter while walking.
-#[derive(Resource, Debug, Default, Clone, Copy)]
+#[derive(Resource, Debug, Default, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct MeshLodStats {
     /// Swaps applied on the last frame.
     pub swaps_last_frame: usize,
@@ -321,8 +329,8 @@ impl bevy::app::Plugin for RenderLodPlugin {
                 bevy::app::PostUpdate,
                 (
                     timed(Group::Render, auto_cull_from_bounds),
-                    timed(Group::Render, cull_distant_objects),
                     timed(Group::Render, update_mesh_lod),
+                    timed(Group::Render, propagate_cull_ranges),
                     timed(Group::Render, propagate_no_shadow),
                 )
                     .chain()
@@ -331,7 +339,8 @@ impl bevy::app::Plugin for RenderLodPlugin {
     }
 }
 
-/// Re-marks a non-casting LOD instance once its NEW tier has spawned.
+/// Re-marks a non-casting LOD instance once its NEW tier has spawned, and
+/// re-arms its cull range (the fresh subtree has neither tag).
 ///
 /// A swap only requests the scene: the scene spawner despawns the old
 /// subtree and spawns the new one in the next frame's `SpawnScene`. Tagging
@@ -341,18 +350,26 @@ impl bevy::app::Plugin for RenderLodPlugin {
 /// the new meshes are tagged before they are ever extracted.
 fn retag_no_shadow_on_ready(
     ready: On<bevy::world_serialization::WorldInstanceReady>,
-    lods: Query<&MeshLod>,
+    instances: Query<(&MeshLod, Option<&CullDistance>)>,
     mut commands: Commands,
 ) {
-    if lods.get(ready.entity).is_ok_and(|lod| lod.no_shadows) {
+    let Ok((lod, cull)) = instances.get(ready.entity) else {
+        return;
+    };
+    if lod.no_shadows {
         commands.entity(ready.entity).try_insert(NoShadowSubtree);
+    }
+    if cull.is_some() {
+        commands.entity(ready.entity).remove::<CullRangeApplied>();
     }
 }
 
 /// Swaps each instance's scene to the tier its camera distance calls for.
 ///
-/// Only hidden-by-culling instances are skipped: a prop the player cannot see
-/// does not deserve a respawn, and it re-tiers on the frame it comes back.
+/// Só instâncias com `Visibility::Hidden` (QA, script) são saltadas: a
+/// distância é agora do `VisibilityRange` do Bevy, que não escreve
+/// `Visibility` — uma instância fora de alcance continua a trocar de tier
+/// (para o mais barato) e volta pronta quando a câmara chega perto.
 fn update_mesh_lod(
     editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
@@ -425,53 +442,44 @@ fn update_mesh_lod(
     stats.pending = pending;
 }
 
-/// Toggles `Visibility` on every [`CullDistance`] root from the camera range.
+/// Copies the [`CullDistance`] radius onto every renderable below the root as
+/// a Bevy [`VisibilityRange`].
 ///
-/// Runs every frame on purpose: instances stream in over many frames while
-/// the spawner drains, so a camera-movement gate would leave fresh props
-/// visible across the whole map until the player next moved. The work is a
-/// squared-distance compare over ~10k roots, and the write is guarded so
-/// change detection (and therefore visibility propagation) only fires on an
-/// actual transition.
-fn cull_distant_objects(
-    editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
-    mut objects: Query<(&GlobalTransform, &mut CullDistance, &mut Visibility)>,
+/// Bevy reads `VisibilityRange` on the entity that owns the mesh/light (it is
+/// not inherited), and a glTF scene spawns its meshes a few frames after the
+/// root exists — hence the one-shot marker: wait for the subtree to exist,
+/// tag it, and stop walking it every frame. The marker is cleared again on
+/// `WorldInstanceReady` (see [`retag_no_shadow_on_ready`]) because an LOD swap
+/// replaces the subtree.
+///
+/// The range is abrupt (`radius..radius`): the previous custom cull had no
+/// fade either, and a crossfade would trade the (removed) hysteresis band for
+/// per-material dithering on every prop of the map.
+fn propagate_cull_ranges(
+    mut commands: Commands,
+    roots: Query<(Entity, &CullDistance), Without<CullRangeApplied>>,
+    children: Query<&Children>,
+    renderables: Query<
+        Has<VisibilityRange>,
+        Or<(With<Mesh3d>, With<PointLight>, With<SpotLight>)>,
+    >,
 ) {
-    let Some(camera) = crate::editor_camera::active_camera_eye(&editor, &cameras) else {
-        return;
-    };
-    let eye = camera.translation();
-    for (transform, mut cull, mut visibility) in &mut objects {
-        // Escondido por outra coisa: não é nosso para mostrar.
-        if *visibility == Visibility::Hidden && !cull.hidden_by_cull {
-            continue;
+    for (root, cull) in &roots {
+        let range = VisibilityRange::abrupt(0.0, cull.radius.max(1.0));
+        let mut found = 0usize;
+        for descendant in children.iter_descendants(root) {
+            let Ok(already_tagged) = renderables.get(descendant) else {
+                continue;
+            };
+            found += 1;
+            if !already_tagged {
+                commands.entity(descendant).insert(range.clone());
+            }
         }
-        let radius = cull.radius.max(1.0);
-        let distance_sq = transform.translation().distance_squared(eye);
-        let wanted = match *visibility {
-            // Visible: keep it until it passes the outer edge.
-            Visibility::Hidden => {
-                let show = radius * CULL_HYSTERESIS;
-                if distance_sq <= show * show {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                }
-            }
-            _ => {
-                if distance_sq <= radius * radius {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                }
-            }
-        };
-        // Guarded: `DerefMut` on `Visibility` would mark every root changed
-        // every frame and re-run visibility propagation over the whole tree.
-        if *visibility != wanted {
-            *visibility = wanted;
-            cull.hidden_by_cull = wanted == Visibility::Hidden;
+        // Sem malhas ainda: a cena não spawnou, o marcador fica para o
+        // próximo frame (tal como o `NoShadowSubtree`).
+        if found > 0 {
+            commands.entity(root).insert(CullRangeApplied);
         }
     }
 }
@@ -557,15 +565,88 @@ fn propagate_no_shadow(
 mod tests {
     use super::*;
 
-    /// Builds a minimal app with the culling system and a camera at the origin.
-    fn app_with_camera() -> App {
+    /// O raio autoral vira um `VisibilityRange` em cada malha da subárvore e
+    /// o passe pára depois de a marcar (`CullRangeApplied`).
+    #[test]
+    fn test_cull_range_lands_on_every_renderable_descendant() {
         let mut app = App::new();
-        app.add_systems(Update, cull_distant_objects);
-        app.world_mut().spawn((
-            Camera3d::default(),
-            GlobalTransform::from_translation(Vec3::ZERO),
-        ));
-        app
+        app.add_systems(Update, propagate_cull_ranges);
+        let root = app
+            .world_mut()
+            .spawn(CullDistance::new(100.0))
+            .id();
+        let mesh = app.world_mut().spawn((Mesh3d::default(), ChildOf(root))).id();
+        let deep = app
+            .world_mut()
+            .spawn((Mesh3d::default(), ChildOf(mesh)))
+            .id();
+        app.update();
+        for entity in [mesh, deep] {
+            let range = app
+                .world()
+                .get::<VisibilityRange>(entity)
+                .expect("a malha ganha VisibilityRange");
+            assert_eq!(range.end_margin.end, 100.0);
+            assert!(range.is_abrupt(), "sem crossfade — o cull antigo não tinha");
+        }
+        assert!(
+            app.world().get::<CullRangeApplied>(root).is_some(),
+            "a subárvore já está marcada"
+        );
+        // Segundo frame: sem trabalho (o marcador tirou a raiz da query).
+        app.update();
+    }
+
+    /// Uma raiz sem malhas (a cena ainda não spawnou) espera; quando a malha
+    /// aparece, o passe aplica e limpa a espera.
+    #[test]
+    fn test_cull_range_waits_for_the_scene_to_spawn() {
+        let mut app = App::new();
+        app.add_systems(Update, propagate_cull_ranges);
+        let root = app
+            .world_mut()
+            .spawn(CullDistance::new(80.0))
+            .id();
+        app.update();
+        assert!(
+            app.world().get::<CullRangeApplied>(root).is_none(),
+            "sem malhas ainda não há o que marcar"
+        );
+        let mesh = app.world_mut().spawn((Mesh3d::default(), ChildOf(root))).id();
+        app.update();
+        assert!(app.world().get::<VisibilityRange>(mesh).is_some());
+        assert!(app.world().get::<CullRangeApplied>(root).is_some());
+    }
+
+    /// Uma troca de tier despawna a subárvore antiga e spawna outra sem
+    /// `VisibilityRange`: o `WorldInstanceReady` re-arma o passe.
+    #[test]
+    fn test_lod_swap_rearms_the_cull_range() {
+        let mut app = App::new();
+        app.add_observer(retag_no_shadow_on_ready);
+        let root = app
+            .world_mut()
+            .spawn((ladder(2), CullDistance::new(120.0), CullRangeApplied))
+            .id();
+        let instance_id = {
+            let world = app.world_mut();
+            world.init_resource::<bevy::world_serialization::WorldInstanceSpawner>();
+            world.resource_scope(
+                |_, mut spawner: Mut<bevy::world_serialization::WorldInstanceSpawner>| {
+                    spawner.spawn_as_child(Handle::default(), root)
+                },
+            )
+        };
+        app.world_mut()
+            .trigger(bevy::world_serialization::WorldInstanceReady {
+                entity: root,
+                instance_id,
+            });
+        app.update();
+        assert!(
+            app.world().get::<CullRangeApplied>(root).is_none(),
+            "o tier novo vai ganhar ranges no próximo passe"
+        );
     }
 
     /// Uma grelha densa desce para o teto; uma malha já leve fica intacta.
@@ -634,47 +715,6 @@ mod tests {
         assert!((auto_cull_radius(0.6, 0.7) - 60.48).abs() < 0.1);
     }
 
-    /// Um `Hidden` posto por outra coisa (QA, script) não é revertido pelo
-    /// cull quando a câmara se aproxima.
-    #[test]
-    fn test_cull_never_reveals_what_it_did_not_hide() {
-        let mut app = app_with_camera();
-        let entity = spawn_at(&mut app, 10.0, 100.0);
-        app.world_mut()
-            .entity_mut(entity)
-            .insert(Visibility::Hidden);
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Hidden
-        );
-        // E o que ELE escondeu volta.
-        let far = spawn_at(&mut app, 500.0, 100.0);
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(far).unwrap(),
-            Visibility::Hidden
-        );
-        app.world_mut()
-            .entity_mut(far)
-            .insert(GlobalTransform::from_translation(Vec3::new(10.0, 0.0, 0.0)));
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(far).unwrap(),
-            Visibility::Inherited
-        );
-    }
-
-    fn spawn_at(app: &mut App, x: f32, radius: f32) -> Entity {
-        app.world_mut()
-            .spawn((
-                GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.0)),
-                CullDistance::new(radius),
-                Visibility::Inherited,
-            ))
-            .id()
-    }
-
     /// `VIBER_LOD_SWAP_BUDGET=0` desliga a escada: as instâncias com tier
     /// diferente NÃO estão "em espera" (o `tick_cinematic` lê `pending` como
     /// streaming e esperava o teto de 7 s em negro em cada cena).
@@ -700,77 +740,6 @@ mod tests {
         assert_eq!(stats.pending, 0, "escada desligada não tem fila");
         assert_eq!(stats.swaps_last_frame, 0);
         unsafe { std::env::remove_var("VIBER_LOD_SWAP_BUDGET") };
-    }
-
-    #[test]
-    fn test_object_inside_the_radius_stays_visible() {
-        let mut app = app_with_camera();
-        let entity = spawn_at(&mut app, 50.0, 100.0);
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Inherited
-        );
-    }
-
-    #[test]
-    fn test_object_beyond_the_radius_is_hidden() {
-        let mut app = app_with_camera();
-        let entity = spawn_at(&mut app, 150.0, 100.0);
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Hidden
-        );
-    }
-
-    #[test]
-    fn test_hysteresis_keeps_a_hidden_object_hidden_inside_the_band() {
-        let mut app = app_with_camera();
-        // 97 m: inside the 100 m radius, but above the 94 m re-show edge.
-        let entity = spawn_at(&mut app, 150.0, 100.0);
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Hidden
-        );
-        app.world_mut()
-            .entity_mut(entity)
-            .insert(GlobalTransform::from_translation(Vec3::new(97.0, 0.0, 0.0)));
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Hidden,
-            "inside the hysteresis band a hidden object must stay hidden"
-        );
-        app.world_mut()
-            .entity_mut(entity)
-            .insert(GlobalTransform::from_translation(Vec3::new(90.0, 0.0, 0.0)));
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Inherited,
-            "past the re-show edge it comes back"
-        );
-    }
-
-    #[test]
-    fn test_culling_without_a_camera_is_a_noop() {
-        let mut app = App::new();
-        app.add_systems(Update, cull_distant_objects);
-        let entity = app
-            .world_mut()
-            .spawn((
-                GlobalTransform::from_translation(Vec3::new(9999.0, 0.0, 0.0)),
-                CullDistance::new(10.0),
-                Visibility::Inherited,
-            ))
-            .id();
-        app.update();
-        assert_eq!(
-            *app.world().get::<Visibility>(entity).unwrap(),
-            Visibility::Inherited
-        );
     }
 
     #[test]

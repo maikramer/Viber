@@ -32,13 +32,13 @@ use super::style::{AnimationSpec, Iterations, Keyframe, StyleProps, StyleSheet};
 
 /// Unidade de um valor numérico interpolável (pós-`resolve_viewport` só há
 /// estas duas; `auto`/expressões não transicionam).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum NumUnit {
     Px,
     Percent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum TweenValue {
     Num(NumUnit, f32),
     Color(bevy::color::Color),
@@ -77,7 +77,7 @@ pub fn lerp_color(from: bevy::color::Color, to: bevy::color::Color, t: f32) -> b
 }
 
 /// Que campo de estilo um tween anima — o subconjunto "animável" do dialeto.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 pub enum StyleField {
     Opacity,
     Background,
@@ -237,7 +237,7 @@ impl StyleField {
 // ── easings ─────────────────────────────────────────────────────────────
 
 /// Curva de tempo — os nomes do CSS mais `cubic-bezier` e `steps`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum Easing {
     Linear,
     Ease,
@@ -329,7 +329,7 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
 // ── estado por elemento ─────────────────────────────────────────────────
 
 /// Um tween a correr num elemento.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Reflect)]
 pub struct TweenRun {
     pub field: StyleField,
     pub from: TweenValue,
@@ -366,7 +366,8 @@ impl TweenRun {
 /// Estado de transição de um elemento: a spec da cascata, os ÚLTIMOS valores
 /// alvo (o diff corre contra ESTES, não contra o `UiComputed` — que contém
 /// valores interpolados) e os tweens em curso.
-#[derive(Debug, Clone, Default, Component)]
+#[derive(Debug, Clone, Default, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiTransitions {
     pub specs: Vec<super::style::TransitionSpec>,
     pub targets: HashMap<StyleField, TweenValue>,
@@ -479,7 +480,8 @@ pub fn drive_ui_transitions(
 // ── @keyframes ──────────────────────────────────────────────────────────
 
 /// Animação nomeada em curso num elemento (a spec vem do `UiComputed`).
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct UiAnimation {
     pub spec: AnimationSpec,
     /// Segundos desde o arranque da animação (delay incluído).

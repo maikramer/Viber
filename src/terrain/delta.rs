@@ -24,7 +24,8 @@
 //! o load as esquecer.
 
 use bevy::math::{Vec2, Vec3};
-use bevy::prelude::Resource;
+use bevy::ecs::reflect::ReflectResource;
+use bevy::prelude::{Reflect, Resource};
 
 use super::brush::BrushGrid;
 use super::mesh::HeightField;
@@ -130,7 +131,7 @@ pub struct DeltaGrid {
 }
 
 /// Recorte gravável no save (alturas absolutas).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, bevy::prelude::Reflect)]
 pub struct DeltaPatch {
     pub min: [f32; 2],
     pub step: [f32; 2],
@@ -416,7 +417,7 @@ impl HeightField for EditedBase<'_> {
 /// Uma edição pedida por script/bridge (a fila aplica-a ao
 /// [`super::runtime::TerrainRuntime`] no máximo [`EDITS_PER_FRAME`] por
 /// frame).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Reflect)]
 pub enum TerrainEdit {
     /// Abaixa (mineração/explosão pontual): `h = cur − depth·w(t)`.
     Lower { at: Vec2, radius: f32, depth: f32 },
@@ -434,7 +435,8 @@ pub enum TerrainEdit {
 
 /// Fila de edições (Luau/bridge → engine). Vive separada do runtime para o
 /// sistema de aplicação poder ser um `ResMut` próprio.
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Default, Debug, Reflect)]
+#[reflect(Resource)]
 pub struct TerrainEditQueue {
     pub pending: std::collections::VecDeque<TerrainEdit>,
     /// Total aplicado desde o boot (diagnóstico).

@@ -3,7 +3,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Resource, Clone, Debug, Serialize, Deserialize)]
+#[derive(Resource, Clone, Debug, Serialize, Deserialize, Reflect)]
+#[reflect(Resource)]
 pub struct A11y {
     /// Escala do texto do balão / legendas.
     pub subtitle_scale: f32,

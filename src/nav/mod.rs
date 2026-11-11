@@ -66,7 +66,8 @@ pub const DEFAULT_OFFROAD_COST: f32 = 2.5;
 
 /// Tunables of the navigation stack, filled from `<NavMesh …>` in the world XML
 /// (see `crate::recipes`) and overridable per run through the environment.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct NavConfig {
     /// `VIBER_NAV=0` turns the whole stack off and restores the beeline.
     pub enabled: bool,

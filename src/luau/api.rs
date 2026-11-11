@@ -10,7 +10,7 @@ use super::commands::ScriptCommand;
 use super::ctx::ScriptCtx;
 use super::input::key_code_from_str;
 use super::sfx::{SFX_NAME_REGISTRY, sfx_clip_from_str};
-use super::{decision, entity, events, game, input, nlu, props, terrain, timers};
+use super::{decision, ecs, entity, events, game, input, nlu, props, terrain, timers};
 
 /// Installs the `viber` API table on the VM globals:
 /// `log(msg)`, `time()`, `position()`, `set_position(x, y, z)`,
@@ -2323,6 +2323,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     nlu::install(lua, &api)?;
     decision::install(lua, &api)?;
     super::signals::install(lua, &api)?;
+    ecs::install(lua, &api)?;
 
     lua.globals().set("viber", api)?;
     let states = lua.create_table()?;

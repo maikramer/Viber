@@ -11,7 +11,8 @@ use bevy::prelude::*;
 pub const CORPSE_LIFETIME: f32 = 1.4;
 
 /// Morto/em fade. Quem o tem fica fora das queries de alvo vivo.
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, Reflect)]
+#[reflect(Component)]
 pub struct Corpse {
     pub timer: f32,
 }

@@ -529,6 +529,59 @@ resolvidos contra essa tabela; sem entrada, fica a string original.
 | `viber.find(nome)` | bits da entidade (exato primeiro, substring depois) ou `nil` |
 | `viber.find_all(nome)` | array com TODAS as correspondências — ordem estável entre frames (nomes lexicográficos, bits dentro de cada nome) |
 
+## `viber.ecs.*` (reflexão ECS)
+
+Acesso genérico a componentes da engine registados pelo `ReflectPlugin`, em
+vez de um verbo por conceito. Só a **whitelist** de tipos de jogo é aceite
+(`viber.ecs.types()` lista-os); um path arbitrário de Rust é recusado com
+erro. Leitura (`get`/`query`/`types`) vem do espelho de início-de-frame;
+escrita (`set`/`insert`/`remove`/`spawn`/`despawn`) enfileira e aplica no fim
+do frame — o script vê o valor novo no frame seguinte, como todo o snapshot
+da API.
+
+| Função | Efeito |
+|--------|--------|
+| `viber.ecs.types()` | array de type paths registados e permitidos (debug/descoberta) |
+| `viber.ecs.get(id, tipo)` | tabela do componente ou `nil` se a entidade não o tem |
+| `viber.ecs.set(id, tipo, t)` | patch parcial (`{campo = valor}`); `true`/`false, erro` |
+| `viber.ecs.insert(id, tipo, t)` | insere/substitui o componente; `true`/`false, erro`. Usa o `Default` refletido do tipo para os campos ausentes; sem Default exige todos os campos |
+| `viber.ecs.remove(id, tipo)` | remove; `false, erro` se a entidade não o tinha |
+| `viber.ecs.query(tipo)` | array de bits das entidades com o componente (ordem crescente) |
+| `viber.ecs.spawn({ [tipo] = t, … })` | cria uma entidade e insere cada componente; devolve os bits (id válido no mesmo frame; os componentes aplicam no fim) |
+| `viber.ecs.despawn(id)` | apaga a entidade |
+
+Valores: escalares, booleanos e strings mapeiam 1:1; `Vec2`/`Vec3`/`Quat`
+viram `{x,y[,z[,w]]}` (aceitam também array posicional em `set`); `Color` vira
+`{r,g,b,a}`; `Entity` vira os bits (inteiro); enums unitários viram o nome da
+variante (`"Chase"`, `"Enemy"`); `Option<T>` é o valor de `T` ou ausente/`nil`
+(em `set`, `campo = "none"` limpa-o); structs aninhados um nível viram tabelas.
+
+```lua
+local id = viber.self_id()
+local hp = viber.ecs.get(id, "viber::vitals::Health")
+if hp then
+    viber.ecs.set(id, "viber::vitals::Health", { current = hp.current - 5 })
+end
+
+-- Criatura mínima: os campos ausentes vêm do Default do tipo.
+local wolf = viber.ecs.spawn({
+    ["viber::vitals::Health"] = { current = 30, max = 30 },
+    ["viber::vitals::Hostile"] = {},
+    ["viber::ai::EnemyCreature"] = { speed = 4.0, aggro_radius = 20.0 },
+})
+
+for _, e in ipairs(viber.ecs.query("viber::ai::EnemyCreature")) do
+    viber.ecs.set(e, "viber::ai::EnemyCreature", { aggro_radius = 10.0 })
+end
+```
+
+Nota: os componentes do módulo `luau` têm o path canónico
+`viber::luau::components::*` (é o que `types()` devolve). `set`/`insert` são
+escritas **raw** (não aplicam regras de jogo — clamp de HP, i-frames, `Kill`:
+para combate usa `viber.entity_damage`/`entity_heal`). `spawn` tira um id de
+um pequeno pool por frame; esgotado, devolve erro e o script tenta no frame
+seguinte.
+
 ## Estado de jogo e módulos
 
 ```lua
@@ -813,6 +866,13 @@ superfície do método `viber.lua` / `viber debug lua '<código>'` — o
 com o player como self (toda a `viber.*` acima funciona). Leituras vêm do
 snapshot do início da chamada; escritas aplicam no mesmo frame. Globals
 persistem entre chamadas (REPL); `return` devolve o valor.
+
+`viber.ecs.*` também está disponível na REPL (o espelho é reconstruído por
+chamada, ao contrário do jogo): substitui os verbos genéricos
+`set_pos`/`hide`/`show`/`toggle_vis`/`despawn`/`set_scale`/`rotate`/
+`set_entity_hp`/`set_max_hp`/`ai_state`/`ai_aggro`/`set_speed`. Os restantes
+(`Spawn`, luzes, materiais, câmara, clima, física, quests…) continuam
+primitivas de debug/engine sem equivalente ECS.
 
 Dumps em volume (`colliders`/`lights`/`around`) e agregados (`stats`) contam
 sobre o mundo real; no snapshot de entidades há cap de 4096 (mais perto do

@@ -163,6 +163,15 @@ pub struct ScriptCtx {
     pub biome: Option<String>,
     /// Ids das cenas do projeto (validação de `viber.change_scene`).
     pub scene_ids: std::sync::Arc<Vec<String>>,
+    /// Espelho refletido do mundo (`viber.ecs.get`/`query`) — reconstruído
+    /// por [`super::ecs::mirror_system`] no início do frame.
+    pub ecs_mirror: Option<std::sync::Arc<super::ecs::EcsMirrorData>>,
+    /// Registo de tipos da app (whitelist de `viber.ecs`). Semeado uma vez
+    /// pelo [`super::LuauScriptPlugin`]; `None` nas VMs montadas à mão.
+    pub ecs_registry: Option<bevy::reflect::TypeRegistryArc>,
+    /// Entidades vazias já criadas para `viber.ecs.spawn` — o mesmo `Arc`
+    /// do recurso [`super::ecs::EcsSpawnPool`].
+    pub ecs_pool: Option<std::sync::Arc<std::sync::Mutex<Vec<Entity>>>>,
 }
 
 /// Criatura hostil viva neste frame (`viber.hostiles`).

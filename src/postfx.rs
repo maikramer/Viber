@@ -562,11 +562,13 @@ fn volumetric_steps() -> u32 {
 }
 
 /// Marcador do [`FogVolume`] cinemático que segue o herói.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 struct CinematicFogVolume;
 
 /// Alvos de pós-processamento em vigor (base do mundo × bioma atual).
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Resource, Reflect)]
+#[reflect(Resource)]
 pub struct PostFxState {
     /// EV100 alvo, já com o multiplicador do bioma aplicado.
     pub target_ev100: f32,
@@ -1224,7 +1226,8 @@ impl PostFxGates {
 }
 
 /// Estado de arranque do pós-processo que os gates runtime não podem mudar.
-#[derive(Debug, Clone, Copy, Resource)]
+#[derive(Debug, Clone, Copy, Resource, Reflect)]
+#[reflect(Resource)]
 struct PostFxBoot {
     /// O volume de névoa só nasce no Startup quando os volumetrics arrancam
     /// ligados; sem ele, repor o `VolumetricFog` na câmara não desenha nada.
@@ -1233,7 +1236,8 @@ struct PostFxBoot {
 
 /// A curva da exposição automática, partilhada pelas câmaras e reposta pelo
 /// [`sync_postfx_gates`] quando o gate volta a ligar.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Reflect)]
+#[reflect(Resource)]
 struct AutoExposureCurve(Option<Handle<AutoExposureCompensationCurve>>);
 
 /// Reconcilia os componentes das câmaras JÁ equipadas com os gates em vigor
@@ -1672,7 +1676,8 @@ pub const WARM_FILL_NIGHT_GAIN: f32 = 8.0;
 
 /// Intensidade autoral de uma PointLight quente, capturada antes de o
 /// [`torch_pool_drive`] começar a compor (o espelho de `SunLightBase`).
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Reflect)]
+#[reflect(Component)]
 pub struct TorchLightBase {
     pub intensity: f32,
 }
@@ -1885,7 +1890,8 @@ pub fn split_tone_for(low_sun: f32, night: f32) -> ([f32; 3], [f32; 3]) {
 /// Uniform do passe de split-tone (uma por câmara, extraído por
 /// [`ExtractComponent`]). O WGSL declara o struct ESPELHADO (mesmos
 /// offsets do encase: vec3×2 + 3×f32).
-#[derive(Component, Clone, Copy, PartialEq, ExtractComponent, ShaderType, Default)]
+#[derive(Component, Clone, Copy, PartialEq, ExtractComponent, ShaderType, Default, Reflect)]
+#[reflect(Component)]
 #[extract_app(RenderApp)]
 pub struct SplitToneSettings {
     /// Multiplicador linear do extremo das sombras.
@@ -2097,7 +2103,8 @@ pub fn aerial_grade(color: [f32; 3], f: f32) -> [f32; 3] {
 
 /// Liga o passe de perspetiva aérea numa câmara (default-on; inserido pelo
 /// `attach_postfx_to_cameras` junto do resto da lente).
-#[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[derive(Component, Clone, Copy, Default, ExtractComponent, Reflect)]
+#[reflect(Component)]
 #[extract_app(RenderApp)]
 pub struct AerialPerspective;
 
@@ -2169,7 +2176,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// struct WGSL têm de bater EXACTAMENTE (guarda no harness naga).
 pub const AERIAL_UNIFORM_BYTES: usize = 176;
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 struct ExtractedAerial {
     weight: f32,
 }
@@ -2181,10 +2189,14 @@ fn extract_aerial(
     out.weight = aerial_weight(atmosphere.night);
 }
 
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 struct AerialPipeline {
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     layout: BindGroupLayoutDescriptor,
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     sampler: Sampler,
+    #[reflect(ignore, default = "crate::reflect::unavailable")]
     variants: Variants<RenderPipeline, AerialSpecializer>,
 }
 
@@ -2323,15 +2335,20 @@ fn pack_aerial_uniform(
     data
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component, from_reflect = false)]
 struct AerialViewGpu {
+    #[reflect(ignore)]
     buf: Buffer,
+    #[reflect(ignore)]
     a: (TextureViewId, BindGroup),
+    #[reflect(ignore)]
     b: (TextureViewId, BindGroup),
 }
 
-#[derive(Component)]
-struct AerialPipelineId(CachedRenderPipelineId);
+#[derive(Component, Reflect)]
+#[reflect(Component, from_reflect = false)]
+struct AerialPipelineId(#[reflect(ignore)] CachedRenderPipelineId);
 
 #[allow(clippy::type_complexity)]
 fn prepare_aerial(

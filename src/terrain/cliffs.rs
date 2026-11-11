@@ -39,6 +39,7 @@
 //! variation (band wobble, step jitter) comes from `seed` + position hashes,
 //! never from RNG or mid-carve reads — same seed, same world.
 
+use bevy::ecs::reflect::{ReflectComponent, ReflectResource};
 use bevy::math::Vec2;
 
 use super::brush::BrushGrid;
@@ -275,7 +276,8 @@ impl Column {
 /// splat paints solid stone over the core, sharpen only terraces the core,
 /// the LOD peak-preserving snaps only inside regions, grass avoids the
 /// dilated layer. Built once over the FINAL field.
-#[derive(Debug, Clone, Default, bevy::ecs::prelude::Resource)]
+#[derive(Debug, Clone, Default, bevy::ecs::prelude::Resource, bevy::prelude::Reflect)]
+#[reflect(Resource)]
 pub struct CliffMask {
     /// Accepted cliff components (the filter output).
     core: Vec<u64>,
@@ -907,7 +909,8 @@ pub fn sharpen_terrain(
 
 /// Marcador: as cores deste mesh de caixa voxel já levaram o bake da máscara
 /// de cliff (canal R = wall space, A = fator de região).
-#[derive(Debug, bevy::prelude::Component)]
+#[derive(Debug, bevy::prelude::Component, bevy::prelude::Reflect)]
+#[reflect(Component)]
 pub struct CliffBaked;
 
 /// Assa a máscara regional nas vertex colors de UM mesh de caixa voxel:

@@ -1385,6 +1385,9 @@ fn run(
             window_title: None,
             start_entry: entry,
             world_path: identity,
+            // Gates de composição ficam no default (tudo ligado): o CLI é o
+            // jogo completo, não um app nativo.
+            ..Default::default()
         },
     )?
     .run();

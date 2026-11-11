@@ -35,7 +35,7 @@ pub const DEFAULT_MAIN_SCENE: &str = "world.xml";
 const MAX_ROOT_SEARCH: usize = 4;
 
 /// O bloco `project:` do `config.yaml` (todo opcional).
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, bevy::prelude::Reflect)]
 pub struct ProjectConfig {
     #[serde(default, rename = "main-scene")]
     pub main_scene: Option<PathBuf>,

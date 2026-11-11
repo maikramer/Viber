@@ -34,9 +34,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use bevy::app::App;
 use bevy::asset::AssetApp;
+use bevy::ecs::reflect::ReflectResource;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::world::World;
+use bevy::reflect::Reflect;
 use serde::{Deserialize, Serialize};
 
 use crate::recipes::spawn::PendingWorld;
@@ -380,8 +382,10 @@ pub struct BakeReport {
 /// Recolha das specs declarativas antes de o bootstrap as consumir — é daqui
 /// que vêm cliffs/arches/caves (sólidos voxel sem registo resolvido no
 /// `TerrainRuntime`).
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 struct BakeFeatureSnapshot {
+    #[reflect(ignore)]
     features: Option<crate::terrain::features::TerrainFeatures>,
 }
 
