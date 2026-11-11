@@ -205,6 +205,39 @@ pub fn game_to_json(lua: &Lua) -> std::collections::BTreeMap<String, serde_json:
     out
 }
 
+/// Escreve chaves primitivas no `viber_game` (patch de estado).
+///
+/// Só `Bool`/`Number`/`String` entram; `Null` REMOVE a chave; arrays e
+/// objectos são ignorados (o `viber.game()` é estado plano). Nada aqui é
+/// lógica de jogo: quem compõe o patch sabe o que possui.
+pub fn apply_patch(lua: &Lua, patch: &std::collections::BTreeMap<String, serde_json::Value>) {
+    let Ok(game) = lua.named_registry_value::<Table>("viber_game") else {
+        return;
+    };
+    for (key, value) in patch {
+        match value {
+            serde_json::Value::Bool(flag) => {
+                let _ = game.raw_set(key.clone(), *flag);
+            }
+            serde_json::Value::Number(number) => {
+                // Inteiro quando cabe em i64; o resto como float (como o load).
+                if let Some(int) = number.as_i64() {
+                    let _ = game.raw_set(key.clone(), int);
+                } else if let Some(float) = number.as_f64() {
+                    let _ = game.raw_set(key.clone(), float);
+                }
+            }
+            serde_json::Value::String(text) => {
+                let _ = game.raw_set(key.clone(), text.clone());
+            }
+            serde_json::Value::Null => {
+                let _ = game.raw_remove(key.clone());
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {}
+        }
+    }
+}
+
 /// Repõe o JSON do save no `viber_game` (load). Chaves não primitivas no
 /// ficheiro (editado à mão) são ignoradas — nunca partem o load.
 pub fn json_to_game(lua: &Lua, kv: &std::collections::BTreeMap<String, serde_json::Value>) {
@@ -240,5 +273,100 @@ pub fn json_to_game(lua: &Lua, kv: &std::collections::BTreeMap<String, serde_jso
         if let Ok(lv) = lv {
             let _ = game.raw_set(key.clone(), lv);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    /// VM mínima com a tabela `viber_game` (sem a API `viber` instalada).
+    fn lua_com_jogo() -> Lua {
+        let lua = Lua::new();
+        let game = lua.create_table().expect("tabela do jogo");
+        lua.set_named_registry_value("viber_game", game)
+            .expect("registar viber_game");
+        lua
+    }
+
+    fn jogo(lua: &Lua) -> Table {
+        lua.named_registry_value("viber_game").expect("viber_game")
+    }
+
+    #[test]
+    fn patch_escreve_primitivos_e_le_de_volta() {
+        let lua = lua_com_jogo();
+        jogo(&lua).raw_set("hp", 10).unwrap();
+
+        let mut patch = BTreeMap::new();
+        patch.insert("hp".to_string(), json!(92.0));
+        patch.insert("iframes".to_string(), json!(0.35));
+        patch.insert("death_pending".to_string(), json!(true));
+        patch.insert("save_title".to_string(), json!("Vael — nível 4"));
+        apply_patch(&lua, &patch);
+
+        let game = jogo(&lua);
+        assert_eq!(game.raw_get::<f64>("hp").unwrap(), 92.0);
+        assert_eq!(game.raw_get::<f64>("iframes").unwrap(), 0.35);
+        assert!(game.raw_get::<bool>("death_pending").unwrap());
+        assert_eq!(
+            game.raw_get::<String>("save_title").unwrap(),
+            "Vael — nível 4"
+        );
+
+        // O patch é idempotente e não toca nas outras chaves.
+        apply_patch(&lua, &patch);
+        assert_eq!(game.raw_get::<f64>("hp").unwrap(), 92.0);
+    }
+
+    #[test]
+    fn null_remove_a_chave() {
+        let lua = lua_com_jogo();
+        jogo(&lua).raw_set("venom", 3.5).unwrap();
+        jogo(&lua).raw_set("hp", 100).unwrap();
+
+        let mut patch = BTreeMap::new();
+        patch.insert("venom".to_string(), serde_json::Value::Null);
+        apply_patch(&lua, &patch);
+
+        let game = jogo(&lua);
+        assert!(
+            game.raw_get::<mlua::Value>("venom").unwrap().is_nil(),
+            "null tem de remover"
+        );
+        assert_eq!(game.raw_get::<i64>("hp").unwrap(), 100, "as outras ficam");
+    }
+
+    #[test]
+    fn arrays_e_objetos_sao_ignorados() {
+        let lua = lua_com_jogo();
+        jogo(&lua).raw_set("enemies", 1).unwrap();
+
+        let mut patch = BTreeMap::new();
+        patch.insert("enemies".to_string(), json!({ "wolf": 1 }));
+        patch.insert("lista".to_string(), json!([1, 2, 3]));
+        apply_patch(&lua, &patch);
+
+        let game = jogo(&lua);
+        assert_eq!(
+            game.raw_get::<i64>("enemies").unwrap(),
+            1,
+            "um objecto não substitui a chave"
+        );
+        assert!(
+            game.raw_get::<mlua::Value>("lista").unwrap().is_nil(),
+            "um array não cria a chave"
+        );
+    }
+
+    #[test]
+    fn sem_tabela_do_jogo_nao_panica() {
+        // VM sem `viber_game` (host a arrancar): o patch é um no-op.
+        let lua = Lua::new();
+        let mut patch = BTreeMap::new();
+        patch.insert("hp".to_string(), json!(1.0));
+        apply_patch(&lua, &patch);
     }
 }
