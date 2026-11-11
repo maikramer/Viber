@@ -1151,6 +1151,14 @@ mod tests {
             "quest.text",
             "quest.title",
             "quest.active",
+            // `hud.lua` deixou estes no Rust: `VaelHudPlugin` semeia os
+            // defaults do chefe/outras missões e a TTL em `VaelHudUiPlugin`
+            // apaga o `boss.active` quando o sinal do FSM pára.
+            "quests.others",
+            "boss.active",
+            "boss.name",
+            "boss",
+            "boss.enraged",
         ]
         .into_iter()
         .collect();
