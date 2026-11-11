@@ -79,11 +79,14 @@ pub struct AppOptions {
     /// `viber debug --world <mundo>` via a porta servida por outro mundo (registo
     /// "stale"). Omisso = `path` (editores e apps mínimas).
     pub world_path: Option<PathBuf>,
-    /// Comportamento de jogo da engine (`player`, câmara de jogo, IA, sentidos,
-    /// projéteis, vitais do herói e clamp da borda). `false` deixa o app com
-    /// terreno/nav/física/render/UI e os FX de apresentação — as regras são de
-    /// quem monta a App.
+    /// Regras de jogo da engine (IA/sentidos, projéteis, vitais do herói).
+    /// `false` deixa as regras para quem monta a App. O player/câmara têm o
+    /// seu próprio gate ([`Self::player_camera`]).
     pub gameplay: bool,
+    /// Serviços de player/câmara de jogo: movimento do herói, terceira pessoa,
+    /// rigs e clamp da borda. `false` para um jogo que traz o seu controller e
+    /// câmara; a câmara de editor (`--camera free`) é independente.
+    pub player_camera: bool,
     /// Scripts de comportamento: host Luau da engine ([`ScriptsMode::Compat`])
     /// ou nenhum ([`ScriptsMode::Off`]).
     pub scripts: ScriptsMode,
@@ -105,6 +108,7 @@ impl Default for AppOptions {
             start_entry: None,
             world_path: None,
             gameplay: true,
+            player_camera: true,
             scripts: ScriptsMode::Compat,
             ui: true,
             profiler: true,
@@ -222,6 +226,7 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
         start_entry,
         world_path,
         gameplay,
+        player_camera,
         scripts,
         ui,
         profiler,
@@ -851,11 +856,10 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
             hud::apply_subtitle_scale,
         ),
     );
-    // Comportamento de JOGO: movimento do herói, câmara de jogo, vitais e o
-    // clamp da borda. `gameplay: false` deixa o app com os serviços de engine
-    // (terreno, navegação, física, render, UI e os FX) — quem monta a App traz
-    // as suas próprias regras.
-    if gameplay {
+    // Serviços de PLAYER/CÂMARA: não são regras. O Vael usa-os enquanto migra
+    // o controller/câmara para o seu crate (`player_camera: true`,
+    // `gameplay: false`); quem já traz os seus desliga-os.
+    if player_camera {
         app.add_systems(
             bevy::app::Update,
             (
@@ -877,11 +881,6 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
                         .run_if(editor_camera::editor_camera_inactive),
                 )
                     .chain(),
-                // O herói nasce no autoload sem `Health` (o Vael guarda hp/max no
-                // `viber.game()`): sem esta rede, `viber.entity_damage(player)` e o
-                // dano radial avisavam "sem Health" em vez de funcionar. Idempotente
-                // e só insere quando falta.
-                crate::vitals::ensure_player_vitals,
                 timed(Group::Camera, spawn::auto_orbit),
                 // Clamp da borda DEPOIS do movimento do player (mesmo frame):
                 // sem ordem, o clamp viajava um frame atrás do WASD. Ordena
@@ -889,6 +888,13 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
                 worldsys::world_border_clamp.after(player::player_movement),
             ),
         );
+    }
+    // Regras de jogo: o herói nasce no autoload sem `Health` (o Vael guarda
+    // hp/max no `viber.game()`); sem esta rede, `viber.entity_damage(player)` e
+    // o dano radial avisavam "sem Health" em vez de funcionar. Idempotente e só
+    // insere quando falta.
+    if gameplay {
+        app.add_systems(bevy::app::Update, crate::vitals::ensure_player_vitals);
     }
     app.add_systems(
         bevy::app::Update,
@@ -957,6 +963,7 @@ mod tests {
     fn default_app_options_keep_the_full_engine() {
         let opts = AppOptions::default();
         assert!(opts.gameplay, "gameplay liga por omissão");
+        assert!(opts.player_camera, "player/câmara ligam por omissão");
         assert_eq!(
             opts.scripts,
             ScriptsMode::Compat,
