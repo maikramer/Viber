@@ -1115,6 +1115,45 @@ mod tests {
         let lists = [
             "quests", "bag", "skills", "shop", "forge", "controls", "system", "a11y",
         ];
+        // Binds publicados pelo HUD Rust do Vael (`VaelHudPlugin`): o scan
+        // abaixo só vê `viber.ui.set` nos `.lua`, por isso estes ficam
+        // explícitos. Se o HUD Rust ganhar um nome novo, acrescenta-o aqui.
+        let rust_binds: std::collections::HashSet<&str> = [
+            "health",
+            "health.text",
+            "health.value",
+            "health.low",
+            "xp",
+            "xp.text",
+            "level",
+            "level.text",
+            "talent.points",
+            "talent.ready",
+            "gold",
+            "wood",
+            "stone",
+            "berry",
+            "korok-seed",
+            "potion",
+            "antidote",
+            "bomb",
+            "moss",
+            "flask",
+            "potion.empty",
+            "antidote.empty",
+            "bomb.empty",
+            "moss.empty",
+            "flask.empty",
+            "status.venom",
+            "status.burn",
+            "status.frost",
+            "quest",
+            "quest.text",
+            "quest.title",
+            "quest.active",
+        ]
+        .into_iter()
+        .collect();
         // Binds de SCRIPT: os nomes que os `.lua` do mundo alimentam com
         // `viber.ui.set("nome", …)` literal (barra de chefe, cooldowns das
         // habilidades Lua). Um nome que nenhum script escreve continua a
@@ -1169,7 +1208,9 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    data.get(&bind).is_some() || script_binds.contains(&bind),
+                    data.get(&bind).is_some()
+                        || script_binds.contains(&bind)
+                        || rust_binds.contains(bind.as_str()),
                     "{path}: <{}> binds to unknown `{bind}`",
                     node.tag
                 );
