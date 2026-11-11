@@ -60,6 +60,21 @@ pub enum ScriptsMode {
     Off,
 }
 
+/// Que IA a engine regista.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AiMode {
+    /// Nada: nem sentidos nem a FSM simples.
+    Off,
+    /// Só o serviço ([`crate::ai::AiServicePlugin`]): sentidos, vitais das
+    /// criaturas e o consumidor do [`crate::ai::AiLocomotion`]. O
+    /// comportamento é de quem monta a App (scripts Luau, regras em Rust) —
+    /// a FSM simples da engine não corre.
+    Service,
+    /// Serviço + FSM simples ([`crate::ai::AiPlugin`]) — o de sempre.
+    #[default]
+    Full,
+}
+
 /// Opções de [`build_app`].
 #[derive(Debug, Clone)]
 pub struct AppOptions {
@@ -79,10 +94,14 @@ pub struct AppOptions {
     /// `viber debug --world <mundo>` via a porta servida por outro mundo (registo
     /// "stale"). Omisso = `path` (editores e apps mínimas).
     pub world_path: Option<PathBuf>,
-    /// Regras de jogo da engine (IA/sentidos, projéteis, vitais do herói).
-    /// `false` deixa as regras para quem monta a App. O player/câmara têm o
-    /// seu próprio gate ([`Self::player_camera`]).
+    /// Regras de jogo da engine (projéteis e vitais do herói). `false` deixa
+    /// essas regras para quem monta a App. O player/câmara têm o seu próprio
+    /// gate ([`Self::player_camera`]) e a IA o seu ([`Self::ai`]).
     pub gameplay: bool,
+    /// IA da engine: [`AiMode::Full`] (serviço + FSM simples, o de sempre),
+    /// [`AiMode::Service`] (só sentidos/movimento, comportamento do jogo) ou
+    /// [`AiMode::Off`].
+    pub ai: AiMode,
     /// Serviços de player/câmara de jogo: movimento do herói, terceira pessoa,
     /// rigs e clamp da borda. `false` para um jogo que traz o seu controller e
     /// câmara; a câmara de editor (`--camera free`) é independente.
@@ -108,6 +127,7 @@ impl Default for AppOptions {
             start_entry: None,
             world_path: None,
             gameplay: true,
+            ai: AiMode::Full,
             player_camera: true,
             scripts: ScriptsMode::Compat,
             ui: true,
@@ -226,6 +246,7 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
         start_entry,
         world_path,
         gameplay,
+        ai,
         player_camera,
         scripts,
         ui,
@@ -746,14 +767,22 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     app.init_resource::<camera::CameraSnapshot>();
     // Quests, marcadores e o guia são do exemplo (`scripts/lib/rules.lua`).
     app.add_plugins(crate::cinematic::CinematicPlugin);
-    // IA: o `AiPlugin` regista o `apply_ai_locomotion`, consumidor ÚNICO do
-    // movimento pedido pelos scripts (`viber.move_towards`) e pela navegação.
-    // Sem ele a FSM entra em chase e o `desired` fica certo, mas ninguém
-    // aplica a velocidade — as criaturas atacam paradas. Também traz os
-    // sentidos (`SensesPlugin`) e os vitais das criaturas sem script.
-    // Comportamento de JOGO: `gameplay: false` não o regista (nem os sentidos).
-    if gameplay {
-        app.add_plugins(crate::ai::AiPlugin);
+    // IA: quem decide é `ai`, não `gameplay`.
+    // - `AiServicePlugin` regista o `apply_ai_locomotion`, consumidor ÚNICO do
+    //   movimento pedido pelos scripts (`viber.move_towards`) e pela navegação.
+    //   Sem ele a FSM entra em chase e o `desired` fica certo, mas ninguém
+    //   aplica a velocidade — as criaturas atacam paradas. Também traz os
+    //   sentidos (`SensesPlugin`) e os vitais das criaturas sem script.
+    // - `SimpleAiPlugin` acrescenta a FSM simples da engine (`enemy_ai`).
+    // `Off` não regista nenhum dos dois (nem os sentidos).
+    match ai {
+        AiMode::Full => {
+            app.add_plugins(crate::ai::AiPlugin);
+        }
+        AiMode::Service => {
+            app.add_plugins(crate::ai::AiServicePlugin);
+        }
+        AiMode::Off => {}
     }
     // Navegação: navmesh Recast num tile que segue o herói, A* + evitamento
     // RVO (bevy_landmass) e preferência por estradas via custo por tipo de
@@ -963,6 +992,7 @@ mod tests {
     fn default_app_options_keep_the_full_engine() {
         let opts = AppOptions::default();
         assert!(opts.gameplay, "gameplay liga por omissão");
+        assert_eq!(opts.ai, AiMode::Full, "IA completa por omissão");
         assert!(opts.player_camera, "player/câmara ligam por omissão");
         assert_eq!(
             opts.scripts,
@@ -978,5 +1008,39 @@ mod tests {
     fn scripts_mode_default_is_compat() {
         assert_eq!(ScriptsMode::default(), ScriptsMode::Compat);
         assert_ne!(ScriptsMode::Off, ScriptsMode::Compat);
+    }
+
+    /// Os três modos de IA são distintos e o default é o completo.
+    #[test]
+    fn ai_mode_modes_are_distinct() {
+        assert_eq!(AiMode::default(), AiMode::Full);
+        assert_ne!(AiMode::Service, AiMode::Full);
+        assert_ne!(AiMode::Off, AiMode::Full);
+        assert_ne!(AiMode::Off, AiMode::Service);
+    }
+
+    /// `AiServicePlugin` sozinho tem de construir e correr sem o `enemy_ai`:
+    /// o `.before(enemy_ai)` do `hear_combat` passa a apontar para um conjunto
+    /// vazio, não para um erro de schedule. O serviço corre (os vitais entram)
+    /// e a FSM simples não (o `sense_ai` nunca toca na criatura).
+    #[test]
+    fn ai_service_plugin_builds_and_runs_without_the_simple_ai() {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .add_plugins(crate::ai::AiServicePlugin);
+        let creature = app
+            .world_mut()
+            .spawn(crate::ai::EnemyCreature::default())
+            .id();
+        app.update();
+        let world = app.world();
+        assert!(
+            world.get::<crate::vitals::Health>(creature).is_some(),
+            "o serviço garante os vitais das criaturas"
+        );
+        assert!(
+            world.get::<crate::senses::SenseMemory>(creature).is_none(),
+            "sem FSM simples ninguém corre o sense_ai"
+        );
     }
 }

@@ -60,6 +60,17 @@ pub struct SenseInbox {
     pub pulses: HashMap<Entity, SenseKind>,
 }
 
+/// Drena o barramento quando a FSM simples não corre (`AiMode::Service`).
+///
+/// Sem isto, os `hear_combat`/`viber.emit("noise")` enchiam
+/// [`SenseBus::events`] para sempre e os pulsos velhos ficavam em
+/// [`SenseInbox`]. Em `AiMode::Full` corre DEPOIS do `sense_ai` (que já os
+/// consumiu); em `Service` é o único drenador.
+pub fn drain_sense_bus(mut bus: ResMut<SenseBus>, mut inbox: ResMut<SenseInbox>) {
+    bus.events.clear();
+    inbox.pulses.clear();
+}
+
 #[derive(Component, Debug, Clone, Reflect)]
 #[reflect(Component)]
 pub struct SenseMemory {

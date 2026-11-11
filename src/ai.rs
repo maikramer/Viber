@@ -11,7 +11,8 @@
 //! com `viber.spawn_prototype` ou pelo spawner. A engine não mantém fila de
 //! respawn nem política de distância ao player.
 //!
-//! Wiring: `app.add_plugins(crate::ai::AiPlugin);` (see [`AiPlugin`]).
+//! Wiring: [`AiPlugin`] (serviço + FSM simples), só [`AiServicePlugin`] (quem
+//! traz o seu comportamento) ou [`SimpleAiPlugin`] sobre o serviço.
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -425,25 +426,64 @@ pub fn ensure_fsm_vitals(
     }
 }
 
-pub struct AiPlugin;
+/// Serviço de IA genérico, sem a FSM simples da engine: sentidos
+/// ([`crate::senses::SensesPlugin`]), vitais das criaturas e o consumidor
+/// único do [`AiLocomotion`].
+///
+/// É o que quem traz o seu próprio comportamento (scripts Luau, regras em
+/// Rust) precisa: os scripts movem as criaturas via `viber.move_towards` e
+/// recebem os sentidos, mas o `enemy_ai` da engine não corre.
+pub struct AiServicePlugin;
 
-impl Plugin for AiPlugin {
+impl Plugin for AiServicePlugin {
     fn build(&self, app: &mut App) {
         // Sem este plugin o `hear_combat` nunca corria (inimigos surdos) e
         // os `NoisePing` dos impactos ficavam para sempre no mundo.
         app.add_plugins(crate::senses::SensesPlugin);
         app.add_message::<crate::ambient::SfxEvent>()
-            .add_systems(Update, (timed(Group::Ai, enemy_ai), ensure_fsm_vitals))
+            .add_systems(Update, ensure_fsm_vitals)
+            // Em `AiMode::Service` não há `sense_ai`: sem este dreno o
+            // `SenseBus` crescia sem limite. Em `Full` corre depois do
+            // `sense_ai`, que já consumiu os eventos do frame.
+            .add_systems(
+                Update,
+                crate::senses::drain_sense_bus
+                    .after(crate::senses::hear_combat)
+                    .after(crate::senses::sense_ai),
+            )
             // O consumidor único do [`AiLocomotion`] corre DEPOIS de todos os
-            // produtores do `Update` (a FSM aqui, a fila de comandos Luau no
-            // `LuauPlugin`) e ANTES da propagação de transforms, para o passo
-            // do frame chegar ao `GlobalTransform` do mesmo frame.
+            // produtores do `Update` (a FSM no `SimpleAiPlugin`, a fila de
+            // comandos Luau no `LuauPlugin`) e ANTES da propagação de
+            // transforms, para o passo do frame chegar ao `GlobalTransform`
+            // do mesmo frame.
             .add_systems(
                 bevy::app::PostUpdate,
                 timed(Group::Ai, apply_ai_locomotion)
                     .in_set(AiLocomotionSystems)
                     .before(bevy::transform::TransformSystems::Propagate),
             );
+    }
+}
+
+/// FSM simples da engine (wander/alert/chase/search). Precisa do
+/// [`AiServicePlugin`] para os sentidos, os vitais e o movimento.
+pub struct SimpleAiPlugin;
+
+impl Plugin for SimpleAiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, timed(Group::Ai, enemy_ai));
+    }
+}
+
+/// Plugin completo de sempre: serviço + FSM simples.
+///
+/// `AiPlugin` = [`AiServicePlugin`] + [`SimpleAiPlugin`]; não duplica
+/// mensagens nem sistemas partilhados.
+pub struct AiPlugin;
+
+impl Plugin for AiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((AiServicePlugin, SimpleAiPlugin));
     }
 }
 
