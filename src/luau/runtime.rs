@@ -407,8 +407,9 @@ pub fn luau_update(
         // Ações do frame: array FIXO de chaves estáticas (o
         // `HashMap<String, bool>` realocava o mapa e seis strings por frame).
         let action_state = locals.actions.as_deref();
-        let pressed =
-            |action: crate::input_map::Action| action_state.is_some_and(|state| state.pressed(action));
+        let pressed = |action: crate::input_map::Action| {
+            action_state.is_some_and(|state| state.pressed(action))
+        };
         use crate::input_map::Action;
         ctx.action_pressed = [
             (Action::Jump.as_str(), pressed(Action::Jump)),
@@ -857,7 +858,7 @@ pub fn luau_update(
                     }
                 }
                 Err(e) => {
-                    host.warn_once(&path, &e);
+                    host.warn_once(path, &e);
                 }
             }
         }

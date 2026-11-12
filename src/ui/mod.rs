@@ -72,8 +72,7 @@ impl bevy::app::Plugin for UiPlugin {
         }
         // O `UiScroll::speed` autoral (26 px por linha) era aplicado pelo
         // driver antigo; o `ScrollArea` do Bevy usa esta razão global.
-        let mut scroll_pixels_per_line =
-            bevy::input::mouse::MouseScrollPixelsPerLine::default();
+        let mut scroll_pixels_per_line = bevy::input::mouse::MouseScrollPixelsPerLine::default();
         *scroll_pixels_per_line = 26.0;
         app.insert_resource(scroll_pixels_per_line);
         app.init_resource::<StyleSheet>()

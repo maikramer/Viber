@@ -373,12 +373,12 @@ pub fn drive_ui_modals(
         });
         if in_closed {
             typing.0 = None;
-            if let Ok(mut classes) = classes.get_mut(focused) {
-                if classes.remove("focused") {
-                    commands
-                        .entity(focused)
-                        .insert(super::runtime::UiStyleDirty);
-                }
+            if let Ok(mut classes) = classes.get_mut(focused)
+                && classes.remove("focused")
+            {
+                commands
+                    .entity(focused)
+                    .insert(super::runtime::UiStyleDirty);
             }
         }
     }
@@ -575,10 +575,7 @@ pub fn activate_ui_tab(
 ///
 /// O overlay é conduzido por `Visibility`/`UiModal::open`, por isso o pedido
 /// não despawna nada: só desliga o flag que o driver já reconcilia.
-pub fn close_modal_on_request(
-    request: On<RequestClose>,
-    mut modals: Query<&mut UiModal>,
-) {
+pub fn close_modal_on_request(request: On<RequestClose>, mut modals: Query<&mut UiModal>) {
     if let Ok(mut modal) = modals.get_mut(request.source) {
         modal.open = false;
     }

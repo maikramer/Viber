@@ -389,7 +389,7 @@ fn end_frame(world: &mut World) {
     let is_hitch = frame_ms >= threshold;
     // Contadores são caros (varrem scripts/luzes/colisores): só em hitches e
     // numa amostra a cada ~0,5 s para o trace.
-    let sampled = if is_hitch || frame <= 1 || frame % 30 == 0 {
+    let sampled = if is_hitch || frame <= 1 || frame.is_multiple_of(30) {
         Some(collect_counters(world))
     } else {
         None

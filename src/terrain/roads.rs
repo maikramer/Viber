@@ -2632,10 +2632,7 @@ mod tests {
             half_width: vec![2.0, 2.0],
             surface: vec![6.0, 6.0],
             deck: vec![false, false],
-            bounds: (
-                Vec2::new(28.0, 62.0),
-                Vec2::new(42.0, 66.0),
-            ),
+            bounds: (Vec2::new(28.0, 62.0), Vec2::new(42.0, 66.0)),
         };
         let spec = road_spec();
         let mesh = road_ribbon_mesh(&grid, &path, &spec, &[], 0);
@@ -2937,7 +2934,7 @@ mod tests {
         // do tabuleiro.
         let pylon_verts = mesh.positions.len() - deck_verts;
         assert!(
-            pylon_verts >= 16 && pylon_verts % 16 == 0,
+            pylon_verts >= 16 && pylon_verts.is_multiple_of(16),
             "whole pylons on a 60 m span: {pylon_verts}"
         );
         let pylon_min_y = mesh.positions[deck_verts..]

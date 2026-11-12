@@ -792,8 +792,7 @@ fn extract_scene_recenters_transform_component_strings() {
         &[EditOp::Insert {
             parent: "#".into(),
             index: None,
-            xml: r#"<Entity name="crate3" transform="pos: 100 0 50; rotation: 0 90 0" />"#
-                .into(),
+            xml: r#"<Entity name="crate3" transform="pos: 100 0 50; rotation: 0 90 0" />"#.into(),
         }],
     )
     .unwrap();
@@ -1169,8 +1168,8 @@ fn instance_loads_the_scene_file_and_groups_list_members() {
     assert!(super::catalog::scene_instance(&doc, "#", "scenes/nope.xml", None).is_err());
     // `..` é recusado MESMO que o caminho resolva para dentro (o `<Include>`
     // gerado tem de ficar contido na raiz).
-    let err = super::catalog::scene_instance(&doc, "#", "scenes/../scenes/tower.xml", None)
-        .unwrap_err();
+    let err =
+        super::catalog::scene_instance(&doc, "#", "scenes/../scenes/tower.xml", None).unwrap_err();
     assert!(format!("{err:#}").contains("sem `..`"), "{err:#}");
     apply_batch(
         &mut doc,

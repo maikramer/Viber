@@ -183,7 +183,7 @@ pub fn teleport_landing(world: &mut World, requested: Vec3, exclude: &[Entity]) 
     }
     let terrain = world.get_resource::<TerrainRuntime>();
     match terrain {
-        Some(rt) => landing_position(Some(&*rt), requested),
+        Some(rt) => landing_position(Some(rt), requested),
         None => requested,
     }
 }
@@ -687,11 +687,14 @@ pub fn player_movement(
         // `v·dt`, que num soluço de frame é uma fração ínfima dos metros
         // pedidos (a distância do empurrão dependia do framerate).
         if let Some(knockback) = knockback.as_deref_mut() {
-            motion += knockback.velocity.with_y(0.0) * crate::physics_fx::knockback_travel_factor(dt);
+            motion +=
+                knockback.velocity.with_y(0.0) * crate::physics_fx::knockback_travel_factor(dt);
             knockback.velocity *= crate::physics_fx::knockback_decay_factor(dt);
             if knockback.velocity.length() < crate::physics_fx::KNOCKBACK_EPSILON {
                 knockback.velocity = Vec3::ZERO;
-                commands.entity(entity).remove::<crate::physics_fx::Knockback>();
+                commands
+                    .entity(entity)
+                    .remove::<crate::physics_fx::Knockback>();
             }
         }
 
@@ -1097,7 +1100,8 @@ mod tests {
     }
 
     #[test]
-    fn test_jump_apex_reaches_height() {        // integrate: with v0 = jump_velocity, apex ≈ jump_height
+    fn test_jump_apex_reaches_height() {
+        // integrate: with v0 = jump_velocity, apex ≈ jump_height
         let v0 = jump_velocity(2.3);
         let mut y = 0.0f32;
         let mut vy = v0;
@@ -1131,7 +1135,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gravity_skips_resting_frames_only() {        // Parado ou a andar numa encosta (grounded, vel_y a zero): sem tick —
+    fn test_gravity_skips_resting_frames_only() {
+        // Parado ou a andar numa encosta (grounded, vel_y a zero): sem tick —
         // era este empurrão que o controller convertia em escorregar.
         assert!(!gravity_applies(true, 0.0));
         // Airborne (a cair ou no topo do arco): gravidade sempre.

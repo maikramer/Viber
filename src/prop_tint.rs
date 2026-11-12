@@ -312,9 +312,7 @@ mod tests {
             shadow_refresh_hz: 0.0,
         });
         let handles: Vec<_> = {
-            let mut assets = app
-                .world_mut()
-                .resource_mut::<Assets<StandardMaterial>>();
+            let mut assets = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
             (0..200)
                 .map(|_| {
                     assets.add(StandardMaterial {
@@ -374,10 +372,7 @@ mod tests {
                 TransmissiveGltf,
             ))
             .id();
-        let mesh = app
-            .world_mut()
-            .spawn(MeshMaterial3d(handle.clone()))
-            .id();
+        let mesh = app.world_mut().spawn(MeshMaterial3d(handle.clone())).id();
         app.world_mut().entity_mut(root).add_child(mesh);
         app.update();
         assert!(

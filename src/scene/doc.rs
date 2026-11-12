@@ -119,8 +119,8 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     // ficheiro novo truncado/zero com o .bak bom. Um crash durante a escrita
     // do `.tmp` também não pode o deixar órfão a meio.
     let write_tmp = || -> anyhow::Result<()> {
-        let mut file = std::fs::File::create(&tmp)
-            .with_context(|| format!("a criar {}", tmp.display()))?;
+        let mut file =
+            std::fs::File::create(&tmp).with_context(|| format!("a criar {}", tmp.display()))?;
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .with_context(|| format!("a escrever {}", tmp.display()))?;
@@ -136,9 +136,8 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     }
     if let Err(error) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(error).with_context(|| {
-            format!("a promover {} → {}", tmp.display(), path.display())
-        });
+        return Err(error)
+            .with_context(|| format!("a promover {} → {}", tmp.display(), path.display()));
     }
     Ok(())
 }

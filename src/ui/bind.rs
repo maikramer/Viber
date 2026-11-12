@@ -75,7 +75,8 @@ impl UiData {
         let value = match name {
             // Vida, ouro, quests, cooldowns e alvo são do jogo: o script
             // publica-os com `viber.ui.set`. A engine só conhece o mundo.
-            "weather.rain" => BoundValue::fraction(self.weather_rain.clamp(0.0, 1.0)),            "weather.wet" => BoundValue::flag(self.weather_rain > 0.05),
+            "weather.rain" => BoundValue::fraction(self.weather_rain.clamp(0.0, 1.0)),
+            "weather.wet" => BoundValue::flag(self.weather_rain > 0.05),
             "clock" => BoundValue::text(self.clock.clone()),
             "day" => BoundValue::fraction(self.day_fraction),
             "prompt.key" => BoundValue::text(self.prompt_key.clone()),

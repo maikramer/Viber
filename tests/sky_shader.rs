@@ -437,7 +437,9 @@ fn render(
         .get_mapped_range()
         .expect("GPU readback mapped range");
     let pixels = mapped
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|pixel| {
             std::array::from_fn(|i| f32::from_le_bytes(pixel[i * 4..i * 4 + 4].try_into().unwrap()))
         })

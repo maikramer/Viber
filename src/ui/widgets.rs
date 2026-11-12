@@ -28,9 +28,7 @@ use crate::ui::interaction::Interaction;
 use bevy::text::EditableText;
 use bevy::ui::{Checked, InteractionDisabled};
 use bevy::ui_widgets::popover::{Popover, PopoverAlign, PopoverPlacement, PopoverSide};
-use bevy::ui_widgets::{
-    Checkbox, Slider, SliderDragState, SliderValue, TextInput, ValueChange,
-};
+use bevy::ui_widgets::{Checkbox, Slider, SliderDragState, SliderValue, TextInput, ValueChange};
 use bevy::window::{CursorIcon, PrimaryWindow};
 
 use super::runtime::{UiClasses, UiDisabled, UiStyleDirty};
@@ -93,8 +91,8 @@ pub fn on_check_value_change(
     } else {
         commands.entity(change.source).remove::<Checked>();
     }
-    let changed = classes.set_class("checked", change.value)
-        | classes.set_class("unchecked", !change.value);
+    let changed =
+        classes.set_class("checked", change.value) | classes.set_class("unchecked", !change.value);
     if changed && !already_dirty {
         commands.entity(change.source).insert(UiStyleDirty);
     }
@@ -244,10 +242,7 @@ pub fn on_slider_value_change(
     slider.value = wanted;
     // Componente imutável: substitui-se. O diff de eventos lê `Changed<UiSlider>`
     // no fim do frame.
-    if values
-        .get(entity)
-        .map_or(true, |value| value.0 != wanted)
-    {
+    if values.get(entity).map_or(true, |value| value.0 != wanted) {
         commands.entity(entity).insert(SliderValue(wanted));
     }
 }
@@ -452,10 +447,7 @@ pub fn blur_ui_inputs_on_enter(
     }
     for key in keys.read() {
         if key.state == bevy::input::ButtonState::Pressed
-            && matches!(
-                key.logical_key,
-                Key::Enter | Key::Escape
-            )
+            && matches!(key.logical_key, Key::Enter | Key::Escape)
         {
             input_focus.clear();
             return;
@@ -620,11 +612,9 @@ pub fn drive_ui_tooltip(
         layer.showing = None;
         layer.target = None;
     }
-    let target = hovered
-        .iter()
-        .find_map(|(entity, interaction, tooltip)| {
-            (*interaction != Interaction::None).then(|| (entity, tooltip.0.clone()))
-        });
+    let target = hovered.iter().find_map(|(entity, interaction, tooltip)| {
+        (*interaction != Interaction::None).then(|| (entity, tooltip.0.clone()))
+    });
     // Lazily build the floating layer the first time anything needs it.
     if layer.entity.is_none() {
         let Some((root, _)) = roots.iter().find(|(_, tag)| tag.0 == "uiroot") else {
@@ -774,8 +764,22 @@ pub fn drive_ui_cursors(
 /// drivers antigos.
 pub fn sync_ui_disabled(
     mut commands: Commands,
-    disabled: Query<Entity, (With<UiDisabled>, With<UiBevyWidget>, Without<InteractionDisabled>)>,
-    enabled: Query<Entity, (Without<UiDisabled>, With<UiBevyWidget>, With<InteractionDisabled>)>,
+    disabled: Query<
+        Entity,
+        (
+            With<UiDisabled>,
+            With<UiBevyWidget>,
+            Without<InteractionDisabled>,
+        ),
+    >,
+    enabled: Query<
+        Entity,
+        (
+            Without<UiDisabled>,
+            With<UiBevyWidget>,
+            With<InteractionDisabled>,
+        ),
+    >,
     inputs: Query<(&UiInput, Has<UiDisabled>)>,
     editables: Query<(Entity, Has<InteractionDisabled>), With<TextInput>>,
 ) {
@@ -884,11 +888,7 @@ mod tests {
         app.add_observer(on_check_value_change);
         let entity = app
             .world_mut()
-            .spawn((
-                Checkbox::default(),
-                UiCheck { checked: false },
-                UiClasses::default(),
-            ))
+            .spawn((Checkbox, UiCheck { checked: false }, UiClasses::default()))
             .id();
         app.world_mut().trigger(ValueChange {
             source: entity,
@@ -901,22 +901,14 @@ mod tests {
             app.world().get::<Checked>(entity).is_some(),
             "o Checked do Bevy é o estado do widget"
         );
-        assert!(
-            app.world()
-                .get::<UiClasses>(entity)
-                .unwrap()
-                .has("checked")
-        );
+        assert!(app.world().get::<UiClasses>(entity).unwrap().has("checked"));
     }
 
     #[test]
     fn test_bevy_slider_value_change_snaps_back() {
         let mut app = App::new();
         app.add_observer(on_slider_value_change);
-        let entity = app
-            .world_mut()
-            .spawn((Slider::default(), slider(5.0)))
-            .id();
+        let entity = app.world_mut().spawn((Slider::default(), slider(5.0))).id();
         app.world_mut().trigger(ValueChange {
             source: entity,
             value: 12.4_f32,
@@ -933,10 +925,7 @@ mod tests {
         app.init_resource::<InputFocus>()
             .init_resource::<UiFocusedInput>()
             .init_resource::<super::super::gamepad::UiGamepadFocus>()
-            .add_systems(
-                Update,
-                (sync_ui_input_focus, sync_ui_focused_class).chain(),
-            );
+            .add_systems(Update, (sync_ui_input_focus, sync_ui_focused_class).chain());
 
         let child = app.world_mut().spawn_empty().id();
         let root = app

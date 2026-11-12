@@ -2776,7 +2776,10 @@ fn test_ecs_lua_spawn_insert_remove_despawn() {
         ))
         .id();
     app.update(); // frame 1: fila aplicada no fim do schedule
-    assert!(app.world().get::<Health>(entity).is_none(), "remove aplicado");
+    assert!(
+        app.world().get::<Health>(entity).is_none(),
+        "remove aplicado"
+    );
     assert!(
         app.world()
             .get::<crate::luau::ScriptActivation>(entity)
@@ -2797,10 +2800,7 @@ fn test_ecs_lua_spawn_insert_remove_despawn() {
     );
 
     app.update(); // frame 2: lê o espelho e despawna
-    assert!(
-        app.world().get_entity(spawned).is_err(),
-        "despawn aplicado"
-    );
+    assert!(app.world().get_entity(spawned).is_err(), "despawn aplicado");
 }
 
 #[test]
@@ -2852,5 +2852,9 @@ fn test_ecs_api_registered() {
     // (com o registo, filtra o que está registado).
     let types_fn: mlua::Function = ecs.get("types").expect("types");
     let types: Table = types_fn.call(()).expect("types()");
-    assert!(types.raw_len() >= 10, "whitelist curada: {}", types.raw_len());
+    assert!(
+        types.raw_len() >= 10,
+        "whitelist curada: {}",
+        types.raw_len()
+    );
 }

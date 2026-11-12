@@ -678,11 +678,11 @@ mod tests {
         )
         .unwrap();
         let config = crate::config::load(dir).unwrap();
-        let loaded = crate::xml::include::load_world(&world).unwrap();
+        let loaded = crate::xml::include::load_world(world).unwrap();
         let parsed = crate::recipes::parse_world(&loaded.root_attrs, &loaded.nodes).unwrap();
-        let mut app = crate::bake::headless_app(&world, &config, parsed).unwrap();
+        let mut app = crate::bake::headless_app(world, &config, parsed).unwrap();
         app.add_plugins((ScenePlugin, SceneSyncPlugin));
-        app.insert_resource(SceneDoc::load(&world).unwrap());
+        app.insert_resource(SceneDoc::load(world).unwrap());
         app.add_systems(Startup, crate::recipes::spawn::startup);
         app.update();
         app
@@ -888,11 +888,15 @@ mod tests {
             .0
             .clone();
         assert!(
-            props.iter().any(|(k, v)| k == "destructible" && v == "hits: 2"),
+            props
+                .iter()
+                .any(|(k, v)| k == "destructible" && v == "hits: 2"),
             "{props:?}"
         );
         assert!(
-            props.iter().any(|(k, v)| k == "resource-kind" && v == "wood"),
+            props
+                .iter()
+                .any(|(k, v)| k == "resource-kind" && v == "wood"),
             "{props:?}"
         );
         assert!(
@@ -1075,12 +1079,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app(tmp.path());
         assert_eq!(named(&mut app, "well").len(), 1);
-        edit(
-            &mut app,
-            &[EditOp::Remove {
-                node: "#2".into(),
-            }],
-        );
+        edit(&mut app, &[EditOp::Remove { node: "#2".into() }]);
         assert!(
             named(&mut app, "well").is_empty(),
             "o include sem pose levou o conteúdo do ficheiro"

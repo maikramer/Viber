@@ -142,7 +142,9 @@ pub fn scatter(world: &mut World, selector: &str) -> Result<ToolOutput> {
     let (parent, index, replace) = match &existing {
         Some(old) => {
             let (Some(parent), Some(index)) = (old.parent(), old.path.last().copied()) else {
-                bail!("scatter `{id}`: o grupo gerado é a raiz do ficheiro — envolve-o num <Group>");
+                bail!(
+                    "scatter `{id}`: o grupo gerado é a raiz do ficheiro — envolve-o num <Group>"
+                );
             };
             (parent, index, true)
         }
@@ -801,8 +803,8 @@ pub fn settle(doc: &mut SceneDoc, selector: &str, offset: f32) -> Result<ToolOut
             }
         });
 
-        let (_, node_rot, _) = super::pose::world_frame(doc, target)
-            .to_scale_rotation_translation();
+        let (_, node_rot, _) =
+            super::pose::world_frame(doc, target).to_scale_rotation_translation();
         let mut new_y = center_h + offset;
         let mut new_world_rot = node_rot;
         if let (Some(bounds), Some(gltf_node)) = (bounds, gltf.as_ref())
@@ -1252,8 +1254,10 @@ mod settle_tests {
         );
         // Rodada, a pegada longa passa a correr em Z; a normal é (0,1,+0.08)/|…|.
         let n = plane.normal();
-        assert!((n.z - (0.08f32 / (1.0f32 + 0.08 * 0.08).sqrt())).abs() < 1e-3, "n={n:?}");
+        assert!(
+            (n.z - (0.08f32 / (1.0f32 + 0.08 * 0.08).sqrt())).abs() < 1e-3,
+            "n={n:?}"
+        );
         assert!((plane.height_at(0.0, 0.0) - 5.0).abs() < 1e-4);
     }
 }
-

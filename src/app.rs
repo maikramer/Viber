@@ -130,9 +130,7 @@ pub struct AppOptions {
     /// do Jackdaw em modo *windowless* — passa o wrapper aqui; `None` mantém
     /// o grupo da engine.
     #[allow(clippy::type_complexity)]
-    pub default_plugins: Option<
-        fn(bevy::app::PluginGroupBuilder) -> bevy::app::PluginGroupBuilder,
-    >,
+    pub default_plugins: Option<fn(bevy::app::PluginGroupBuilder) -> bevy::app::PluginGroupBuilder>,
 }
 
 impl Default for AppOptions {

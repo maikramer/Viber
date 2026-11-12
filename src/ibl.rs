@@ -183,7 +183,7 @@ fn update_sky_cubemap(
     let palette = model_state
         .as_deref()
         .map(|state| state.ibl_palette(&atmosphere))
-        .unwrap_or_else(|| atmosphere.clone());
+        .unwrap_or_else(|| *atmosphere);
     let handle = images.add(sky_cubemap(&palette, nishita.as_ref()));
     // Primeira geração OU troca de fase: o componente entra (re-entra) com
     // o handle REAL. Na troca, o handle antigo sai dos Assets — o filtro GPU

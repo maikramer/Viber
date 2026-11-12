@@ -181,10 +181,7 @@ impl Plugin for FeedbackPlugin {
                 Startup,
                 spawn_damage_number_pool.run_if(damage_numbers_2d_enabled),
             )
-            .add_systems(
-                Update,
-                (low_hp_vignette_system, hit_flash_system),
-            )
+            .add_systems(Update, (low_hp_vignette_system, hit_flash_system))
             .add_systems(
                 Update,
                 damage_numbers_system.run_if(damage_numbers_2d_enabled),

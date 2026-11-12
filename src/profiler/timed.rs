@@ -314,16 +314,16 @@ pub fn record_system(group: Group, key: &'static str, ms: f32) {
             .push(ms);
     }
     let frame = current_frame();
-    if let Ok(mut acc) = FRAME_ACCUM.lock() {
-        if acc.frame == frame {
-            let entry = acc.systems.entry(key).or_insert(AccEntry {
-                group,
-                ms: 0.0,
-                calls: 0,
-            });
-            entry.ms += ms;
-            entry.calls += 1;
-        }
+    if let Ok(mut acc) = FRAME_ACCUM.lock()
+        && acc.frame == frame
+    {
+        let entry = acc.systems.entry(key).or_insert(AccEntry {
+            group,
+            ms: 0.0,
+            calls: 0,
+        });
+        entry.ms += ms;
+        entry.calls += 1;
     }
 }
 
@@ -347,21 +347,21 @@ pub fn record_script(path: &str, ms: f32) {
         }
     }
     let frame = current_frame();
-    if let Ok(mut acc) = FRAME_ACCUM.lock() {
-        if acc.frame == frame {
-            if let Some(entry) = acc.scripts.get_mut(path) {
-                entry.ms += ms;
-                entry.calls += 1;
-            } else {
-                acc.scripts.insert(
-                    path.to_string(),
-                    AccEntry {
-                        group: Group::Scripts,
-                        ms,
-                        calls: 1,
-                    },
-                );
-            }
+    if let Ok(mut acc) = FRAME_ACCUM.lock()
+        && acc.frame == frame
+    {
+        if let Some(entry) = acc.scripts.get_mut(path) {
+            entry.ms += ms;
+            entry.calls += 1;
+        } else {
+            acc.scripts.insert(
+                path.to_string(),
+                AccEntry {
+                    group: Group::Scripts,
+                    ms,
+                    calls: 1,
+                },
+            );
         }
     }
 }

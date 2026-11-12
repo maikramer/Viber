@@ -725,9 +725,13 @@ fn update_voxel_columns(
         // frame: um chão a meio é pior do que ultrapassar o orçamento
         // uma vez; o `saturating_sub` limita a uma coluna destes por
         // frame.
-        let lod = lod_field
-            .get(coords)
-            .unwrap_or_else(|| raw_lod(center_of(coords).distance(cam_xz), spec.lod_distance(), max_lod));
+        let lod = lod_field.get(coords).unwrap_or_else(|| {
+            raw_lod(
+                center_of(coords).distance(cam_xz),
+                spec.lod_distance(),
+                max_lod,
+            )
+        });
         let neighbours = lod_field.neighbours(coords);
         let refined =
             super::voxel::spawn::refined_neighbours(&lod_field, voxel, spec, edge, coords);

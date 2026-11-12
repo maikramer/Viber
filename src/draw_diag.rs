@@ -59,7 +59,7 @@ impl Tally {
             self.tris as f64 / 1e6
         );
         let mut top: Vec<_> = self.by_asset.iter().collect();
-        top.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        top.sort_by_key(|(_, (_, tris))| std::cmp::Reverse(*tris));
         for (label, (count, tris)) in top.into_iter().take(TOP) {
             info!(
                 "draw-diag {view}:   {:>8.1} k tri  {:>5}×  {label}",
@@ -235,7 +235,7 @@ fn asset_churn(
         slot.1 += n;
     }
     let mut top: Vec<_> = by_owner.into_iter().collect();
-    top.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+    top.sort_by_key(|(_, (_, tris))| std::cmp::Reverse(*tris));
     for (label, (meshes, events)) in top.into_iter().take(8) {
         info!("draw-diag   malhas mutadas: {events:>5} eventos  {meshes:>4} malhas  {label}");
     }

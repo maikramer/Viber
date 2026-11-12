@@ -214,7 +214,7 @@ fn toast_display_system(
         });
         // Mesma linha outra vez (colher três bagas seguidas): renova, não
         // empilha — três cópias idênticas não dizem mais do que uma.
-        if pending.iter().any(|text| *text == toast.0) {
+        if pending.contains(&toast.0) {
             // Duplicado do mesmo frame: a primeira pílula já nasceu com a
             // vida cheia — renovar aqui seria empilhar duas iguais.
             continue;

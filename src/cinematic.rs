@@ -852,7 +852,9 @@ fn tick_cinematic(
     // o guarda de 0,4 s do skip tem de ler também o tempo da espera: sem
     // isto, carregar em Esc/Espaço enquanto o streaming/pipelines arrancam
     // (até 7 s no arranque) não fazia NADA — o jogador ficava preso no preto.
-    let skip_elapsed = active.t.max(active.hold.as_ref().map_or(0.0, |h| h.elapsed));
+    let skip_elapsed = active
+        .t
+        .max(active.hold.as_ref().map_or(0.0, |h| h.elapsed));
     if !active.outro
         && (stop_requested || (active.spec.skippable && skip_elapsed > 0.4 && skip_pressed))
     {
@@ -1555,16 +1557,11 @@ mod tests {
             .press(KeyCode::Escape);
         app.update();
         assert!(
-            app.world()
-                .resource::<CinematicPlayback>()
-                .active
-                .is_none(),
+            app.world().resource::<CinematicPlayback>().active.is_none(),
             "Esc durante o hold inicial tem de saltar a cena"
         );
         assert_eq!(
-            app.world()
-                .resource::<Messages<CinematicEnded>>()
-                .len(),
+            app.world().resource::<Messages<CinematicEnded>>().len(),
             1,
             "o skip emite `CinematicEnded`"
         );

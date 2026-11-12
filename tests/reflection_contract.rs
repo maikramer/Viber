@@ -18,7 +18,7 @@ use bevy::reflect::{FromReflect, TypeRegistration, TypeRegistry};
 use serde::de::DeserializeSeed;
 use viber::reflect::ReflectPlugin;
 
-fn registered<'a, T: TypePath>(registry: &'a TypeRegistry) -> &'a TypeRegistration {
+fn registered<T: TypePath>(registry: &TypeRegistry) -> &TypeRegistration {
     registry
         .get_with_type_path(T::type_path())
         .unwrap_or_else(|| panic!("{} não está no AppTypeRegistry", T::type_path()))

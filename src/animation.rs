@@ -853,7 +853,9 @@ fn drive_locomotion_blend(
         blend_diff
             || specs.iter().any(|(node, weight, _)| {
                 let w = weight.max(LOCOMOTION_MIN_WEIGHT);
-                graph.get(*node).is_some_and(|n| (n.weight - w).abs() > 1e-5)
+                graph
+                    .get(*node)
+                    .is_some_and(|n| (n.weight - w).abs() > 1e-5)
             })
     });
     if needs_graph_mut {
@@ -2758,6 +2760,10 @@ mod tests {
         app.world_mut()
             .entity_mut(instance)
             .insert(GlobalTransform::from_translation(Vec3::X * 60.0));
+        // O scan da escada é throttled a 10 Hz pelo movimento da CÂMARA; a
+        // câmara do teste está parada na origem. Sem deixar passar o intervalo,
+        // os 8 updates correm dentro da mesma janela e o swap nem é avaliado.
+        std::thread::sleep(std::time::Duration::from_millis(120));
         for _ in 0..8 {
             app.update();
         }
@@ -2809,7 +2815,7 @@ mod tests {
             Query<(), (With<AnimationPlayer>, Without<BoundAnimation>)>,
         )> = SystemState::new(&mut world);
         {
-            let (children, players) = state.get(&mut world).expect("system state");
+            let (children, players) = state.get(&world).expect("system state");
             assert_eq!(
                 find_animation_player(root, &children, &players),
                 Some(fresh),
@@ -2818,7 +2824,7 @@ mod tests {
         }
         world.entity_mut(fresh).insert(BoundAnimation);
         {
-            let (children, players) = state.get(&mut world).expect("system state");
+            let (children, players) = state.get(&world).expect("system state");
             assert_eq!(
                 find_animation_player(root, &children, &players),
                 None,

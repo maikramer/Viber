@@ -1025,7 +1025,7 @@ pub fn install_ui_api(lua: &Lua, state: &UiScriptState) -> mlua::Result<()> {
                 }
                 let elements = view.elements.lock().ok();
                 let mut index = 0usize;
-                for (id, _) in structure.iter() {
+                for id in structure.keys() {
                     let Some(chain) = chain_of(id, &structure) else {
                         continue;
                     };

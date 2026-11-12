@@ -132,7 +132,7 @@ impl SkyModelState {
     /// 45° sobre um céu de 17°.
     pub fn ibl_palette(&self, live: &AtmosphereState) -> AtmosphereState {
         let Some(sun_dir) = self.static_sun_dir() else {
-            return live.clone();
+            return *live;
         };
         let mut palette = crate::worldsys::atmosphere_for_elevation(self.sun_elevation);
         palette.sun_dir = sun_dir;

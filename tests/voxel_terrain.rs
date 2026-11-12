@@ -452,7 +452,7 @@ fn test_the_tunnel_mesh_has_no_degenerate_triangles() {
     let floor = sliver_area2_floor(voxel_size);
     let total = data.indices.len() / 3;
     let mut slivers = 0usize;
-    for tri in data.indices.chunks_exact(3) {
+    for tri in data.indices.as_chunks::<3>().0 {
         let (a, b, c) = (
             Vec3::from(data.positions[tri[0] as usize]),
             Vec3::from(data.positions[tri[1] as usize]),
@@ -519,7 +519,7 @@ fn test_a_fully_interior_tunnel_chunk_is_watertight() {
                 // Undirected edge census.
                 let mut edges: std::collections::HashMap<(u32, u32), u32> =
                     std::collections::HashMap::new();
-                for tri in data.indices.chunks_exact(3) {
+                for tri in data.indices.as_chunks::<3>().0 {
                     for k in 0..3 {
                         let (a, b) = (tri[k], tri[(k + 1) % 3]);
                         *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
@@ -624,7 +624,7 @@ fn test_refined_cells_do_not_increase_flipped_triangles() {
                 let Some(data) = build_voxel_mesh(&|p| field.density(&grid, p), &params) else {
                     continue;
                 };
-                for tri in data.indices.chunks_exact(3) {
+                for tri in data.indices.as_chunks::<3>().0 {
                     let (a, b, c) = (
                         Vec3::from(data.positions[tri[0] as usize]),
                         Vec3::from(data.positions[tri[1] as usize]),
@@ -753,7 +753,7 @@ fn test_folded_cliff_walls_have_no_holes_and_bounded_flips() {
                 // triangles.
                 let mut edges: std::collections::HashMap<(u32, u32), u32> =
                     std::collections::HashMap::new();
-                for tri in data.indices.chunks_exact(3) {
+                for tri in data.indices.as_chunks::<3>().0 {
                     for k in 0..3 {
                         let (a, b) = (tri[k], tri[(k + 1) % 3]);
                         *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
@@ -772,7 +772,7 @@ fn test_folded_cliff_walls_have_no_holes_and_bounded_flips() {
                 // Winding: geometric normal must agree with the field
                 // gradient (outward = +gradient); seam-band triangles are
                 // exempt (their other half lives in the neighbour).
-                for tri in data.indices.chunks_exact(3) {
+                for tri in data.indices.as_chunks::<3>().0 {
                     if on_border(&data.positions[tri[0] as usize])
                         || on_border(&data.positions[tri[1] as usize])
                         || on_border(&data.positions[tri[2] as usize])

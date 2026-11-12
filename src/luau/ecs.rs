@@ -418,7 +418,7 @@ fn value_from_lua(value: Value) -> mlua::Result<EcsValue> {
     Ok(match value {
         Value::Nil => EcsValue::Nil,
         Value::Boolean(value) => EcsValue::Bool(value),
-        Value::Integer(value) => EcsValue::Int(value as i64),
+        Value::Integer(value) => EcsValue::Int(value),
         Value::Number(value) => EcsValue::Float(value),
         Value::String(value) => EcsValue::Str(value.to_str()?.to_string()),
         Value::Table(table) => table_from_lua(&table)?,
@@ -697,7 +697,7 @@ fn build_component(
         .iter()
         .copied()
         .filter(|name| {
-            let wanted: &str = *name;
+            let wanted: &str = name;
             !fields.iter().any(|(field, _)| field.as_str() == wanted)
         })
         .collect();

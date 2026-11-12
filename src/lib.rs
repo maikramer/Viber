@@ -3,6 +3,15 @@
 //! Library crate exposing the XML loader (`xml`), the recipe IR (`recipes`)
 //! and gameplay modules (`terrain`); the `viber` binary is a thin CLI on top.
 
+// Os sistemas Bevy exprimem queries grandes e os testes das VMs constroem o
+// estado campo a campo; estes lints são ruído de estilo neste código.
+#![allow(
+    clippy::assertions_on_constants,
+    clippy::field_reassign_with_default,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod a11y;
 pub mod adaptive_quality;
 pub mod ai;

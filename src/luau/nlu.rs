@@ -47,7 +47,10 @@ mod imp {
 
     enum Response {
         Loaded(Result<(), String>),
-        Parsed { id: u32, result: Result<celer_nlu::Parsed, String> },
+        Parsed {
+            id: u32,
+            result: Result<celer_nlu::Parsed, String>,
+        },
     }
 
     #[derive(Clone)]
@@ -62,8 +65,12 @@ mod imp {
         load_error: Arc<Mutex<Option<String>>>,
     }
 
-    fn worker(rx: Receiver<Request>, tx: Sender<Response>, ready: Arc<AtomicBool>,
-              load_error: Arc<Mutex<Option<String>>>) {
+    fn worker(
+        rx: Receiver<Request>,
+        tx: Sender<Response>,
+        ready: Arc<AtomicBool>,
+        load_error: Arc<Mutex<Option<String>>>,
+    ) {
         let mut runtime: Option<celer_nlu::Runtime> = None;
         while let Ok(req) = rx.recv() {
             match req {
@@ -102,16 +109,18 @@ mod imp {
                 }
                 Request::Parse { id, text } => {
                     let result = match runtime.as_mut() {
-                        Some(rt) => match std::panic::catch_unwind(
-                            std::panic::AssertUnwindSafe(|| rt.parse(&text)),
-                        ) {
-                            Ok(Ok(p)) => Ok(p),
-                            Ok(Err(e)) => Err(format!("{e:#}")),
-                            // Um panic na inferência não pode matar a worker
-                            // para sempre (poll passaria a dar "worker
-                            // terminou").
-                            Err(_) => Err("viber.nlu: panic na inferência".to_string()),
-                        },
+                        Some(rt) => {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                rt.parse(&text)
+                            })) {
+                                Ok(Ok(p)) => Ok(p),
+                                Ok(Err(e)) => Err(format!("{e:#}")),
+                                // Um panic na inferência não pode matar a worker
+                                // para sempre (poll passaria a dar "worker
+                                // terminou").
+                                Err(_) => Err("viber.nlu: panic na inferência".to_string()),
+                            }
+                        }
                         None => Err("viber.nlu: modelo não carregado".to_string()),
                     };
                     let _ = tx.send(Response::Parsed { id, result });
@@ -122,9 +131,9 @@ mod imp {
 
     fn resolve_dir(lua: &Lua, rel: &str) -> mlua::Result<PathBuf> {
         let relative = Path::new(rel);
-        let inside = relative.components().all(|c| {
-            matches!(c, Component::Normal(_) | Component::CurDir)
-        });
+        let inside = relative
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
         if rel.is_empty() || !inside {
             return Err(mlua::Error::runtime(format!(
                 "viber.nlu.load('{rel}'): só caminhos relativos à pasta do jogo (sem '..')"
@@ -134,9 +143,9 @@ mod imp {
             .app_data_ref::<ScriptCtx>()
             .and_then(|ctx| ctx.scripts_dir.clone())
             .ok_or_else(|| mlua::Error::runtime("viber.nlu.load sem scripts_dir"))?;
-        let world = scripts.parent().ok_or_else(|| {
-            mlua::Error::runtime("viber.nlu.load: scripts/ sem pasta de jogo")
-        })?;
+        let world = scripts
+            .parent()
+            .ok_or_else(|| mlua::Error::runtime("viber.nlu.load: scripts/ sem pasta de jogo"))?;
         Ok(world.join(relative))
     }
 
@@ -255,10 +264,13 @@ mod imp {
                     return Ok((true, mlua::Value::Nil));
                 }
                 if !files_present(&path) {
-                    return Ok((false, mlua::Value::String(lua.create_string(format!(
-                        "viber.nlu: artefacto incompleto em {}",
-                        path.display()
-                    ))?)));
+                    return Ok((
+                        false,
+                        mlua::Value::String(lua.create_string(format!(
+                            "viber.nlu: artefacto incompleto em {}",
+                            path.display()
+                        ))?),
+                    ));
                 }
                 st.tx
                     .send(Request::Load(path))
@@ -273,9 +285,12 @@ mod imp {
             lua.create_function(|lua, text: String| {
                 let st = state(lua)?;
                 if !st.ready.load(Ordering::Acquire) {
-                    return Ok((mlua::Value::Nil, mlua::Value::String(
-                        lua.create_string("viber.nlu: modelo ainda não carregado")?
-                    )));
+                    return Ok((
+                        mlua::Value::Nil,
+                        mlua::Value::String(
+                            lua.create_string("viber.nlu: modelo ainda não carregado")?,
+                        ),
+                    ));
                 }
                 let id = st.next_id.fetch_add(1, Ordering::Relaxed);
                 st.tx
@@ -302,9 +317,9 @@ mod imp {
                 match rx.try_recv() {
                     Ok(resp) => response_to_value(lua, resp),
                     Err(TryRecvError::Empty) => Ok(mlua::Value::Nil),
-                    Err(TryRecvError::Disconnected) => Err(mlua::Error::runtime(
-                        "viber.nlu: worker terminou",
-                    )),
+                    Err(TryRecvError::Disconnected) => {
+                        Err(mlua::Error::runtime("viber.nlu: worker terminou"))
+                    }
                 }
             })?,
         )?;
@@ -315,9 +330,12 @@ mod imp {
             lua.create_function(|lua, text: String| {
                 let st = state(lua)?;
                 if !st.ready.load(Ordering::Acquire) {
-                    return Ok((mlua::Value::Nil, mlua::Value::String(
-                        lua.create_string("viber.nlu: modelo ainda não carregado")?
-                    )));
+                    return Ok((
+                        mlua::Value::Nil,
+                        mlua::Value::String(
+                            lua.create_string("viber.nlu: modelo ainda não carregado")?,
+                        ),
+                    ));
                 }
                 let id = st.next_id.fetch_add(1, Ordering::Relaxed);
                 st.tx
@@ -328,17 +346,22 @@ mod imp {
                 loop {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
-                        return Ok((mlua::Value::Nil, mlua::Value::String(
-                            lua.create_string("viber.nlu.parse: timeout")?
-                        )));
+                        return Ok((
+                            mlua::Value::Nil,
+                            mlua::Value::String(lua.create_string("viber.nlu.parse: timeout")?),
+                        ));
                     }
                     match rx.recv_timeout(left) {
                         Ok(Response::Parsed { id: rid, result }) if rid == id => {
                             return match result {
-                                Ok(p) => Ok((mlua::Value::Table(parsed_to_table(lua, &p)?),
-                                             mlua::Value::Nil)),
-                                Err(e) => Ok((mlua::Value::Nil,
-                                              mlua::Value::String(lua.create_string(e)?))),
+                                Ok(p) => Ok((
+                                    mlua::Value::Table(parsed_to_table(lua, &p)?),
+                                    mlua::Value::Nil,
+                                )),
+                                Err(e) => Ok((
+                                    mlua::Value::Nil,
+                                    mlua::Value::String(lua.create_string(e)?),
+                                )),
                             };
                         }
                         Ok(resp) => {
@@ -349,9 +372,10 @@ mod imp {
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            return Ok((mlua::Value::Nil, mlua::Value::String(
-                                lua.create_string("viber.nlu.parse: timeout")?
-                            )));
+                            return Ok((
+                                mlua::Value::Nil,
+                                mlua::Value::String(lua.create_string("viber.nlu.parse: timeout")?),
+                            ));
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             return Err(mlua::Error::runtime("viber.nlu: worker terminou"));
@@ -382,34 +406,43 @@ mod imp {
 
     pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
         let nlu = lua.create_table()?;
-        nlu.set("available", lua.create_function(|_, _: Option<String>| Ok(false))?)?;
+        nlu.set(
+            "available",
+            lua.create_function(|_, _: Option<String>| Ok(false))?,
+        )?;
         nlu.set("ready", lua.create_function(|_, ()| Ok(false))?)?;
         nlu.set(
             "load",
             lua.create_function(|lua, _: String| {
-                Ok((false, mlua::Value::String(
-                    lua.create_string("viber.nlu: feature 'nlu' desligada")?
-                )))
+                Ok((
+                    false,
+                    mlua::Value::String(lua.create_string("viber.nlu: feature 'nlu' desligada")?),
+                ))
             })?,
         )?;
         nlu.set(
             "submit",
             lua.create_function(|lua, _: String| {
-                Ok((mlua::Value::Nil, mlua::Value::String(
-                    lua.create_string("viber.nlu: feature 'nlu' desligada")?
-                )))
+                Ok((
+                    mlua::Value::Nil,
+                    mlua::Value::String(lua.create_string("viber.nlu: feature 'nlu' desligada")?),
+                ))
             })?,
         )?;
         nlu.set("poll", lua.create_function(|_, ()| Ok(mlua::Value::Nil))?)?;
         nlu.set(
             "parse",
             lua.create_function(|lua, _: String| {
-                Ok((mlua::Value::Nil, mlua::Value::String(
-                    lua.create_string("viber.nlu: feature 'nlu' desligada")?
-                )))
+                Ok((
+                    mlua::Value::Nil,
+                    mlua::Value::String(lua.create_string("viber.nlu: feature 'nlu' desligada")?),
+                ))
             })?,
         )?;
-        nlu.set("last_error", lua.create_function(|_, ()| Ok(mlua::Value::Nil))?)?;
+        nlu.set(
+            "last_error",
+            lua.create_function(|_, ()| Ok(mlua::Value::Nil))?,
+        )?;
         api.set("nlu", nlu)?;
         Ok(())
     }

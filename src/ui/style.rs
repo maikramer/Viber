@@ -3625,11 +3625,7 @@ mod tests {
         };
         let resolve = |class: &str, viewport| {
             let classes = vec![class.to_string()];
-            sheet.resolve(
-                &[root.clone(), element("uipanel", &classes)],
-                viewport,
-                None,
-            )
+            sheet.resolve(&[root, element("uipanel", &classes)], viewport, None)
         };
         let card = resolve("hud-card", VIEW);
         assert!(card.background.is_some());

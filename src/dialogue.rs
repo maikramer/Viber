@@ -20,7 +20,7 @@ use bevy::prelude::*;
 pub struct ExternalSayPresenter;
 
 /// Resolve um texto `@chave` contra a tabela de locale; sem tabela devolve o original.
-pub fn localized<'a>(text: &'a str, table: Option<&HashMap<String, String>>) -> String {
+pub fn localized(text: &str, table: Option<&HashMap<String, String>>) -> String {
     let Some(key) = text.strip_prefix('@') else {
         return text.to_string();
     };

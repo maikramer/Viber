@@ -1671,7 +1671,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         // 1 ref do mundo + os SFX da engine (fixture cria-os, nenhum falha).
         assert_eq!(report.references, 1 + engine_audio_files(&config).len());
         assert_eq!(report.missing_count(), 1);
@@ -1707,7 +1712,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         assert_eq!(
             report.colliderless,
             vec!["/assets/meshes/b.glb".to_string()]
@@ -1738,7 +1748,7 @@ mod tests {
         let report = audit(
             &world,
             &world_dir,
-            &[asset_root.clone()],
+            std::slice::from_ref(&asset_root),
             &crate::config::fixture(),
         );
         assert!(
@@ -1758,11 +1768,7 @@ mod tests {
     #[test]
     fn test_spawner_template_collider_mesh_is_audited() {
         let (_dir, world_dir, asset_root) = setup();
-        std::fs::write(
-            asset_root.join("assets/meshes/rocha.glb"),
-            glb_bytes(None),
-        )
-        .unwrap();
+        std::fs::write(asset_root.join("assets/meshes/rocha.glb"), glb_bytes(None)).unwrap();
         let nodes = crate::xml::parse_fragment(
             r#"<StaticSpawner count="2">
                  <GameObject collider="shape: trimesh; mesh-url: /assets/meshes/rocha_collision.glb">
@@ -1775,12 +1781,15 @@ mod tests {
         let report = audit(
             &world,
             &world_dir,
-            &[asset_root.clone()],
+            std::slice::from_ref(&asset_root),
             &crate::config::fixture(),
         );
         assert!(
-            report.issues.iter().any(|issue| issue.severity == Severity::Missing
-                && issue.message.contains("rocha_collision.glb")),
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.severity == Severity::Missing
+                    && issue.message.contains("rocha_collision.glb")),
             "{:?}",
             report.issues
         );
@@ -1817,7 +1826,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         assert_eq!(report.missing_count(), 0);
         assert_eq!(report.issues.len(), 1, "só o Draco: {:?}", report.issues);
         assert!(report.issues[0].message.contains("Draco"));
@@ -1878,7 +1892,12 @@ mod tests {
             .entities
             .push(with_texture("d", "/assets/textures/ok.png", "z"));
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         assert_eq!(report.missing_count(), 0);
         assert_eq!(report.issues.len(), 3, "{:?}", report.issues);
         assert!(
@@ -1963,7 +1982,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         // Ausentes: lobo.glb (não criado), fantasma.glb, bgm/inexistente.ogg,
         // ui/falta.css — a folha inline não é um ficheiro.
         assert_eq!(report.missing_count(), 4, "{:?}", report.issues);
@@ -2388,7 +2412,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         let hits: Vec<_> = report
             .issues
             .iter()
@@ -2427,7 +2456,12 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::fixture();
-        let report = audit(&world, &world_dir, &[asset_root.clone()], &config);
+        let report = audit(
+            &world,
+            &world_dir,
+            std::slice::from_ref(&asset_root),
+            &config,
+        );
         assert!(
             !report
                 .issues

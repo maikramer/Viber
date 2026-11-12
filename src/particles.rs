@@ -2115,7 +2115,12 @@ mod tests {
         spec.speed = Some((-1e30, 1e30));
         spec.shape_radius = Some(1e30);
         let resolved = resolve(&spec);
-        for value in [resolved.size.0, resolved.size.1, resolved.size_y.0, resolved.size_y.1] {
+        for value in [
+            resolved.size.0,
+            resolved.size.1,
+            resolved.size_y.0,
+            resolved.size_y.1,
+        ] {
             assert!(
                 (0.0..=MAX_PARTICLE_SIZE_M).contains(&value),
                 "tamanho absurdo: {value}"

@@ -149,11 +149,11 @@ impl DayCycleState {
 
     /// Asenta o visual na âncora do estado actual.
     fn snap_visual(&mut self) {
-        self.visual_day = daylight_factor(
-            self.minute_of_day,
-            self.dawn_minute,
-            self.dusk_minute,
-        ) >= 0.5;
+        // O limiar é estrito: no minuto exacto do crepúsculo (factor 0.5) o
+        // visual já é noite. Com `>=` a transição dia→noite nunca arrancava
+        // no minuto autorado do `dusk`.
+        self.visual_day =
+            daylight_factor(self.minute_of_day, self.dawn_minute, self.dusk_minute) > 0.5;
         self.visual_from = if self.visual_day {
             self.day_night.day_minute
         } else {
@@ -169,21 +169,31 @@ impl DayCycleState {
     /// O sentido é sempre o do RELÓGIO: dia 12:00 → noite 22:00 passa pelo
     /// pôr-do-sol; noite 22:00 → dia 12:00 passa pela meia-noite e pelo
     /// nascer do sol. É um "avanço rápido" de alguns segundos, não um corte.
+    /// Uma travessia em curso fica latched até completar; um `set_clock` que
+    /// mude de fase a meio só é aplicado no fim, não a re-targeta.
     pub fn advance_visual(&mut self, dt: f32) {
         if !self.is_day_night() {
             return;
         }
-        let want_day = daylight_factor(
-            self.minute_of_day,
-            self.dawn_minute,
-            self.dusk_minute,
-        ) >= 0.5;
-        if want_day != self.visual_day {
-            // Nova travessia a partir de onde o visual está agora. Também
-            // cobre um `set_clock`/edição a meio da transição.
-            self.visual_day = want_day;
-            self.visual_from = self.visual_now;
-            self.visual_transition = 0.0;
+        // O limiar 0.5 é o mesmo no crepúsculo e no amanhecer. A avaliação só
+        // corre com a travessia ASSENTADA: a meio, o alvo fica latched e o
+        // `daylight` oscilante do minuto exacto não faz o visual saltar de
+        // noite para dia outra vez (20:00 → 05:00 no mesmo frame).
+        if self.visual_transition >= 1.0 {
+            let daylight = daylight_factor(self.minute_of_day, self.dawn_minute, self.dusk_minute);
+            // Hysteresis: quem está em dia só troca quando desce abaixo de
+            // 0.5; quem está em noite só troca quando chega a 0.5.
+            let want_day = if self.visual_day {
+                daylight > 0.5
+            } else {
+                daylight >= 0.5
+            };
+            if want_day != self.visual_day {
+                // Nova travessia a partir de onde o visual está agora.
+                self.visual_day = want_day;
+                self.visual_from = self.visual_now;
+                self.visual_transition = 0.0;
+            }
         }
         let target = if self.visual_day {
             self.day_night.day_minute
@@ -249,7 +259,7 @@ impl DayCycleState {
             visual_now: minute_of_day,
             visual_from: minute_of_day,
             visual_transition: 1.0,
-            visual_day: daylight_factor(minute_of_day, dawn_minute, dusk_minute) >= 0.5,
+            visual_day: daylight_factor(minute_of_day, dawn_minute, dusk_minute) > 0.5,
             shadow_refresh_hz: 0.0,
         }
     }
@@ -1784,8 +1794,7 @@ mod tests {
 
     fn baked_clock(minute: f32, night_cap: f32) -> DayCycleState {
         DayCycleState::from_parts(
-            minute, 0.0, 330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0,
-            night_cap,
+            minute, 0.0, 330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0, night_cap,
         )
         .with_day_night(DayNightConfig {
             day_minute: 720.0,
@@ -2565,7 +2574,7 @@ mod place_tests {
         };
         let grid = BrushGrid::from_height_map(&map, spec.world_size, spec.max_height, 0.0)
             .expect("grid builds");
-        let runtime = TerrainRuntime {
+        TerrainRuntime {
             spec,
             grid: Arc::new(grid),
             water: Vec::new(),
@@ -2575,8 +2584,7 @@ mod place_tests {
             deltas: std::sync::Arc::new(crate::terrain::delta::DeltaGrid::default()),
             paint: std::sync::Arc::new(crate::terrain::paint::PaintGrid::default()),
             splat_tuning: Default::default(),
-        };
-        runtime
+        }
     }
 
     #[test]

@@ -344,10 +344,7 @@ pub fn bgm_zone(
 /// Zona de BGM preferida por uma cena que declara uma layer com o PRÓPRIO id
 /// (o menu declara `<MusicLayer layer="menu">`). `None` = cena principal ou
 /// cena sem layer homónima: aí manda a zona de posição do mundo aberto.
-pub fn scene_zone<'a>(
-    scene_id: Option<&'a str>,
-    has_layer: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
+pub fn scene_zone(scene_id: Option<&str>, has_layer: impl Fn(&str) -> bool) -> Option<&str> {
     scene_id
         .filter(|id| *id != crate::project::MAIN_SCENE)
         .filter(|id| has_layer(id))

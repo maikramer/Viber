@@ -1197,8 +1197,7 @@ mod tests {
     /// esta gama.
     #[test]
     fn test_sharpen_rejects_an_angle_at_or_past_vertical() {
-        let mut grid =
-            BrushGrid::new(vec![0u16; 64 * 64], 64, 64, 64.0, 50.0, 1.0).expect("grid");
+        let mut grid = BrushGrid::new(vec![0u16; 64 * 64], 64, 64, 64.0, 50.0, 1.0).expect("grid");
         grid.begin_stroke("field");
         for z in 0..64 {
             for x in 0..64 {

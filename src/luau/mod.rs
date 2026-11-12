@@ -31,6 +31,8 @@ pub mod commands;
 pub mod components;
 pub mod contacts;
 pub mod ctx;
+pub mod decision;
+pub mod ecs;
 pub mod entity;
 pub mod events;
 pub mod exports;
@@ -39,8 +41,6 @@ pub mod game;
 pub mod host;
 pub mod input;
 pub mod nlu;
-pub mod decision;
-pub mod ecs;
 pub mod ownership;
 pub mod props;
 pub mod runtime;
@@ -100,7 +100,10 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         // contra ele) e o pool de entidades vazias para `viber.ecs.spawn`.
         // O `Arc` do registo é partilhado: o `ReflectPlugin` pode registar
         // mais tipos depois deste plugin ser construído.
-        if let Some(registry) = app.world().get_resource::<bevy::ecs::reflect::AppTypeRegistry>() {
+        if let Some(registry) = app
+            .world()
+            .get_resource::<bevy::ecs::reflect::AppTypeRegistry>()
+        {
             host.set_ecs_registry(registry.0.clone());
         }
         let spawn_queue = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

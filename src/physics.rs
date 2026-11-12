@@ -535,10 +535,9 @@ pub fn replace_with_stump_collider(
     radius: f32,
     half_height: f32,
 ) {
-    commands.entity(entity).try_insert(Collider::cylinder(
-        half_height.max(1e-3),
-        radius.max(1e-3),
-    ));
+    commands
+        .entity(entity)
+        .try_insert(Collider::cylinder(half_height.max(1e-3), radius.max(1e-3)));
 }
 
 /// Builds the collider for a shape that needs no asset (explicit box,
@@ -1642,7 +1641,9 @@ pub fn stream_voxel_colliders(
             // para assar (1 coluna por frame no máximo).
             (false, d) if d <= keep_within => {
                 if let Some(children) = children
-                    && best_repair.as_ref().is_none_or(|(best_d, _, _)| d < *best_d)
+                    && best_repair
+                        .as_ref()
+                        .is_none_or(|(best_d, _, _)| d < *best_d)
                 {
                     best_repair = Some((d, entity, children));
                 }

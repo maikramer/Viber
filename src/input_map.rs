@@ -223,10 +223,7 @@ impl Plugin for InputMapPlugin {
             // mesmo schedule; sem a ordem explícita este sistema podia ler o
             // estado do frame ANTERIOR (ação 1 frame atrasada, conforme a
             // ordem que o scheduler escolhesse).
-            .add_systems(
-                PreUpdate,
-                gather_actions.after(bevy::input::InputSystems),
-            );
+            .add_systems(PreUpdate, gather_actions.after(bevy::input::InputSystems));
     }
 }
 

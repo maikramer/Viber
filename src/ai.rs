@@ -653,7 +653,6 @@ mod tests {
             let mut loco = entity_mut.get_mut::<AiLocomotion>().unwrap();
             loco.drive(Vec2::new(3.0, 0.0));
             loco.look_at(Vec2::new(0.0, 1.0));
-            drop(entity_mut);
             tick(&mut app, 50);
         }
         let facing = app

@@ -153,8 +153,7 @@ fn test_click_press_then_release_same_batch_makes_a_click() {
     }
     app.update(); // release injectado
     assert!(
-        !app
-            .world()
+        !app.world()
             .resource::<ButtonInput<MouseButton>>()
             .pressed(MouseButton::Left),
         "o par no mesmo lote acaba solto (clique, não botão preso)"
@@ -256,6 +255,10 @@ fn test_bridge_end_to_end_headless() {
         &mut app,
         call_async(METHOD_KEY, serde_json::json!({ "key": "KeyW" })),
     );
+    // `send_key` enfileira para o `PreUpdate` seguinte: o pedido HTTP pode
+    // terminar depois de o input core já ter corrido neste frame. Bombear mais
+    // um frame é o contrato do `flush_pending_keys`, não um sleep.
+    app.update();
     let keyboard = app.world().resource::<Messages<KeyboardInput>>();
     assert!(
         keyboard.len() >= 2,
@@ -277,6 +280,12 @@ fn test_bridge_end_to_end_headless() {
     // Sob carga os dois pedidos não caem no mesmo frame — guarda-se o máximo
     // visto durante a espera, não a contagem no fim.
     let mut cursors = std::collections::HashSet::new();
+    // O press do clique sintético é injectado no `PreUpdate` do frame
+    // SEGUINTE ao pedido HTTP (`deferred_mouse_release`); terminar o loop no
+    // instante em que os dois handles fecham podia sair antes desse frame e
+    // perder o `CursorMoved`. Dois frames de folga cobrem press+release e
+    // tornam o teste independente da carga.
+    let mut idle_frames = 0;
     for _ in 0..600 {
         app.update();
         for cursor in app
@@ -287,7 +296,10 @@ fn test_bridge_end_to_end_headless() {
             cursors.insert((cursor.position.x as i32, cursor.position.y as i32));
         }
         if click.is_finished() && mouse_move.is_finished() {
-            break;
+            idle_frames += 1;
+            if idle_frames >= 2 {
+                break;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -435,7 +447,6 @@ fn lua_app(port: u16) -> App {
         base_color: bevy::color::Color::srgb(0.8, 0.2, 0.1),
         ..Default::default()
     });
-    drop(materials);
     app.world_mut().spawn((
         Name::new("rich"),
         Transform::from_xyz(1.0, 2.0, 3.0).with_scale(Vec3::splat(2.0)),
@@ -1744,7 +1755,6 @@ fn test_bridge_raycast_headless() {
         let cube = meshes.add(bevy::mesh::Mesh::from(bevy::shape::Cuboid::new(
             1.0, 1.0, 1.0,
         )));
-        drop(meshes);
         world.spawn((
             Name::new("alvo"),
             Transform::from_xyz(0.0, 5.0, 0.0),

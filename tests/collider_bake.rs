@@ -85,7 +85,9 @@ fn box_geometry(min: Vec3, max: Vec3) -> (Vec<[f32; 3]>, Vec<u16>) {
 fn to_rapier(positions: &[[f32; 3]], indices: &[u16]) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let vtx = positions.iter().map(|v| Vec3::from(*v)).collect();
     let tris = indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
         .collect();
     (vtx, tris)

@@ -213,7 +213,10 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
         app.init_asset::<bevy::gltf::Gltf>();
         app.add_plugins(AttachmentPlugin);
-        let owner = app.world_mut().spawn((Transform::default(), Name::new("hero"))).id();
+        let owner = app
+            .world_mut()
+            .spawn((Transform::default(), Name::new("hero")))
+            .id();
         (app, owner)
     }
 
@@ -245,7 +248,10 @@ mod tests {
         // Sem osso: o pedido fica à espera e a arma antiga continua na mão.
         assert_eq!(app.world().resource::<PendingAttachments>().0.len(), 1);
         assert_eq!(
-            app.world().resource::<AttachmentSlots>().0.get(&(owner, "weapon".into())),
+            app.world()
+                .resource::<AttachmentSlots>()
+                .0
+                .get(&(owner, "weapon".into())),
             Some(&old)
         );
         // O rig chega (glTF carregado): o pedido aplica-se sem o script repetir.
@@ -255,7 +261,10 @@ mod tests {
         assert!(app.world().resource::<PendingAttachments>().0.is_empty());
         let now = app.world().resource::<AttachmentSlots>().0[&(owner, "weapon".into())];
         assert_ne!(now, old);
-        assert_eq!(app.world().get::<ChildOf>(now).map(|c| c.parent()), Some(bone));
+        assert_eq!(
+            app.world().get::<ChildOf>(now).map(|c| c.parent()),
+            Some(bone)
+        );
         assert!(app.world().get_entity(old).is_err());
     }
 

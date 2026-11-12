@@ -41,7 +41,7 @@ use super::runtime::{
 use super::style::Measure;
 use super::style::parse_declarations;
 use super::widgets::{
-    UiBevyWidget, UiCheck, UiInput, UiSlider, UiPickThrough, UiTooltipText, normalized_range,
+    UiBevyWidget, UiCheck, UiInput, UiPickThrough, UiSlider, UiTooltipText, normalized_range,
 };
 use crate::xml::XmlNode;
 
@@ -290,7 +290,7 @@ pub fn build_ui_tree(
                 Interaction::default(),
                 // O widget do Bevy dá activação por Enter/Espaço e o evento
                 // `Activate`; o clique continua a chegar por `Interaction`.
-                bevy::ui_widgets::Button::default(),
+                bevy::ui_widgets::Button,
                 TabIndex(0),
                 AutoDirectionalNavigation::default(),
                 UiBevyWidget,
@@ -302,7 +302,7 @@ pub fn build_ui_tree(
                 Button,
                 Interaction::default(),
                 UiCheck { checked },
-                Checkbox::default(),
+                Checkbox,
                 TabIndex(0),
                 AutoDirectionalNavigation::default(),
                 UiBevyWidget,
@@ -875,7 +875,10 @@ mod tests {
             bevy::ui_widgets::SliderOrientation::Horizontal
         );
         assert_eq!(
-            app.world().get::<bevy::ui_widgets::SliderValue>(track).unwrap().0,
+            app.world()
+                .get::<bevy::ui_widgets::SliderValue>(track)
+                .unwrap()
+                .0,
             14.0
         );
         let range = app
@@ -884,7 +887,10 @@ mod tests {
             .unwrap();
         assert_eq!((range.start(), range.end()), (10.0, 20.0));
         assert_eq!(
-            app.world().get::<bevy::ui_widgets::SliderStep>(track).unwrap().0,
+            app.world()
+                .get::<bevy::ui_widgets::SliderStep>(track)
+                .unwrap()
+                .0,
             2.0
         );
         let ui_slider = app.world().get::<UiSlider>(track).unwrap();

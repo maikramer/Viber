@@ -127,7 +127,7 @@ fn test_carved_boxes_have_no_degenerate_triangles() {
     let mut degenerate = 0usize;
     let mut total = 0usize;
     for (_, data) in &boxes {
-        for tri in data.indices.chunks_exact(3) {
+        for tri in data.indices.as_chunks::<3>().0 {
             let (a, b, c) = (
                 bevy::math::Vec3::from(data.positions[tri[0] as usize]),
                 bevy::math::Vec3::from(data.positions[tri[1] as usize]),
@@ -422,7 +422,7 @@ fn test_the_crossings_world_meshes_as_cleanly_as_the_bare_terrain() {
                 "box of chunk ({cx},{cz}) vertex {i}: normal {n:?} is not unit (len {len})"
             );
         }
-        for tri in data.indices.chunks_exact(3) {
+        for tri in data.indices.as_chunks::<3>().0 {
             let (a, b, c) = (
                 bevy::math::Vec3::from(data.positions[tri[0] as usize]),
                 bevy::math::Vec3::from(data.positions[tri[1] as usize]),

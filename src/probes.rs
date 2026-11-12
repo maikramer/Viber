@@ -162,9 +162,7 @@ fn update_regional_probes(
     let phase = day_phase(clock.as_deref());
     // Uma edição viva do `<Sky model>` troca o `SkyModelState` sem mexer no
     // minuto: força o repaint (o tint de cada probe mantém-se).
-    let model_changed = model_state
-        .as_ref()
-        .is_some_and(|state| state.is_changed());
+    let model_changed = model_state.as_ref().is_some_and(|state| state.is_changed());
     // Os probes não são Persistent: um unload de cena despacha-os, mas o
     // `Local` ficava true e nunca voltavam a nascer. Só repõe `spawned` se
     // HAVIA probes — com `probes.is_empty()` puro, um mundo sem pads com tint
@@ -277,7 +275,7 @@ mod tests {
     /// AABBs regionais.
     #[test]
     fn test_world_ibl_probe_fits_in_the_view_list() {
-        assert!(MAX_PROBES + 1 <= bevy::pbr::MAX_VIEW_LIGHT_PROBES);
+        assert!(MAX_PROBES < bevy::pbr::MAX_VIEW_LIGHT_PROBES);
     }
 
     #[test]

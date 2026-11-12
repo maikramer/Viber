@@ -486,7 +486,10 @@ mod tests {
         // O id vira título: a tabela de nomes é CONTEÚDO do mundo, não da
         // engine (Vael tem os `display-name` no XML).
         assert_eq!(zone_display_name(None, Some("dark-forest")), "Dark Forest");
-        assert_eq!(zone_display_name(None, Some("frozen-peaks")), "Frozen Peaks");
+        assert_eq!(
+            zone_display_name(None, Some("frozen-peaks")),
+            "Frozen Peaks"
+        );
         // Uma região nova no XML já sai legível sem tocar em Rust.
         assert_eq!(zone_display_name(None, Some("sunken-city")), "Sunken City");
         assert_eq!(zone_display_name(None, Some("interior")), "Interior");

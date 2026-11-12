@@ -273,14 +273,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("viber-bsn-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("world")).expect("criar pasta");
-        std::fs::write(dir.join("config.yaml"), "project:\n  main-scene: world.bsn\n")
-            .expect("config");
+        std::fs::write(
+            dir.join("config.yaml"),
+            "project:\n  main-scene: world.bsn\n",
+        )
+        .expect("config");
         std::fs::write(dir.join("world.xml"), "<world static=\"true\" />").expect("world");
         std::fs::write(dir.join("world/mod.xml"), "<world static=\"true\" />").expect("mod");
 
         let expected = dir.canonicalize().expect("canonicalizar");
-        assert_eq!(resolve_root(&[dir.join("world.xml")], None).unwrap(), expected);
-        assert_eq!(resolve_root(&[dir.clone()], None).unwrap(), expected);
+        assert_eq!(
+            resolve_root(&[dir.join("world.xml")], None).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_root(std::slice::from_ref(&dir), None).unwrap(),
+            expected
+        );
 
         std::fs::remove_dir_all(&dir).expect("limpar");
     }

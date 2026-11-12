@@ -23,8 +23,8 @@
 //! para o save em `terrain_patches` — um mundo editado em jogo mente se
 //! o load as esquecer.
 
-use bevy::math::{Vec2, Vec3};
 use bevy::ecs::reflect::ReflectResource;
+use bevy::math::{Vec2, Vec3};
 use bevy::prelude::{Reflect, Resource};
 
 use super::brush::BrushGrid;

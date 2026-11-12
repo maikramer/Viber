@@ -234,7 +234,11 @@ pub fn window_lines(snap: &AudioSnapshot) -> Vec<String> {
                 loop_.id,
                 loop_.clip,
                 loop_.volume,
-                if loop_.ambience { "[ambiente]" } else { "[sfx]" },
+                if loop_.ambience {
+                    "[ambiente]"
+                } else {
+                    "[sfx]"
+                },
                 if loop_.positioned { " [pos]" } else { "" },
             ));
         }
@@ -294,7 +298,9 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("2 total")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("explore")), "{lines:?}");
         assert!(
-            lines.iter().any(|l| l.contains("campfire") && l.contains("[ambiente]")),
+            lines
+                .iter()
+                .any(|l| l.contains("campfire") && l.contains("[ambiente]")),
             "{lines:?}"
         );
         // O crossfade lê-se: o volume CORRENTE da layer aparece ao lado do

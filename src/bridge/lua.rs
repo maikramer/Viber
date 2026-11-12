@@ -5416,7 +5416,6 @@ fn apply_one(world: &mut World, op: DebugOp, warnings: &mut Vec<String>) -> bool
                         return false;
                     };
                     let clone = assets.add(original);
-                    drop(assets);
                     if !world.contains_resource::<DebugMaterialOverrides>() {
                         world.insert_resource(DebugMaterialOverrides::default());
                     }

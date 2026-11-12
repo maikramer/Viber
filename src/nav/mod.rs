@@ -285,8 +285,7 @@ pub fn reset_for_scene(world: &mut World) {
     // obstáculo para os agentes e os NPCs persistentes ficam sem path. Remover
     // o marcador faz o `attach_nav_agents` remontar o bundle contra o
     // arquipélago novo no Update seguinte (o mesmo frame de arranque da cena).
-    let mut stale = world
-        .query_filtered::<Entity, Or<(With<Agent3d>, With<Character<ThreeD>>)>>();
+    let mut stale = world.query_filtered::<Entity, Or<(With<Agent3d>, With<Character<ThreeD>>)>>();
     let stale: Vec<Entity> = stale.iter(world).collect();
     for entity in stale {
         if let Ok(mut entity) = world.get_entity_mut(entity) {
@@ -439,7 +438,8 @@ mod tests {
         assert!(world.get_entity(plain).is_ok(), "entidades alheias ficam");
         assert!(world.get_resource::<NavArchipelago>().is_none());
         assert_eq!(
-            world.resource::<NavTile>().generations, 0,
+            world.resource::<NavTile>().generations,
+            0,
             "o tile da cena antiga é reposto"
         );
     }

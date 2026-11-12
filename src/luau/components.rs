@@ -56,7 +56,9 @@ pub struct Groups(#[reflect(ignore)] pub std::sync::Arc<Vec<String>>);
 /// um `viber.emit(sinal, …)` desta entidade chama.
 #[derive(Debug, Clone, Default, Component, PartialEq, Reflect)]
 #[reflect(Component, Default)]
-pub struct SignalConnections(#[reflect(ignore)] pub std::sync::Arc<Vec<(String, Vec<super::exports::Connection>)>>);
+pub struct SignalConnections(
+    #[reflect(ignore)] pub std::sync::Arc<Vec<(String, Vec<super::exports::Connection>)>>,
+);
 
 impl SignalConnections {
     pub fn of(&self, signal: &str) -> &[super::exports::Connection] {

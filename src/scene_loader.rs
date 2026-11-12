@@ -942,8 +942,8 @@ pub fn reset_scene_resources(world: &mut World) {
     // depois do PostUpdate sobrevivia à troca e o sync aplicava o
     // `Change::Removed/Attrs` — que referencia ficheiros/origens da cena VELHA
     // — às entidades da nova (despawns e shifts errados).
-    if let Some(mut edits) = world
-        .get_resource_mut::<bevy::ecs::message::Messages<crate::scene::live::SceneEdited>>()
+    if let Some(mut edits) =
+        world.get_resource_mut::<bevy::ecs::message::Messages<crate::scene::live::SceneEdited>>()
     {
         edits.clear();
     }

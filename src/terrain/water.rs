@@ -755,8 +755,7 @@ impl WaterBody {
             WaterKind::River => {
                 // Mesma rejeição O(1) do casco, +margem (`blend_surface_y`);
                 // `hull <= 0` (corpo à mão) desliga o rejeite.
-                if self.hull > 0.0
-                    && (p - self.at).length_squared() > (self.hull + margin).powi(2)
+                if self.hull > 0.0 && (p - self.at).length_squared() > (self.hull + margin).powi(2)
                 {
                     return None;
                 }
@@ -2040,7 +2039,7 @@ mod tests {
         for n in 0..200u32 {
             let at = Vec2::new(n as f32 * 37.7 - 2000.0, (n % 13) as f32 * 21.3 - 100.0);
             let shape = LakeShape::new(at);
-            if best.map_or(true, |(_, s)| shape.stretch > s) {
+            if best.is_none_or(|(_, s)| shape.stretch > s) {
                 best = Some((shape, shape.stretch));
             }
         }
@@ -2366,7 +2365,11 @@ mod tests {
         assert!(river.blend_surface_y(far, 4.0).is_none());
         // Dentro do casco: o reject não interfere (passa ao teste fino) —
         // um ponto seco continua seco e húmido continua húmido.
-        for s in river.stations.iter().step_by((river.stations.len() / 8).max(1)) {
+        for s in river
+            .stations
+            .iter()
+            .step_by((river.stations.len() / 8).max(1))
+        {
             let side = Vec2::new(s.x, s.y + river.half_width_at(0) * 4.0);
             assert_eq!(
                 river.contains(side),
@@ -3033,7 +3036,8 @@ mod tests {
             depth: 2.0,
             ..river_spec()
         };
-        let river = carve_river(&mut grid, &river_spec, 0, &[lake.clone()]).expect("river");
+        let river =
+            carve_river(&mut grid, &river_spec, 0, std::slice::from_ref(&lake)).expect("river");
         // A estação mais próxima do centro do lago está À COTA do lago.
         let (_, i, _) = river.stations.iter().enumerate().fold(
             (f32::MAX, 0usize, Vec2::ZERO),
@@ -3085,7 +3089,7 @@ mod tests {
             depth: 2.0,
             ..river_spec()
         };
-        let river = carve_river(&mut grid, &spec, 0, &[lake.clone()]).expect("river");
+        let river = carve_river(&mut grid, &spec, 0, std::slice::from_ref(&lake)).expect("river");
         // 1) A superfície nunca sobe de estação a estação.
         for w in river.surface_y.windows(2) {
             assert!(

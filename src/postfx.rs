@@ -428,8 +428,64 @@ fn profile() -> &'static PostFxProfile {
     POSTFX_PROFILE.get_or_init(PostFxProfile::default)
 }
 
+/// Perfil autorado na CENA (`PostFxSettings` do `.bsn`, editado no Jackdaw).
+/// Substitui o do `config.yaml` enquanto existir e pode mudar ao vivo (o
+/// jogo relê o documento quando é gravado).
+static SCENE_PROFILE: std::sync::LazyLock<std::sync::Mutex<Option<PostFxProfile>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Instala o perfil da cena: `disabled` são chaves de [`fx_off`] (ou os
+/// aliases do config) e `ssao` é `low|medium|high|ultra`. As câmaras são
+/// reconciliadas no frame seguinte.
+pub fn set_scene_profile(disabled: &[&str], ssao: Option<&str>) {
+    let mut off = Vec::new();
+    for raw in disabled {
+        match fx_profile_key(raw) {
+            Some(key) if !off.contains(&key) => off.push(key),
+            Some(_) => {}
+            None => warn!("postfx da cena: efeito desconhecido `{raw}` — ignorado"),
+        }
+    }
+    let profile = PostFxProfile {
+        off,
+        ssao: ssao.and_then(parse_ssao_quality),
+    };
+    let mut scene = SCENE_PROFILE.lock().expect("SCENE_PROFILE");
+    if scene
+        .as_ref()
+        .is_some_and(|current| current.off == profile.off && current.ssao == profile.ssao)
+    {
+        return;
+    }
+    info!(
+        "postfx da cena: off={:?} ssao={:?}",
+        profile.off, profile.ssao
+    );
+    *scene = Some(profile);
+    FX_GATE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Volta ao perfil do `config.yaml`.
+pub fn clear_scene_profile() {
+    if SCENE_PROFILE
+        .lock()
+        .expect("SCENE_PROFILE")
+        .take()
+        .is_some()
+    {
+        FX_GATE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn scene_profile<R>(read: impl FnOnce(&PostFxProfile) -> R) -> Option<R> {
+    SCENE_PROFILE
+        .lock()
+        .ok()
+        .and_then(|scene| scene.as_ref().map(read))
+}
+
 fn profile_off(key: &str) -> bool {
-    profile().off(key)
+    scene_profile(|scene| scene.off(key)).unwrap_or_else(|| profile().off(key))
 }
 
 /// Gate de A/B por efeito: `VIBER_NO_<KEY>=1` tira ESSE efeito da câmara e
@@ -509,12 +565,11 @@ fn ssao_quality(taa: bool) -> ScreenSpaceAmbientOcclusionQualityLevel {
         Ok("medium") | Ok("medio") | Ok("médio") => Q::Medium,
         Ok("high") | Ok("alto") => Q::High,
         Ok("ultra") => Q::Ultra,
-        _ => {
-            quality_gates()
-                .ssao
-                .or(profile().ssao)
-                .unwrap_or(if taa { Q::High } else { Q::Medium })
-        }
+        _ => quality_gates()
+            .ssao
+            .or(scene_profile(|scene| scene.ssao).flatten())
+            .or(profile().ssao)
+            .unwrap_or(if taa { Q::High } else { Q::Medium }),
     }
 }
 

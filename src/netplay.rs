@@ -119,10 +119,10 @@ fn pump(shared: Arc<Shared>, stream: TcpStream) {
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                if let Some(msg) = decode(&line) {
-                    if let Ok(mut inbound) = shared.inbound.lock() {
-                        inbound.push(msg);
-                    }
+                if let Some(msg) = decode(&line)
+                    && let Ok(mut inbound) = shared.inbound.lock()
+                {
+                    inbound.push(msg);
                 }
             }
             Err(e)
@@ -190,14 +190,14 @@ pub fn net_sync(
     // publica a cada 50 ms), as que caíam num frame com o acumulador ainda
     // por cruzar eram perdidas em silêncio (~2/3 delas a 60 fps). O pose
     // continua a 20 Hz; o `act` sai no frame em que aconteceu.
-    if attack_just || interact_just {
-        if let Ok(mut out) = link.shared.outbound.lock() {
-            if attack_just {
-                out.push(NetMsg::Act("attack".into()));
-            }
-            if interact_just {
-                out.push(NetMsg::Act("interact".into()));
-            }
+    if (attack_just || interact_just)
+        && let Ok(mut out) = link.shared.outbound.lock()
+    {
+        if attack_just {
+            out.push(NetMsg::Act("attack".into()));
+        }
+        if interact_just {
+            out.push(NetMsg::Act("interact".into()));
         }
     }
     if *acc >= 0.05

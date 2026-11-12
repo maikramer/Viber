@@ -2949,9 +2949,7 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "mode" => {
                 c.mode = match value.trim().to_ascii_lowercase().as_str() {
                     "continuous" => crate::worldsys::DayCycleMode::Continuous,
-                    "day-night" | "daynight" | "baked" => {
-                        crate::worldsys::DayCycleMode::DayNight
-                    }
+                    "day-night" | "daynight" | "baked" => crate::worldsys::DayCycleMode::DayNight,
                     other => {
                         ctx.warnings.push(format!(
                             "{ctx_tag} mode: `{other}` desconhecido (continuous|day-night) — usando continuous"
@@ -2988,20 +2986,17 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
     } else {
         720.0
     };
-    let night_minute = c
-        .night_minute
-        .unwrap_or(if c.night_cap_minute > 0.0 {
-            c.night_cap_minute
-        } else {
-            1320.0
-        });
+    let night_minute = c.night_minute.unwrap_or(if c.night_cap_minute > 0.0 {
+        c.night_cap_minute
+    } else {
+        1320.0
+    });
     let night_minute = if night_minute.is_finite() {
         night_minute.rem_euclid(DAY_MINUTES)
     } else {
         1320.0
     };
-    if c.mode == crate::worldsys::DayCycleMode::DayNight
-        && (day_minute - night_minute).abs() < 1.0
+    if c.mode == crate::worldsys::DayCycleMode::DayNight && (day_minute - night_minute).abs() < 1.0
     {
         ctx.warnings.push(format!(
             "{ctx_tag}: day-minute e night-minute iguais ({day_minute}) — sem estados distintos, a usar continuous"
@@ -6056,14 +6051,22 @@ mod tests {
     fn test_daycycle_rejects_equal_day_night_anchors() {
         let (spec, w) = parse_one(&node(
             "DayCycle",
-            &[("mode", "day-night"), ("day-minute", "720"), ("night-minute", "720")],
+            &[
+                ("mode", "day-night"),
+                ("day-minute", "720"),
+                ("night-minute", "720"),
+            ],
         ))
         .unwrap();
         let EntityKind::DayCycle { mode, .. } = spec.kind else {
             panic!("expected DayCycle");
         };
         assert_eq!(mode, crate::worldsys::DayCycleMode::Continuous);
-        assert!(w.iter().any(|m| m.contains("day-minute e night-minute iguais")), "{w:?}");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("day-minute e night-minute iguais")),
+            "{w:?}"
+        );
     }
 
     /// `src` vira ficheiro; o texto inline fica CSS mesmo abrindo com `@`.

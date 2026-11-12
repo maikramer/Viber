@@ -741,7 +741,7 @@ fn write_chrome(out: &mut impl Write, finished: &Finished) -> std::io::Result<()
 }
 
 fn io_json(error: serde_json::Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, error)
+    std::io::Error::other(error)
 }
 
 // ---------------------------------------------------------------- json

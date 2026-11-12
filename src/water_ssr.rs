@@ -1177,14 +1177,18 @@ mod tests {
         assert_eq!(packed.len(), 288);
         // cam_pos (após 4 mat4 = 256): xyz da tradução + w=0
         let cam: Vec<f32> = packed[256..272]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(cam, [1.0, 1.0, 1.0, 0.0]);
         // viewport (último vec4, 272..288)
         let tail: Vec<f32> = packed[272..288]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(tail, [1280.0, 720.0, 1.0 / 1280.0, 1.0 / 720.0]);
     }

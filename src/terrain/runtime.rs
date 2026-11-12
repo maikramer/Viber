@@ -531,9 +531,7 @@ pub enum ChunkMaterialHandle {
 /// so sharing IS the single source of height, not a copy of it.
 /// Grelha de preenchimento para o `FromReflect` (campo ignorado).
 fn default_brush_grid() -> std::sync::Arc<BrushGrid> {
-    std::sync::Arc::new(
-        BrushGrid::new(vec![0], 1, 1, 1.0, 1.0, 0.0).expect("grelha 1x1"),
-    )
+    std::sync::Arc::new(BrushGrid::new(vec![0], 1, 1, 1.0, 1.0, 0.0).expect("grelha 1x1"))
 }
 
 #[derive(Resource, Reflect)]
@@ -1864,8 +1862,12 @@ fn spawn_terrain_material(
     // `Smooth` o shader inverte-o (`1 − 1 = 0`): o chão ficava quase
     // espelhado (roughness ≈ 0.15·constante) em vez de usar a rugosidade
     // autoral. O watch repõe `ROUGH_MAP_MIX` quando a imagem real entra.
-    for slot in 0..super::splat::LAYER_COUNT {
-        if bound_roughs[slot] == flat_rough {
+    for (slot, rough) in bound_roughs
+        .iter()
+        .take(super::splat::LAYER_COUNT)
+        .enumerate()
+    {
+        if *rough == flat_rough {
             chunk_params.roughs[slot].y = 0.0;
         }
     }
@@ -2463,7 +2465,7 @@ fn split_ground_surface(
     let alpha = |i: u32| data.colors.get(i as usize).map_or(1.0, |c| c[3]);
     let mut core = Vec::new();
     let mut edge = Vec::new();
-    for tri in data.indices.chunks_exact(3) {
+    for tri in data.indices.as_chunks::<3>().0 {
         let a = [alpha(tri[0]), alpha(tri[1]), alpha(tri[2])];
         if a.iter().all(|&v| v >= OPAQUE) {
             core.extend_from_slice(tri);

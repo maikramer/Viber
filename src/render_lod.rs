@@ -410,13 +410,14 @@ fn update_mesh_lod(
     if let Some(time) = time.as_deref() {
         let now = time.elapsed_secs();
         let scan_interval = lod_scan_interval();
-        if scan_interval > 0.0 && !boost_active && stats.pending == 0 {
-            if let Some((last_eye, last_time)) = *last_scan
-                && now - last_time < scan_interval
-                && eye.distance_squared(last_eye) < 4.0
-            {
-                return;
-            }
+        if scan_interval > 0.0
+            && !boost_active
+            && stats.pending == 0
+            && let Some((last_eye, last_time)) = *last_scan
+            && now - last_time < scan_interval
+            && eye.distance_squared(last_eye) < 4.0
+        {
+            return;
         }
         *last_scan = Some((eye, now));
     }
@@ -606,11 +607,11 @@ mod tests {
     fn test_cull_range_lands_on_every_renderable_descendant() {
         let mut app = App::new();
         app.add_systems(Update, propagate_cull_ranges);
-        let root = app
+        let root = app.world_mut().spawn(CullDistance::new(100.0)).id();
+        let mesh = app
             .world_mut()
-            .spawn(CullDistance::new(100.0))
+            .spawn((Mesh3d::default(), ChildOf(root)))
             .id();
-        let mesh = app.world_mut().spawn((Mesh3d::default(), ChildOf(root))).id();
         let deep = app
             .world_mut()
             .spawn((Mesh3d::default(), ChildOf(mesh)))
@@ -638,16 +639,16 @@ mod tests {
     fn test_cull_range_waits_for_the_scene_to_spawn() {
         let mut app = App::new();
         app.add_systems(Update, propagate_cull_ranges);
-        let root = app
-            .world_mut()
-            .spawn(CullDistance::new(80.0))
-            .id();
+        let root = app.world_mut().spawn(CullDistance::new(80.0)).id();
         app.update();
         assert!(
             app.world().get::<CullRangeApplied>(root).is_none(),
             "sem malhas ainda não há o que marcar"
         );
-        let mesh = app.world_mut().spawn((Mesh3d::default(), ChildOf(root))).id();
+        let mesh = app
+            .world_mut()
+            .spawn((Mesh3d::default(), ChildOf(root)))
+            .id();
         app.update();
         assert!(app.world().get::<VisibilityRange>(mesh).is_some());
         assert!(app.world().get::<CullRangeApplied>(root).is_some());
@@ -733,7 +734,7 @@ mod tests {
                 }
             }
         }
-        let per_island = (row * row) as u32;
+        let per_island = row * row;
         let out = simplify_far_indices(&positions, &indices, 200).expect("reduz");
         for tri in out.chunks(3) {
             let island = tri[0] / per_island;

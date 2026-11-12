@@ -175,14 +175,11 @@ pub fn batch_tiles(
     // 2. Agrupa por (tile, mesh, material). O material entra na chave: dois
     //    props com a mesma mesh mas materiais distintos não podem partilhar
     //    o draw (o primeiro material pintava os dois).
-    let existing: std::collections::HashSet<(
-        IVec2,
-        AssetId<Mesh>,
-        AssetId<StandardMaterial>,
-    )> = tiles
-        .iter()
-        .map(|(_, tile)| (tile.key, tile.mesh_id, tile.material_id))
-        .collect();
+    let existing: std::collections::HashSet<(IVec2, AssetId<Mesh>, AssetId<StandardMaterial>)> =
+        tiles
+            .iter()
+            .map(|(_, tile)| (tile.key, tile.mesh_id, tile.material_id))
+            .collect();
     let mut groups: HashMap<
         (IVec2, AssetId<Mesh>, AssetId<StandardMaterial>),
         Vec<(Entity, Mat4, Handle<Mesh>, Handle<StandardMaterial>)>,

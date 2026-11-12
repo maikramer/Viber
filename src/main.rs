@@ -583,7 +583,8 @@ enum DebugCommand {
         /// Segura a tecla durante N ms e larga-a (equivale a press, espera,
         /// release) — o `click` de um só frame perdia-se e o herói não andava.
         #[arg(long, conflicts_with = "state")]
-        hold_ms: Option<u64>,        #[arg(long)]
+        hold_ms: Option<u64>,
+        #[arg(long)]
         port: Option<u16>,
         /// Mundo que identifica a engine alvo (caminho, nome de ficheiro ou
         /// stem) — resolve a porta pelo engine.json da sessão desse mundo.
@@ -772,9 +773,11 @@ fn discover_world_in(cwd: &Path) -> Option<PathBuf> {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|p| {
-                p.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("bsn") || ext.eq_ignore_ascii_case("xml")
-                })
+                p.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("bsn") || ext.eq_ignore_ascii_case("xml")
+                    })
             })
             .collect();
         worlds.sort();
@@ -1885,8 +1888,7 @@ fn looks_like_engine(args: &[String], world: &Path) -> bool {
         // engine.json mas o argv traz a pasta; sem esta forma, o `session
         // down` recusava a engine (GPU presa) por "PID reutilizado".
         arg_path.is_dir()
-            && std::fs::canonicalize(project_world_file(&arg_path))
-                .is_ok_and(|main| main == world)
+            && std::fs::canonicalize(project_world_file(&arg_path)).is_ok_and(|main| main == world)
     })
 }
 
