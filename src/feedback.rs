@@ -50,6 +50,28 @@ pub struct AttackAlert {
 
 // ── componentes / recursos ──────────────────────────────────────────────
 
+/// Liga/desliga o pool 2D de números de dano (texto UI projectado no ecrã).
+///
+/// A mensagem [`DamageNumberEvent`] continua a ser emitida de qualquer forma:
+/// um jogo que desenha o seu próprio texto no mundo (o Vael usa
+/// `bevy_rich_text3d`) põe isto a `false` para não duplicar os números. O
+/// default é `true` — o `viber run` e os mundos sem feedback próprio ficam
+/// como sempre.
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
+pub struct DamageNumbers2d(pub bool);
+
+impl Default for DamageNumbers2d {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// Run condition do pool 2D: só desenha (e só cria os slots) quando ligado.
+fn damage_numbers_2d_enabled(config: Res<DamageNumbers2d>) -> bool {
+    config.0
+}
+
 /// Slot do pool de números de dano.
 #[derive(Debug, Clone, Component, Reflect)]
 #[reflect(Component)]
@@ -151,14 +173,21 @@ impl Plugin for FeedbackPlugin {
             // O hit-flash clona StandardMaterials — apps mínimas precisam do
             // registo (bare `Assets`, sem AssetServer).
             .init_resource::<Assets<StandardMaterial>>()
-            .add_systems(Startup, (spawn_low_hp_vignette, spawn_damage_number_pool))
+            .init_resource::<DamageNumbers2d>()
+            // O pool 2D é opcional: o jogo pode desenhar o texto no mundo
+            // (Vael/`bevy_rich_text3d`) e a mensagem continua a chegar-lhe.
+            .add_systems(Startup, spawn_low_hp_vignette)
+            .add_systems(
+                Startup,
+                spawn_damage_number_pool.run_if(damage_numbers_2d_enabled),
+            )
             .add_systems(
                 Update,
-                (
-                    low_hp_vignette_system,
-                    damage_numbers_system,
-                    hit_flash_system,
-                ),
+                (low_hp_vignette_system, hit_flash_system),
+            )
+            .add_systems(
+                Update,
+                damage_numbers_system.run_if(damage_numbers_2d_enabled),
             );
     }
 }
@@ -505,6 +534,27 @@ mod tests {
         // Nota: a projeção (world_to_viewport) precisa de viewport real —
         // headless ela esconde o slot; o render é verificado in-game via
         // screenshots da bridge (validação do loop).
+    }
+
+    #[test]
+    fn test_damage_numbers_2d_can_be_disabled() {
+        // Um jogo com texto próprio no mundo (Vael/`bevy_rich_text3d`) desliga
+        // o pool 2D; a mensagem continua a ser emitida e ninguém a desenha.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(FeedbackPlugin);
+        app.insert_resource(DamageNumbers2d(false));
+        app.update(); // Startup: sem pool
+        let world = app.world_mut();
+        let mut q = world.query::<&DamageNumberSlot>();
+        assert_eq!(q.iter(world).count(), 0, "pool 2D não é criado");
+
+        app.world_mut().write_message(DamageNumberEvent {
+            position: Vec3::new(0.0, 1.5, 0.0),
+            text: "-10".into(),
+            color: Color::srgb(1.0, 0.3, 0.2),
+        });
+        app.update(); // o sistema desligado não toca em slots inexistentes
     }
 
     #[test]

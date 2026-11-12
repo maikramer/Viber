@@ -1888,13 +1888,45 @@ fn collider_summary(collider: &Collider) -> ColliderSummary {
 }
 
 /// Resumo do `Mesh` (contagens + bounds de UV_0).
+///
+/// Malhas com `asset_usage` só `RENDER_WORLD` (a UI do `bevy_pf`, glyphs e
+/// outras) têm os atributos já extraídos para o render world e o
+/// `Mesh::attribute` faz PANIC. O snapshot do bridge serve QA e não pode
+/// derrubar o jogo por causa de uma malha que não é do mundo — nesse caso
+/// devolve contagens a zero e segue.
 fn mesh_summary(mesh: &Mesh) -> MeshSummary {
-    let uvs = mesh.attribute(Mesh::ATTRIBUTE_UV_0);
+    // Malhas com `asset_usage` só `RENDER_WORLD` (a UI do `bevy_pf`, glyphs)
+    // têm os atributos já extraídos e o `Mesh::attribute` faz PANIC. O
+    // snapshot do bridge serve QA e não pode derrubar o jogo por uma malha
+    // que não é do mundo: devolve contagens a zero e segue.
+    if !mesh
+        .asset_usage
+        .contains(bevy::asset::RenderAssetUsages::MAIN_WORLD)
+    {
+        return MeshSummary {
+            topology: format!("{:?}", mesh.primitive_topology()),
+            vertices: 0,
+            // `indices()` TAMBÉM faz panic numa malha já extraída (o guarda
+            // de `asset_usage` não chega: a extração pode ter acontecido e o
+            // asset_usage continuar a incluir MAIN_WORLD). `try_indices` é a
+            // variante que devolve erro — o snapshot não derruba o jogo.
+            indices: mesh.try_indices().ok().map(|indices| indices.len() as u32),
+            has_normals: false,
+            has_uvs: false,
+            uv_count: 0,
+            uv_min: None,
+            uv_max: None,
+        };
+    }
+    let uvs = mesh.try_attribute(Mesh::ATTRIBUTE_UV_0).ok();
     let mut summary = MeshSummary {
         topology: format!("{:?}", mesh.primitive_topology()),
-        vertices: mesh.count_vertices() as u32,
-        indices: mesh.indices().map(|indices| indices.len() as u32),
-        has_normals: mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some(),
+        vertices: mesh
+            .try_attribute(Mesh::ATTRIBUTE_POSITION)
+            .map(|positions| positions.len() as u32)
+            .unwrap_or(0),
+        indices: mesh.try_indices().ok().map(|indices| indices.len() as u32),
+        has_normals: mesh.try_attribute(Mesh::ATTRIBUTE_NORMAL).is_ok(),
         has_uvs: uvs.is_some(),
         uv_count: uvs.map(|uvs| uvs.len() as u32).unwrap_or(0),
         uv_min: None,

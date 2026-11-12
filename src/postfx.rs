@@ -871,7 +871,10 @@ impl Plugin for PostFxPlugin {
 fn attach_postfx_to_cameras(
     mut commands: Commands,
     state: Res<PostFxState>,
-    cameras: Query<Entity, (With<Camera3d>, Without<Bloom>)>,
+    // Só câmaras de JANELA: as offscreen (bake de impostores, render para
+    // textura) não levam a lente — nem prepasses, nem bloom/SSAO, nem o SSR
+    // que misturava alvos de tamanhos diferentes.
+    cameras: Query<(Entity, &bevy::camera::RenderTarget), (With<Camera3d>, Without<Bloom>)>,
     mut curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     // Uma curva por processo, partilhada por todas as câmaras.
     mut curve: ResMut<AutoExposureCurve>,
@@ -897,7 +900,10 @@ fn attach_postfx_to_cameras(
             }
         })
         .clone();
-    for camera in &cameras {
+    for (camera, target) in &cameras {
+        if !matches!(target, bevy::camera::RenderTarget::Window(_)) {
+            continue;
+        }
         commands.entity(camera).insert((
             Bloom {
                 intensity: state.bloom,

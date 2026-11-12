@@ -20,7 +20,7 @@
 //!   does need a one-shot propagation pass once the scene has spawned.
 
 use crate::profiler::{Group, timed};
-use bevy::camera::visibility::VisibilityRange;
+use bevy::camera::visibility::{NoCpuCulling, VisibilityRange};
 use bevy::gltf::Gltf;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::skinning::SkinnedMesh;
@@ -300,6 +300,17 @@ fn swap_budget() -> usize {
         .unwrap_or(MAX_LOD_SWAPS_PER_FRAME)
 }
 
+/// Intervalo entre varreduras da escada (s). `VIBER_LOD_SCAN_HZ=0` desliga o
+/// throttle — o braço de controlo do A/B contra o scan por frame.
+fn lod_scan_interval() -> f32 {
+    let hz = std::env::var("VIBER_LOD_SCAN_HZ")
+        .ok()
+        .and_then(|raw| raw.parse::<f32>().ok())
+        .filter(|hz| hz.is_finite() && *hz >= 0.0)
+        .unwrap_or(10.0);
+    if hz == 0.0 { 0.0 } else { 1.0 / hz }
+}
+
 /// Scene swaps performed on the last frame, and instances still waiting.
 ///
 /// A swap is the expensive half of the ladder (despawn + respawn of a glTF
@@ -374,8 +385,12 @@ fn retag_no_shadow_on_ready(
 fn update_mesh_lod(
     editor: Query<&GlobalTransform, With<crate::editor_camera::EditorCamera>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
+    // `Option`: apps mínimas de teste não montam o TimePlugin; sem tempo,
+    // não há throttle (o comportamento antigo).
+    time: Option<Res<Time>>,
     mut stats: ResMut<MeshLodStats>,
     boost: Option<Res<crate::cinematic::StreamingBoost>>,
+    mut last_scan: Local<Option<(Vec3, f32)>>,
     mut instances: Query<(
         &GlobalTransform,
         &mut MeshLod,
@@ -389,13 +404,24 @@ fn update_mesh_lod(
         return;
     };
     let eye = camera.translation();
+    let boost_active = boost.as_deref().is_some_and(|b| b.0);
+    // ~10 Hz chegam para a escada: o hysteresis de 8% já evita pop. Com
+    // swaps pendentes ou cinemática, continua a drenar todos os frames.
+    if let Some(time) = time.as_deref() {
+        let now = time.elapsed_secs();
+        let scan_interval = lod_scan_interval();
+        if scan_interval > 0.0 && !boost_active && stats.pending == 0 {
+            if let Some((last_eye, last_time)) = *last_scan
+                && now - last_time < scan_interval
+                && eye.distance_squared(last_eye) < 4.0
+            {
+                return;
+            }
+        }
+        *last_scan = Some((eye, now));
+    }
     // Corte de cinemática em curso (ecrã em negro): drenar a fila depressa.
-    let mut budget = swap_budget()
-        * if boost.as_deref().is_some_and(|b| b.0) {
-            10
-        } else {
-            1
-        };
+    let mut budget = swap_budget() * if boost_active { 10 } else { 1 };
     if budget == 0 {
         // `VIBER_LOD_SWAP_BUDGET=0` DESLIGA a escada (braço de A/B do
         // profiler). Reportar `pending` aqui dizia ao `tick_cinematic` que o
@@ -461,20 +487,28 @@ fn propagate_cull_ranges(
     roots: Query<(Entity, &CullDistance), Without<CullRangeApplied>>,
     children: Query<&Children>,
     renderables: Query<
-        Has<VisibilityRange>,
+        (Has<VisibilityRange>, Has<Mesh3d>, Has<SkinnedMesh>),
         Or<(With<Mesh3d>, With<PointLight>, With<SpotLight>)>,
     >,
 ) {
+    // Piloto Bevy 0.19: o frustum/range passa a ser culling da GPU. Só em
+    // malhas estáticas; luzes e skinned continuam no caminho CPU. Opt-in
+    // porque em backends sem GPU culling (DX12/WebGL) o `NoCpuCulling` não
+    // tem rede — aí não se liga.
+    let gpu_culling = std::env::var("VIBER_GPU_CULLING").as_deref() == Ok("1");
     for (root, cull) in &roots {
         let range = VisibilityRange::abrupt(0.0, cull.radius.max(1.0));
         let mut found = 0usize;
         for descendant in children.iter_descendants(root) {
-            let Ok(already_tagged) = renderables.get(descendant) else {
+            let Ok((already_tagged, is_mesh, is_skinned)) = renderables.get(descendant) else {
                 continue;
             };
             found += 1;
             if !already_tagged {
                 commands.entity(descendant).insert(range.clone());
+            }
+            if gpu_culling && is_mesh && !is_skinned {
+                commands.entity(descendant).insert(NoCpuCulling);
             }
         }
         // Sem malhas ainda: a cena não spawnou, o marcador fica para o

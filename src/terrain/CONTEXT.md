@@ -18,9 +18,9 @@ máscaras (CliffMask, splat, biomas).
    caves só no pé de encostas, com o path inteiro validado — e passa a specs
    normais) → mods do campo voxel → spawna as COLUNAS voxel dentro do raio
    de render, água e ribbons.
-2. **Runtime** (`plugin.rs`): ladder de LOD por coluna (célula 1→2→4 m,
-   histerese + gate anti-thrash), construção staged sob budget de caixas por
-   frame, cull por `render-distance`, respawn à aproximação.
+2. **Runtime** (`plugin.rs`): ladder de LOD por coluna (célula
+   1→2→4→8→16 m, histerese + gate anti-thrash), construção staged sob budget
+   de caixas por frame, cull por `render-distance`, respawn à aproximação.
 3. **Gameplay** lê sem tocar na mesh: `TerrainRuntime::sample /
    sample_mesh_surface / in_water / on_road` (recurso), `WaterBody`,
    `RoadPath` — é isto que o player, os spawners e os scripts usam. As
@@ -45,20 +45,11 @@ Armadilha conhecida fora da pasta: o `AGENTS.md` da raiz documenta que
 larguras de estrada < 1.5 texéis viram no-op (promovidas por `min_effective`)
 — mundos com estradas finixinhas podem parecer "não carved".
 
-## Seals (saias de coluna) — a regra que já se pagou caro
+## Costuras de LOD
 
-A saia de fronteira de coluna (`seal_faces` no mesher) existe para tapar a
-fenda entre anéis de LOD desiguais (o vizinho a 2/4 m desacorda da nossa
-polilinha até a uma célula grossa), e já produziu o artefacto oposto:
-
-1. **Só arestas com traverso horizontal selam.** Uma aresta quase vertical na
-   fronteira é uma parede que continua abaixo — selá-la produzia triângulos
-   degenerados (a, b e as cópias caídas colineares) e não tapava nada.
-2. **"Sempre selar" é deliberado.** A parede selada fica enterrada no sólido
-   quando o vizinho concorda; saber o LOD do vizinho no momento do rebuild
-   acoplava colunas e forçava rebuilds em cascata. A parede invisível custa
-   menos que o acoplamento.
-
-Regressões: `test_seal_hangs_border_edges_down_without_touching_the_interior`,
-`test_carved_boxes_have_no_degenerate_triangles` (teto honesto para os flaps
-sub-voxel documentados).
+As costuras entre colunas de LOD diferente são feitas pelas células de
+transição do transvoxel (`voxel/transvoxel_mesh.rs`), só nas faces laterais;
+não há saias verticais (`seal_faces` foi removido). A regressão de saúde da
+malha é `test_carved_boxes_have_no_degenerate_triangles`
+(`tests/terrain_mesh_health.rs`); os flaps sub-voxel continuam documentados
+em `AGENTS.md`.

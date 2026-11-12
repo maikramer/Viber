@@ -1,5 +1,5 @@
 //! Montagem da App do Viber — partilhada entre o binário `viber run`
-//! ([`RunMode::Game`]) e o ViberEditor in-process ([`RunMode::Edit`]).
+//! ([`RunMode::Game`]) e o modo de edição in-process ([`RunMode::Edit`]).
 //!
 //! [`build_app`] lê o mundo + `config.yaml`, especializa os shaders por mundo,
 //! instala o `DefaultPlugins` (janela, asset roots multi-root) e todos os
@@ -45,7 +45,7 @@ pub enum RunMode {
     /// `viber run`: o jogo.
     #[default]
     Game,
-    /// ViberEditor in-process: cena congelada, editada pelo editor.
+    /// Modo de edição in-process: cena congelada.
     Edit,
 }
 
@@ -98,6 +98,11 @@ pub struct AppOptions {
     /// essas regras para quem monta a App. O player/câmara têm o seu próprio
     /// gate ([`Self::player_camera`]) e a IA o seu ([`Self::ai`]).
     pub gameplay: bool,
+    /// Pool 2D de números de dano (`viber.damage_number`), projectado para a
+    /// UI. `false` para um jogo que desenha o texto no mundo (o Vael usa
+    /// `bevy_rich_text3d`): a mensagem `DamageNumberEvent` continua a ser
+    /// emitida, só o pool de UI da engine deixa de existir.
+    pub damage_numbers_2d: bool,
     /// IA da engine: [`AiMode::Full`] (serviço + FSM simples, o de sempre),
     /// [`AiMode::Service`] (só sentidos/movimento, comportamento do jogo) ou
     /// [`AiMode::Off`].
@@ -114,6 +119,20 @@ pub struct AppOptions {
     /// Profiler (overlay F3, recursos e âncoras de render). O `timed(...)` dos
     /// sistemas mede sempre (rings em processo) — sem o plugin só ninguém lê.
     pub profiler: bool,
+    /// Espelho por frame de `viber.ecs` (travessia refletida de todos os
+    /// componentes da whitelist). Jogos que não usam `viber.ecs` podem
+    /// desligá-lo: o sistema exclusivo deixa de bloquear o `Update` e de
+    /// alocar um snapshot completo por frame. O bridge continua a construir
+    /// um espelho ao vivo quando precisa (`build_mirror_live`).
+    pub ecs_mirror: bool,
+    /// Configura o grupo [`bevy::DefaultPlugins`] imediatamente antes de ele
+    /// entrar na App. Um jogo que precise de o envolver — o Vael usa o PIE
+    /// do Jackdaw em modo *windowless* — passa o wrapper aqui; `None` mantém
+    /// o grupo da engine.
+    #[allow(clippy::type_complexity)]
+    pub default_plugins: Option<
+        fn(bevy::app::PluginGroupBuilder) -> bevy::app::PluginGroupBuilder,
+    >,
 }
 
 impl Default for AppOptions {
@@ -127,11 +146,14 @@ impl Default for AppOptions {
             start_entry: None,
             world_path: None,
             gameplay: true,
+            damage_numbers_2d: true,
             ai: AiMode::Full,
             player_camera: true,
             scripts: ScriptsMode::Compat,
             ui: true,
             profiler: true,
+            ecs_mirror: true,
+            default_plugins: None,
         }
     }
 }
@@ -246,15 +268,18 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
         start_entry,
         world_path,
         gameplay,
+        damage_numbers_2d,
         ai,
         player_camera,
         scripts,
         ui,
         profiler,
+        ecs_mirror,
+        default_plugins,
     } = opts;
     // Modo Edit: o editor in-process é dono da navegação, do input e da janela — câmara
     // de editor, simulação congelada. O bridge só existe se o editor o pedir
-    // (`vibereditor --bridge`): um agente a editar o MESMO documento que o humano.
+    // (`viber run --bridge`): um agente a editar o MESMO documento que o humano.
     let camera_free = camera_free || mode == RunMode::Edit;
     // Absolutizado aqui também: esta entrada é pública e o chamador pode vir
     // com um caminho relativo (o `build_app` já o absolutiza).
@@ -473,6 +498,9 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
             ..Default::default()
         });
     }
+    if let Some(configure) = default_plugins {
+        plugins = configure(plugins);
+    }
     app.add_plugins(plugins);
     // Reflexão dos tipos de jogo no `AppTypeRegistry` (BRP/`viber.query`):
     // independente do resto — um app com `gameplay`/`ui`/`scripts` desligados
@@ -576,12 +604,26 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
         );
     }
     // Documento editável do mundo (`crate::scene`): a fonte das edições de agentes
-    // (`viber.scene.*`) e do ViberEditor — carregado em todos os modos, é barato.
+    // (`viber.scene.*`) e do modo de edição — carregado em todos os modos, é barato.
     app.add_plugins((
         crate::scene::live::ScenePlugin,
         crate::scene::sync::SceneSyncPlugin,
     ));
-    app.insert_resource(crate::scene::doc::SceneDoc::load(path)?);
+    // O documento vivo (`viber.scene.*`, undo/live sync) continua XML. Num
+    // mundo `.bsn` ele não é carregado: a autoria é no Jackdaw e o bridge
+    // devolve "sem documento" nas operações de cena.
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bsn"))
+    {
+        info!(
+            "scene doc: {} é .bsn — edição de cena via Jackdaw; `viber.scene.*` desligado",
+            path.display()
+        );
+    } else {
+        app.insert_resource(crate::scene::doc::SceneDoc::load(path)?);
+    }
     // O save é do JOGO (projeto), não da cena: a chave é sempre a da cena principal.
     let save_key_path = if project.declared {
         project.main_scene_path()
@@ -663,6 +705,12 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     app.add_plugins(bevy::pbr::MaterialPlugin::<
         terrain::layer_material::TerrainChunkMaterial,
     >::default());
+    // Primitivas procedurais das `<Composition>` (`recipes::spawn`): o plugin
+    // registra `GradMeshMaterial` (ExtendedMaterial sobre o StandardMaterial)
+    // e embute o shader. Sem ele `Assets<GradMeshMaterial>` não existe e o
+    // spawn cai no caminho StandardMaterial antigo — é também o que mantém os
+    // testes headless (apps mínimas, sem render) a funcionar.
+    app.add_plugins(bevy_gradmesh::GradMeshPlugin);
     app.add_plugins(animation::AnimationPlugin);
     app.add_plugins(crate::decal_fx::DecalFxPlugin);
     app.add_plugins(ik::IkPlugin);
@@ -723,6 +771,7 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     if scripts == ScriptsMode::Compat {
         app.add_plugins(luau::LuauScriptPlugin {
             scripts_dir: config.scripts_dir_on(&world_dir),
+            ecs_mirror,
         });
     }
 
@@ -837,6 +886,9 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     // feedback de impacto e a mão armada (apresentação). NÃO voltar a
     // registar `player_melee_attack`/`swing_track_system`/`cycle_weapon`.
     app.add_plugins(crate::feedback::FeedbackPlugin);
+    // O pool 2D de números de dano é uma decisão do jogo; a mensagem
+    // `DamageNumberEvent` fica disponível para quem desenhar texto próprio.
+    app.insert_resource(crate::feedback::DamageNumbers2d(damage_numbers_2d));
     // Colheita/destrutíveis são DADOS autorais + regras em Lua. Nenhum
     // plugin de colheita: os props autorais viajam em `ScriptProps` e o Lua lê.
     // A instalação de `viber.ui` tem de ganhar ao runtime Luau: sem ordem,
@@ -875,7 +927,7 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     app.add_systems(crate::scene_loader::SceneLoad, spawn::startup);
     app.add_plugins(crate::scene_loader::SceneLoaderPlugin);
     // Câmara livre de editor (`--camera free`, src/editor_camera.rs): a
-    // navegação orbit/pan/zoom do ViberEditor via bridge (`viber.camera.*`).
+    // navegação orbit/pan/zoom de edição via bridge (`viber.camera.*`).
     // ADITIVO — sem a flag o plugin não regista nada e o comportamento é
     // 100% o de sempre; com ela, a câmara de jogo fica inactiva e os
     // sistemas gated abaixo (input do player, terceira-pessoa) param.
@@ -888,7 +940,9 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     // renderizar um frame com o `GlobalTransform` identidade (na origem).
     app.add_systems(
         bevy::app::PostUpdate,
-        recipes::spawn::apply_script_spawns.before(bevy::transform::TransformSystems::Propagate),
+        recipes::spawn::apply_script_spawns
+            .before(bevy::transform::TransformSystems::Propagate)
+            .run_if(recipes::spawn::has_pending_script_spawns),
     );
     app.add_systems(
         bevy::app::Update,

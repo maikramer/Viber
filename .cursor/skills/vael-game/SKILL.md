@@ -11,7 +11,8 @@ O RPG não vive neste repo. Checkout irmão: `../Vael` (`world.xml`,
 ```bash
 cargo run -- run ../Vael/world.xml
 cargo run -- analyze ../Vael/world.xml
-cargo run --manifest-path editor/Cargo.toml -- ../Vael
+# editor de conteúdo do Vael: ../Vael/editor
+#   (cargo run -p vael-editor -- --root ../Vael)
 ```
 
 Testes que leem o mundo usam `VAEL_ROOT` (default `../Vael`) e saltam

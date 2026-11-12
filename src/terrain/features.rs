@@ -20,9 +20,9 @@ use super::brush::BrushGrid;
 use super::cliffs::CliffSpec;
 use super::cut::{CutSpec, carve_cut};
 use super::decal::GroundDecalSpec;
+use super::pads::ResolvedPad;
 use super::plateau::{PlateauSpec, carve_plateau};
 use super::roads::{RoadGuards, RoadNetworkSpec, RoadPath, RoadProfile, RoadSpec, carve_road};
-use super::sampler::ResolvedPad;
 use super::spec::TerrainPadSpec;
 use super::water::{
     LakeSpec, RiverSpec, WaterBody, WaterKind, carve_lake, carve_river_with_falls,

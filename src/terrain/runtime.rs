@@ -31,9 +31,9 @@ use super::heightmap::HeightMapU16;
 use super::mesh::HeightField as _;
 
 use super::layer_material::{TerrainChunkConfig, TerrainChunkMaterial, TerrainChunkParams};
+use super::pads::ResolvedPad;
 use super::paths::{PathHit, nearest_on_path, station_lerp};
 use super::roads::{RoadPath, RoadSurface};
-use super::sampler::ResolvedPad;
 use super::spec::TerrainSpec;
 use super::splat::{
     SLOT_GRAVEL, SLOT_RIVERBED, SplatInputs, SplatMap, SplatParams, flat_ao_image,

@@ -308,6 +308,11 @@ mod tests {
                 day_speed_scale: 1.0,
                 night_speed_scale: 1.0,
                 night_cap_minute: 0.0,
+                mode: crate::worldsys::DayCycleMode::Continuous,
+                day_minute: 720.0,
+                night_minute: 1320.0,
+                transition_seconds: 4.0,
+                shadow_refresh_hz: 0.0,
             }),
             spec(EntityKind::Group).with_child(EntityKind::Weather {
                 wind: [1.0, 0.0],

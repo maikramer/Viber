@@ -1,6 +1,6 @@
 //! Edição do mundo VIVO: o [`SceneDoc`] e o [`History`] como resources da App, e as funções
 //! únicas por onde passam TODAS as edições ao vivo — as do bridge (`viber.scene.*`, agentes)
-//! e as do ViberEditor (gizmos, Inspector, atalhos). Cada edição aplicada publica um
+//! e as do editor externo (gizmos, Inspector, atalhos). Cada edição aplicada publica um
 //! [`SceneEdited`]; o sync documento→ECS reage a essa mensagem, venha ela de onde vier.
 
 use anyhow::{Result, anyhow};

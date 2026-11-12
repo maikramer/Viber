@@ -147,6 +147,17 @@ impl SceneDoc {
     /// Carrega `world` e, recursivamente, os ficheiros incluídos. Um include partido fica como
     /// nó simples (com aviso) para o resto do mundo continuar editável.
     pub fn load(world: &Path) -> Result<Self> {
+        if world
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("bsn"))
+        {
+            bail!(
+                "{}: a CLI `viber scene`/`viber tool` continua XML; edita o `.bsn` no \
+                 vael-editor (Jackdaw)",
+                world.display()
+            );
+        }
         let world = world
             .canonicalize()
             .with_context(|| format!("world file not found: {}", world.display()))?;

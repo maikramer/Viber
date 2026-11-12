@@ -494,13 +494,7 @@ fn grass_daynight_tint(
 ) {
     let day = clock
         .as_deref()
-        .map(|clock| {
-            crate::worldsys::daylight_factor(
-                clock.minute_of_day,
-                clock.dawn_minute,
-                clock.dusk_minute,
-            )
-        })
+        .map(|clock| clock.visual_daylight())
         .unwrap_or(1.0);
     let tint = day_tint(day);
     if (tint[0] - field.last_tint[0]).abs() < 1e-3

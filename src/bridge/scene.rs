@@ -1,5 +1,5 @@
 //! `viber.scene.*` — a API de edição de mundos (`crate::scene`) sobre o bridge, para agentes
-//! que trabalham com a engine a correr. É a MESMA API da CLI `viber scene` e do ViberEditor;
+//! que trabalham com a engine a correr. É a MESMA API da CLI `viber scene` e do editor externo;
 //! aqui as edições passam por [`crate::scene::live`] (histórico + sync ao vivo).
 //!
 //! | método | params | resultado |

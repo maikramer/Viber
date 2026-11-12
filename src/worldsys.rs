@@ -9,6 +9,44 @@ use bevy::math::Quat;
 use bevy::math::Vec3;
 use bevy::prelude::*;
 
+/// Como o `<DayCycle>` conduz o VISUAL (sol, céu, névoa, grade).
+///
+/// O relógio (`minute_of_day`) avança sempre; este modo decide apenas o
+/// minuto que alimenta a atmosfera, a luz direcional, o IBL e o tint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+pub enum DayCycleMode {
+    /// O sol percorre o arco em tempo real (comportamento histórico).
+    #[default]
+    Continuous,
+    /// Dois estados fixos (dia/noite). O visual salta de âncora para âncora
+    /// numa transição curta (`transition-seconds`) quando o relógio cruza o
+    /// limiar de dia/noite; entre transições o sol NÃO se move.
+    DayNight,
+}
+
+/// Âncoras do modo [`DayCycleMode::DayNight`].
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+pub struct DayNightConfig {
+    /// Minuto visual do estado de DIA (default 12:00).
+    pub day_minute: f32,
+    /// Minuto visual do estado de NOITE (default 22:00).
+    pub night_minute: f32,
+    /// Duração da travessia dia↔noite em segundos reais (0 = corte seco).
+    pub transition_seconds: f32,
+}
+
+impl Default for DayNightConfig {
+    fn default() -> Self {
+        Self {
+            day_minute: 720.0,
+            night_minute: 1320.0,
+            transition_seconds: 4.0,
+        }
+    }
+}
+
+const DAY_MINUTES: f32 = 24.0 * 60.0;
+
 /// `<DayCycle>` clock: advances minute-of-day and ramps the ambient light.
 #[derive(Debug, Clone, Resource, Reflect)]
 #[reflect(Resource)]
@@ -41,16 +79,42 @@ pub struct DayCycleState {
     /// (`night-cap-minute`, 0 = desligado). O relógio continua a andar para
     /// quests/HUD; sol, céu, névoa, ambiente e luzes usam este minuto durante
     /// a noite. Era o pedido "às 20:00 já é a escuridão máxima, não continua".
+    /// Ignorado no modo [`DayCycleMode::DayNight`] (as âncoras mandam).
     pub night_cap_minute: f32,
+    /// `continuous` (default) ou `day-night`.
+    pub mode: DayCycleMode,
+    /// Âncoras do modo `day-night`.
+    pub day_night: DayNightConfig,
+    /// Minuto visual em curso. Em `continuous` é o `visual_minute()` de
+    /// sempre; em `day-night` fica parado numa âncora e só atravessa na
+    /// transição.
+    pub visual_now: f32,
+    /// Âncora de onde a transição actual partiu.
+    pub visual_from: f32,
+    /// Progresso da transição `0..1` (`1` = assentado numa âncora).
+    pub visual_transition: f32,
+    /// `true` = o estado visual actual é o DIA (âncora `day_minute`).
+    pub visual_day: bool,
+    /// Cadência de actualização das sombras do sol no modo `day-night`
+    /// (`shadow-refresh-hz`, 0 = todos os frames). O cache é implementado
+    /// pelo jogo (Vael), não pela engine: o `DayCycleState` só publica o
+    /// pedido.
+    pub shadow_refresh_hz: f32,
 }
 
 impl DayCycleState {
     /// Minuto usado pela ATMOSFERA/SOL/AMBIENTE. Durante a noite (depois do
     /// cap ou antes do amanhecer) devolve o `night-cap-minute`; de dia
     /// devolve o relógio real. O `minute_of_day` continua a avançar.
+    ///
+    /// No modo `day-night` devolve o minuto visual da âncora/transição — que
+    /// fica PARADO fora das transições.
     pub fn visual_minute(&self) -> f32 {
+        if self.is_day_night() {
+            return self.visual_now;
+        }
         let cap = self.night_cap_minute;
-        if cap <= 0.0 || cap >= 24.0 * 60.0 {
+        if cap <= 0.0 || cap >= DAY_MINUTES {
             return self.minute_of_day;
         }
         let m = self.minute_of_day;
@@ -58,6 +122,93 @@ impl DayCycleState {
             cap
         } else {
             m
+        }
+    }
+
+    /// `true` no modo de dois estados.
+    pub fn is_day_night(&self) -> bool {
+        self.mode == DayCycleMode::DayNight
+    }
+
+    /// Factor dia/noite do minuto VISUAL (`0` noite, `1` dia). É a curva que
+    /// o ambiente, o tint dos props, a relva, o terreno e o orçamento de
+    /// sombras devem ler — em `continuous` coincide com a de antes; em
+    /// `day-night` fica parada nas âncoras e acompanha a transição.
+    pub fn visual_daylight(&self) -> f32 {
+        daylight_factor(self.visual_minute(), self.dawn_minute, self.dusk_minute)
+    }
+
+    /// Liga o modo de dois estados e assenta já na âncora do relógio actual
+    /// (o arranque não faz uma travessia de 12:00 para 22:00).
+    pub fn with_day_night(mut self, config: DayNightConfig) -> Self {
+        self.mode = DayCycleMode::DayNight;
+        self.day_night = config;
+        self.snap_visual();
+        self
+    }
+
+    /// Asenta o visual na âncora do estado actual.
+    fn snap_visual(&mut self) {
+        self.visual_day = daylight_factor(
+            self.minute_of_day,
+            self.dawn_minute,
+            self.dusk_minute,
+        ) >= 0.5;
+        self.visual_from = if self.visual_day {
+            self.day_night.day_minute
+        } else {
+            self.day_night.night_minute
+        }
+        .rem_euclid(DAY_MINUTES);
+        self.visual_now = self.visual_from;
+        self.visual_transition = 1.0;
+    }
+
+    /// Avança a travessia dia↔noite (só no modo `day-night`).
+    ///
+    /// O sentido é sempre o do RELÓGIO: dia 12:00 → noite 22:00 passa pelo
+    /// pôr-do-sol; noite 22:00 → dia 12:00 passa pela meia-noite e pelo
+    /// nascer do sol. É um "avanço rápido" de alguns segundos, não um corte.
+    pub fn advance_visual(&mut self, dt: f32) {
+        if !self.is_day_night() {
+            return;
+        }
+        let want_day = daylight_factor(
+            self.minute_of_day,
+            self.dawn_minute,
+            self.dusk_minute,
+        ) >= 0.5;
+        if want_day != self.visual_day {
+            // Nova travessia a partir de onde o visual está agora. Também
+            // cobre um `set_clock`/edição a meio da transição.
+            self.visual_day = want_day;
+            self.visual_from = self.visual_now;
+            self.visual_transition = 0.0;
+        }
+        let target = if self.visual_day {
+            self.day_night.day_minute
+        } else {
+            self.day_night.night_minute
+        }
+        .rem_euclid(DAY_MINUTES);
+        if self.visual_transition >= 1.0 {
+            // Assentado: mantém a âncora (uma edição de `day-minute`/
+            // `night-minute` no editor reflecte-se sem esperar pelo relógio).
+            self.visual_now = target;
+            return;
+        }
+        let seconds = self.day_night.transition_seconds;
+        if seconds <= f32::EPSILON {
+            self.visual_now = target;
+            self.visual_transition = 1.0;
+            return;
+        }
+        self.visual_transition = (self.visual_transition + dt / seconds).clamp(0.0, 1.0);
+        let t = smooth_step(0.0, 1.0, self.visual_transition);
+        let delta = (target - self.visual_from).rem_euclid(DAY_MINUTES);
+        self.visual_now = (self.visual_from + delta * t).rem_euclid(DAY_MINUTES);
+        if self.visual_transition >= 1.0 {
+            self.visual_now = target;
         }
     }
 
@@ -93,6 +244,13 @@ impl DayCycleState {
             day_speed_scale,
             night_speed_scale,
             night_cap_minute,
+            mode: DayCycleMode::Continuous,
+            day_night: DayNightConfig::default(),
+            visual_now: minute_of_day,
+            visual_from: minute_of_day,
+            visual_transition: 1.0,
+            visual_day: daylight_factor(minute_of_day, dawn_minute, dusk_minute) >= 0.5,
+            shadow_refresh_hz: 0.0,
         }
     }
 }
@@ -1110,7 +1268,11 @@ pub fn daycycle_drive(
     };
     clock.minute_of_day = (clock.minute_of_day
         + clock.minutes_per_real_second * speed_scale.max(0.0) * time.delta_secs())
-    .rem_euclid(24.0 * 60.0);
+    .rem_euclid(DAY_MINUTES);
+    // Modo de dois estados: avança a travessia dia↔noite ANTES de o resto do
+    // frame ler `visual_minute()` (sol, atmosfera, ambiente, IBL). Sem isto a
+    // transição ficava um frame atrás e o `drive_ambient=false` saltava-a.
+    clock.advance_visual(time.delta_secs());
     if !clock.drive_ambient {
         return;
     }
@@ -1141,7 +1303,7 @@ pub fn daycycle_drive(
     if clock.ambient_reference <= 0.0 {
         clock.ambient_reference = ambient.brightness.max(1.0);
     }
-    let day = daylight_factor(clock.visual_minute(), clock.dawn_minute, clock.dusk_minute);
+    let day = clock.visual_daylight();
     // `ambient-day-intensity` / `ambient-night-intensity` are the legacy
     // three.js ambient *intensities* — a 0..1 scale. Bevy's
     // `AmbientLight::brightness` is in lux and the same worlds author it in the
@@ -1618,6 +1780,100 @@ mod tests {
         let mid = daylight_factor(300.0, 330.0, 1170.0); // dawn ramp
         assert!((0.0..1.0).contains(&mid));
         assert_eq!(daylight_factor(1231.0, 330.0, 1170.0), 0.0); // after dusk ramp
+    }
+
+    fn baked_clock(minute: f32, night_cap: f32) -> DayCycleState {
+        DayCycleState::from_parts(
+            minute, 0.0, 330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0,
+            night_cap,
+        )
+        .with_day_night(DayNightConfig {
+            day_minute: 720.0,
+            night_minute: 1320.0,
+            transition_seconds: 4.0,
+        })
+    }
+
+    /// O arranque assenta logo na âncora do estado do relógio: nada de uma
+    /// travessia de 12:00 para 22:00 no primeiro frame.
+    #[test]
+    fn test_day_night_starts_settled_on_clock_phase() {
+        let clock = baked_clock(480.0, 0.0);
+        assert_eq!(clock.visual_minute(), 720.0);
+        assert_eq!(clock.visual_daylight(), 1.0);
+        assert!(clock.visual_day);
+
+        let night = baked_clock(1320.0, 0.0);
+        assert_eq!(night.visual_minute(), 1320.0);
+        assert_eq!(night.visual_daylight(), 0.0);
+        assert!(!night.visual_day);
+    }
+
+    /// A travessia dia→noite avança o relógio visual (pôr-do-sol), e a
+    /// noite→dia avança pela meia-noite/amanhecer — nunca anda para trás.
+    #[test]
+    fn test_day_night_fast_forwards_forward_only() {
+        let mut clock = baked_clock(480.0, 0.0);
+        // Cruza o limiar das 20:00 (daylight 0.5): começa a travessia.
+        clock.minute_of_day = 1200.0;
+        clock.advance_visual(0.0);
+        assert_eq!(clock.visual_minute(), 720.0, "t=0 parte da âncora");
+        clock.advance_visual(2.0);
+        let mid = clock.visual_minute();
+        assert!(
+            (mid - 1020.0).abs() < 1.0,
+            "meio da travessia = 17:00, veio {mid}"
+        );
+        clock.advance_visual(2.0);
+        assert_eq!(clock.visual_minute(), 1320.0);
+        assert_eq!(clock.visual_daylight(), 0.0);
+
+        // Cruza as 05:00: 22:00 → 12:00 pelo caminho da meia-noite.
+        clock.minute_of_day = 300.0;
+        clock.advance_visual(2.0);
+        let mid = clock.visual_minute();
+        assert!(
+            (mid - 300.0).abs() < 1.0,
+            "meio da travessia = 05:00, veio {mid}"
+        );
+        clock.advance_visual(2.0);
+        assert_eq!(clock.visual_minute(), 720.0);
+        assert_eq!(clock.visual_daylight(), 1.0);
+    }
+
+    /// `transition-seconds="0"` é um corte seco, não uma divisão por zero.
+    #[test]
+    fn test_day_night_zero_transition_snaps() {
+        let mut clock = baked_clock(480.0, 0.0);
+        clock.day_night.transition_seconds = 0.0;
+        clock.minute_of_day = 1200.0;
+        clock.advance_visual(0.0);
+        assert_eq!(clock.visual_minute(), 1320.0);
+        assert_eq!(clock.visual_transition, 1.0);
+    }
+
+    /// No modo `day-night` o `night-cap-minute` não manda: a âncora é a
+    /// verdade visual (o cap só existe para o modo contínuo).
+    #[test]
+    fn test_day_night_ignores_night_cap() {
+        let clock = baked_clock(1380.0, 1200.0);
+        assert_eq!(clock.visual_minute(), 1320.0);
+        // Contínuo continua a congelar no cap.
+        let continuous = DayCycleState::from_parts(
+            1380.0, 0.0, 330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0, 1200.0,
+        );
+        assert_eq!(continuous.visual_minute(), 1200.0);
+    }
+
+    /// O modo contínuo não é tocado pela máquina de estados.
+    #[test]
+    fn test_continuous_mode_ignores_advance_visual() {
+        let mut clock = DayCycleState::from_parts(
+            600.0, 0.0, 330.0, 1170.0, 0.26, 0.07, true, 62.0, 205.0, 8.0, 1.0, 1.0, 0.0,
+        );
+        clock.advance_visual(10.0);
+        assert_eq!(clock.visual_minute(), 600.0);
+        assert_eq!(clock.visual_transition, 1.0);
     }
 
     /// Rampas que atravessam a meia-noite são contínuas (sem salto às 00:00).

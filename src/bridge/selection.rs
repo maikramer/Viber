@@ -1,4 +1,4 @@
-//! Seleção e picking de entidades para o ViberEditor: `viber.pick`
+//! Seleção e picking de entidades para o editor externo: `viber.pick`
 //! (clique na janela → ray → instância) e `viber.select` (highlight AABB
 //! via gizmos). As entidades trocam-se em formato `"NvG"` — o mesmo do
 //! cliente fork (ver [`super::fork_compat`]).

@@ -11,7 +11,8 @@
 //! mundo mudou desde a última consulta.
 //!
 //! Determinismo: o bootstrap continua determinístico; as edições são
-//! runtime por definição e NÃO entram no save nesta versão.
+//! runtime por definição e vão para o save como `terrain_patches`
+//! (`save.rs`), reaplicadas quando o runtime da cena existe.
 
 use mlua::{Lua, Table, Value};
 

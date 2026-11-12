@@ -173,11 +173,17 @@ pub enum ScriptCommand {
         pos: Vec3,
         color: Option<[f32; 3]>,
     },
-    /// Balão de diálogo nativo (`viber.say(texto, segundos?)`).
+    /// Fala (`viber.say(texto, segundos?, orador?)`). A engine resolve o
+    /// locale, baixa a música e publica [`crate::luau::ScriptSay`]; o balão
+    /// nativo do HUD só é escrito quando o jogo não o apresenta sozinho
+    /// ([`crate::dialogue::ExternalSayPresenter`]).
     Say {
         text: String,
         /// 0 = duração por omissão ([`crate::hud::BALLOON_DURATION`]).
         secs: f32,
+        /// Entidade que falou: `ctx.entity` por omissão, ou o `id` explícito
+        /// do terceiro argumento (uma callback que corre noutra entidade).
+        speaker: Option<Entity>,
     },
     /// Pede uma gravação do save (`viber.save()`) — o `options_system` do
     /// save drena o pedido no mesmo frame (mundo `gameplay: none` incluído).

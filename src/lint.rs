@@ -176,6 +176,7 @@ fn project_cinematics(world_xml: &Path) -> Vec<crate::xml::XmlNode> {
     let this = world_xml
         .canonicalize()
         .unwrap_or_else(|_| world_xml.to_path_buf());
+    let this_stem = this.with_extension("");
     fn rec(nodes: Vec<crate::xml::XmlNode>, out: &mut Vec<crate::xml::XmlNode>) {
         for node in nodes {
             if node.tag.eq_ignore_ascii_case("cinematic") {
@@ -192,6 +193,16 @@ fn project_cinematics(world_xml: &Path) -> Vec<crate::xml::XmlNode> {
         .chain(project.autoload_paths())
     {
         if file.canonicalize().unwrap_or_else(|_| file.clone()) == this {
+            continue;
+        }
+        // O irmão `.bsn`/`.xml` do próprio mundo é a mesma cena: incluí-lo
+        // duplicava as cinemáticas do mundo principal.
+        if file
+            .canonicalize()
+            .unwrap_or_else(|_| file.clone())
+            .with_extension("")
+            == this_stem
+        {
             continue;
         }
         if let Ok(loaded) = crate::xml::include::load_world_in(&file, &project.root) {
@@ -493,7 +504,11 @@ fn check_scripts(
 /// `viber.props` em qualquer entidade, com ou sem script), mas não são
 /// `prop-*` exportados: sem esta exclusão cada árvore estática do Vael virava
 /// um `script-prop-orphan` (2166 avisos num mundo só).
-const DATA_PROPS: [&str; 3] = ["destructible", "resource-kind", "resource-yield"];
+///
+/// `flora` é a espécie da árvore procedural (o Vael planta o visual a partir
+/// dela, `src/flora.rs`): é dado lido por código nativo, não um prop de
+/// script, e vale para qualquer estação de árvore.
+const DATA_PROPS: [&str; 4] = ["destructible", "resource-kind", "resource-yield", "flora"];
 
 fn authored_props(props: &[(String, String)]) -> Vec<(String, String)> {
     props

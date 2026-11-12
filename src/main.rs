@@ -15,6 +15,9 @@ use viber::bridge::{self, client::BridgeClient};
 use viber::recipes::ParsedWorld;
 use viber::{audit, prune, recipes, scaffold};
 
+mod bsn_cli;
+use bsn_cli::BsnCommand;
+
 /// Native Bevy engine for AiGameKit declarative worlds.
 #[derive(Parser)]
 #[command(name = "viber", version, about)]
@@ -29,16 +32,6 @@ enum Command {
     Create {
         /// Project folder name, created inside the current directory
         name: String,
-    },
-    /// Open a world in the ViberEditor (GUI editor). No path = the last
-    /// world opened by the editor (persisted in ~/.cache/viber)
-    Editor {
-        /// Path to the world XML (default: the editor's last-opened world)
-        path: Option<PathBuf>,
-        /// Extra args passed through to the editor binary (--tab, --mode…).
-        /// O `--` do clap não é preciso: tudo o que sobra segue tal-e-qual.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra: Vec<String>,
     },
     /// Run a world XML file in a Bevy window
     Run {
@@ -74,7 +67,7 @@ enum Command {
         dlss: bool,
         /// Modo de câmara: `free` troca a câmara de jogo por uma câmara de
         /// EDITOR (orbit/pan/zoom via bridge `viber.camera.*`) e desliga o
-        /// input do jogador — a navegação de mundos do ViberEditor.
+        /// input do jogador — a navegação de mundos do editor externo.
         #[arg(long, value_enum)]
         camera: Option<CameraMode>,
     },
@@ -96,6 +89,11 @@ enum Command {
         /// Print a single stable JSON object instead of text (machine report for agents/CI)
         #[arg(long)]
         json: bool,
+    },
+    /// Converter/validar o mundo em `.bsn` (formato do editor Jackdaw)
+    Bsn {
+        #[command(subcommand)]
+        command: BsnCommand,
     },
     /// Convert a PROCEDURAL world into a static one IN PLACE (the runtime only loads static
     /// worlds): the world XML and its includes are rewritten at the same paths with
@@ -737,8 +735,8 @@ fn resolve_world_path(path: Option<PathBuf>) -> Result<PathBuf> {
         let cwd = std::env::current_dir().context("reading the current directory")?;
         return discover_world_in(&cwd).ok_or_else(|| {
             anyhow::anyhow!(
-                "no world found in {} (looked for world.xml, the config.yaml main-scene and \
-                 worlds/*.xml) — pass one: `viber run world.xml`",
+                "no world found in {} (looked for world.bsn/world.xml, the config.yaml \
+                 main-scene and worlds/*.bsn|xml) — pass one: `viber run world.bsn`",
                 cwd.display()
             )
         });
@@ -747,10 +745,16 @@ fn resolve_world_path(path: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 /// O mundo de `cwd`: `world.xml` (convenção), a cena principal declarada no
-/// `config.yaml` do projeto (`main-scene: maps/game.xml` — o ViberEditor já a
+/// `config.yaml` do projeto (`main-scene: maps/game.xml` — o editor externo já a
 /// usa, o CLI ignorava-a e um projeto sem `world.xml` dizia "no world
 /// found"), e por fim `worlds/*.xml` legado.
 fn discover_world_in(cwd: &Path) -> Option<PathBuf> {
+    // O `.bsn` é a fonte de verdade desde a migração; o XML fica como
+    // fallback para mundos/checkouts ainda não convertidos.
+    let default_bsn = cwd.join("world.bsn");
+    if default_bsn.is_file() {
+        return Some(default_bsn);
+    }
     let default_world = cwd.join("world.xml");
     if default_world.is_file() {
         return Some(default_world);
@@ -763,142 +767,22 @@ fn discover_world_in(cwd: &Path) -> Option<PathBuf> {
     }
     let worlds_dir = cwd.join("worlds");
     if worlds_dir.is_dir() {
-        let mut xmls: Vec<PathBuf> = std::fs::read_dir(&worlds_dir)
+        let mut worlds: Vec<PathBuf> = std::fs::read_dir(&worlds_dir)
             .ok()?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "xml"))
+            .filter(|p| {
+                p.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("bsn") || ext.eq_ignore_ascii_case("xml")
+                })
+            })
             .collect();
-        xmls.sort();
-        if let Some(first) = xmls.into_iter().next() {
+        worlds.sort();
+        if let Some(first) = worlds.into_iter().next() {
             return Some(first);
         }
     }
     None
-}
-
-/// O ficheiro com o caminho do último mundo aberto pelo editor.
-fn editor_last_world_file() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    Some(
-        home.join(".cache")
-            .join("viber")
-            .join("editor-last-world.txt"),
-    )
-}
-
-/// Checkout do Viber a partir do executável, do cwd, ou do irmão `../Viber`
-/// (correr `viber editor` dentro do Vael).
-fn locate_viber_checkout() -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(root) = viber_checkout_root(&exe)
-    {
-        return Some(root);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    if let Some(root) = viber_checkout_root(&cwd) {
-        return Some(root);
-    }
-    let sibling = cwd.parent()?.join("Viber");
-    viber_checkout_root(&sibling)
-}
-
-/// Pastas onde o editor pode viver: `Viber/editor` (layout actual) e o
-/// checkout irmão `ViberEditor/` (layout antigo do monorepo).
-fn editor_dirs(checkout: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![checkout.join("editor")];
-    if let Some(parent) = checkout.parent() {
-        dirs.push(parent.join("ViberEditor"));
-    }
-    dirs
-}
-
-/// `viber editor [path] [extra…]` — abre o ViberEditor (GUI). Sem `path`,
-/// abre o ÚLTIMO mundo aberto pelo editor (persistido em
-/// `~/.cache/viber/editor-last-world.txt`). Procura o binário do editor
-/// nesta ordem: PATH → `editor/target/{release,debug}` do checkout →
-/// `cargo run --release` nesse crate.
-fn editor(path: Option<PathBuf>, extra: Vec<String>) -> anyhow::Result<()> {
-    let target = match path {
-        Some(path) => path,
-        None => {
-            let stored = editor_last_world_file()
-                .and_then(|file| std::fs::read_to_string(file).ok())
-                .map(|text| text.trim().to_owned())
-                .filter(|text| !text.is_empty());
-            match stored {
-                Some(stored) => PathBuf::from(stored),
-                None => anyhow::bail!(
-                    "viber editor: sem caminho e sem último mundo gravado — passa o world.xml (ex.: `viber editor ../Vael/world.xml`) ou abre o editor uma vez com o caminho"
-                ),
-            }
-        }
-    };
-    if !target.is_file() {
-        anyhow::bail!("viber editor: {} não existe", target.display());
-    }
-    let mut args: Vec<String> = vec![target.display().to_string()];
-    args.extend(extra);
-
-    // 1. binário no PATH
-    let editor_on_path = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join("vibereditor"))
-            .find(|candidate| candidate.is_file())
-    });
-    if let Some(editor) = editor_on_path {
-        println!("viber editor: {} {:?}", editor.display(), args);
-        std::process::Command::new(editor)
-            .args(&args)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("viber editor: {e}"))?;
-        return Ok(());
-    }
-    // 2. binário já compilado no checkout (release, depois debug)
-    if let Some(checkout) = locate_viber_checkout() {
-        for dir in editor_dirs(&checkout) {
-            for profile in ["release", "debug"] {
-                let built = dir.join("target").join(profile).join("vibereditor");
-                if built.is_file() {
-                    println!("viber editor: {} {:?}", built.display(), args);
-                    std::process::Command::new(built)
-                        .args(&args)
-                        .spawn()
-                        .map_err(|e| anyhow::anyhow!("viber editor: {e}"))?;
-                    return Ok(());
-                }
-            }
-        }
-        // 3. cargo run no crate do editor (a 1.ª vez compila)
-        for dir in editor_dirs(&checkout) {
-            let manifest = dir.join("Cargo.toml");
-            let is_editor = manifest.is_file()
-                && std::fs::read_to_string(&manifest)
-                    .is_ok_and(|text| text.contains("name = \"vibereditor\""));
-            if !is_editor {
-                continue;
-            }
-            println!(
-                "viber editor: compilando o editor (cargo run --release — só demora na 1.ª vez)…"
-            );
-            let status = std::process::Command::new("cargo")
-                .arg("run")
-                .arg("--release")
-                .arg("--manifest-path")
-                .arg(&manifest)
-                .arg("--")
-                .args(&args)
-                .status()
-                .map_err(|e| anyhow::anyhow!("viber editor: cargo: {e}"))?;
-            if !status.success() {
-                anyhow::bail!("viber editor: o build do editor falhou");
-            }
-            return Ok(());
-        }
-    }
-    anyhow::bail!(
-        "viber editor: editor não encontrado — no checkout Viber corre `./install.sh editor`, ou `cargo run --release --manifest-path editor/Cargo.toml -- <world.xml>`"
-    )
 }
 
 /// Procura um checkout do Viber (Cargo.toml do pacote `viber`) subindo a partir
@@ -1472,9 +1356,6 @@ fn dispatch(command: Command) -> Result<std::process::ExitCode> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(std::process::ExitCode::SUCCESS)
         }
-        Command::Editor { path, extra } => {
-            editor(path, extra).map(|_| std::process::ExitCode::SUCCESS)
-        }
         Command::Run {
             path,
             scene,
@@ -1536,6 +1417,7 @@ fn dispatch(command: Command) -> Result<std::process::ExitCode> {
             }
             Ok(std::process::ExitCode::SUCCESS)
         }
+        Command::Bsn { command } => bsn_cli::run(command),
         Command::Analyze { path, strict, json } => {
             let world = match resolve_world_path(path) {
                 Ok(world) => world,
@@ -4271,7 +4153,7 @@ mod tests {
 
     /// A auto-descoberta no cwd tem de honrar `project.main-scene`: um projeto
     /// cujo mundo principal não se chama `world.xml` dizia "no world found"
-    /// (o ViberEditor já o resolvia; o CLI não).
+    /// (o editor externo já o resolvia; o CLI não).
     #[test]
     fn discover_world_honours_the_config_main_scene() {
         let dir = tempfile::tempdir().unwrap();
@@ -4290,21 +4172,5 @@ mod tests {
         std::fs::write(dir.path().join("world.xml"), "<world static=\"true\"/>").unwrap();
         let found = discover_world_in(dir.path()).unwrap();
         assert!(found.ends_with("world.xml"), "{found:?}");
-    }
-
-    /// Os extras do `viber editor` são encaminhados TAL-E-QUAL (o help
-    /// promete `--tab`/`--mode`); sem `trailing_var_arg` o clap os recusava
-    /// como flags desconhecidas do próprio `viber`.
-    #[test]
-    fn editor_forwards_flags_to_the_editor_binary() {
-        let parsed = Cli::try_parse_from(["viber", "editor", "w.xml", "--tab", "3"])
-            .expect("extras aceitam flags");
-        match parsed.command {
-            Some(Command::Editor { path, extra }) => {
-                assert_eq!(path.as_deref(), Some(Path::new("w.xml")));
-                assert_eq!(extra, vec!["--tab".to_string(), "3".to_string()]);
-            }
-            _ => panic!("esperava Command::Editor"),
-        }
     }
 }

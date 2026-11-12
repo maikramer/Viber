@@ -10,7 +10,6 @@ worlds/assets
 /*.png
 /*.jpg
 
-editor/Cargo.lock
 .zcode/
 .omo/
 .claude/

@@ -278,10 +278,11 @@ impl Plugin for BridgePlugin {
             )
             .add_plugins(RemoteHttpPlugin::default().with_port(self.port))
             // Shims de compatibilidade com o cliente BRP do Bevy main (fork
-            // do ViberEditor/bevy_inspector): entidades "NvG" ↔ bits 0.20.0.
+            // do editor externo/bevy_inspector): entidades "NvG" ↔ bits 0.20.0.
             // DEPOIS do RemotePlugin — substitui entradas do RemoteMethods.
             .add_systems(Update, process_capture_requests)
             .init_resource::<PendingMouseClick>()
+            .init_resource::<PendingKeys>()
             .init_resource::<selection::SelectedEntity>()
             // Event log estruturado: os messages têm de existir (apps mínimas
             // de teste ficam auto-suficientes — add_message é idempotente).
@@ -296,7 +297,7 @@ impl Plugin for BridgePlugin {
             // interaction_from_picking (que lê just_pressed e a cadeia de picking).
             .add_systems(
                 PreUpdate,
-                deferred_mouse_release
+                (deferred_mouse_release, flush_pending_keys)
                     .after(bevy::input::InputSystems)
                     .before(bevy::ui::UiSystems::Focus),
             );
@@ -307,7 +308,7 @@ impl Plugin for BridgePlugin {
             app.add_systems(Update, selection::selection_gizmos);
         }
         // Shims de compatibilidade com o cliente BRP do Bevy main (fork do
-        // ViberEditor/bevy_inspector): entidades "NvG" ↔ bits 0.20.0. Tem de
+        // editor externo/bevy_inspector): entidades "NvG" ↔ bits 0.20.0. Tem de
         // ser depois do RemotePlugin — substitui entradas do RemoteMethods.
         fork_compat::install(app);
     }
@@ -354,6 +355,40 @@ fn frame_stepper_system(world: &mut World) {
         world
             .resource_mut::<bevy::time::Time<bevy::time::Virtual>>()
             .set_relative_speed(0.0);
+    }
+}
+
+/// Teclas sintéticas à espera do próximo `PreUpdate`.
+///
+/// O handler BRP corre a meio do `Update`: uma tecla aplicada ali fica
+/// invisível aos sistemas de jogo que já correram nesse frame (o
+/// `harvest_input` do Vael perdia o `[J]`) e o `just_pressed` é limpo no
+/// `PreUpdate` seguinte. Aplicar as teclas no início do frame seguinte,
+/// **depois** dos sistemas de input e antes do resto, é o que o
+/// [`deferred_mouse_release`] já faz para o rato — a tecla passa a valer para
+/// todos os sistemas do frame, incluindo com `viber debug step`.
+#[derive(Resource, Default)]
+struct PendingKeys(Vec<(KeyCode, ButtonState, Option<String>)>);
+
+/// Enfileira uma tecla para o próximo `PreUpdate` (aplicação imediata se o
+/// plugin não estiver montado — mundos de teste).
+fn send_key(world: &mut World, key_code: KeyCode, state: ButtonState, text: Option<String>) {
+    if let Some(mut pending) = world.get_resource_mut::<PendingKeys>() {
+        pending.0.push((key_code, state, text));
+    } else {
+        apply_key(world, key_code, state, text);
+    }
+}
+
+/// Aplica as teclas pendentes: `PreUpdate`, depois do input core e antes do
+/// foco da UI (o mesmo sítio do press do rato).
+fn flush_pending_keys(world: &mut World) {
+    let pending = match world.get_resource_mut::<PendingKeys>() {
+        Some(mut pending) => std::mem::take(&mut pending.0),
+        None => return,
+    };
+    for (key_code, state, text) in pending {
+        apply_key(world, key_code, state, text);
     }
 }
 
@@ -1370,8 +1405,9 @@ fn camera_pose(_params: In<Option<Value>>, world: &mut World) -> BrpResult {
 
 // ---------------------------------------------------------------- input
 
-/// Envia um `KeyboardInput` sintético + actualiza `ButtonInput<KeyCode>`.
-fn send_key(world: &mut World, key_code: KeyCode, state: ButtonState, text: Option<String>) {
+/// Aplica um `KeyboardInput` sintético + actualiza `ButtonInput<KeyCode>`.
+/// Uso interno de [`flush_pending_keys`] (e fallback sem o recurso).
+fn apply_key(world: &mut World, key_code: KeyCode, state: ButtonState, text: Option<String>) {
     let window = primary_window(world).unwrap_or(Entity::PLACEHOLDER);
     // O `logical_key` é o que os consumidores de UI lêem (a barra de fala
     // `<UiInput>` despacha por `Key::Backspace`/`Key::Character`/

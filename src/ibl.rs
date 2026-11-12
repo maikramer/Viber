@@ -39,6 +39,8 @@ const FACE_SIZE: u32 = 128;
 /// Fases do dia que regeram o cubemap. Mais fases = transições mais suaves,
 /// cada uma custa um re-filtro compute (~1 frame). 12 (era 6, 2026-09-09):
 /// os saltos discretos de ambiente às trocas de fase liam-se nas encostas.
+/// No modo `<DayCycle mode="day-night">` há só 2 (dia/noite) — ver
+/// [`day_phase`].
 pub const DAY_PHASES: u32 = 12;
 
 /// Quanto do chão default o tint regional substitui (probes regionais).
@@ -115,9 +117,17 @@ fn spawn_sky_probe_entity(commands: &mut Commands) {
     ));
 }
 
-/// Fase quantizada do dia (0..DAY_PHASES). `None` até haver relógio útil.
-fn day_phase(clock: Option<&DayCycleState>) -> Option<u32> {
+/// Fase quantizada do dia. `None` até haver relógio útil.
+///
+/// No modo `day-night` há só DUAS fases (dia/noite): o sol não se move, e o
+/// cubemap só precisa de ser repintado quando o estado muda. O `>= 0.5` é o
+/// mesmo limiar do `advance_visual`, portanto a troca de IBL cai a meio da
+/// travessia (onde o ecrã está mais escuro e o salto não se lê).
+pub(crate) fn day_phase(clock: Option<&DayCycleState>) -> Option<u32> {
     let clock = clock?;
+    if clock.is_day_night() {
+        return Some(u32::from(clock.visual_daylight() < 0.5));
+    }
     // O `daylight_factor` é 1.0 o dia INTEIRO e 0.0 a noite inteira: usá-lo
     // como fase regerava o cubemap só nos crepúsculos (o sol das 12h ficava
     // com a luz das 08h). A fase vem do minuto VISUAL (já com o night-cap).

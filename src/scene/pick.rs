@@ -4,7 +4,7 @@
 //! hierarquia até ao primeiro ancestral com [`SceneSource`] — a entidade declarada mais
 //! específica (uma `<GltfScene>` dentro de um grupo seleciona a instância, não a vila
 //! inteira). O raycast de física serve de OCLUSOR: uma malha atrás de um monte não é apanhada
-//! através do terreno. Usado pelo ViberEditor e por `viber.scene.pick` (agentes).
+//! através do terreno. Usado pelo editor externo e por `viber.scene.pick` (agentes).
 
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;

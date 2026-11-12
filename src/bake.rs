@@ -80,7 +80,7 @@ pub fn is_static_root(attrs: &[(String, String)]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Documento bake.json (contrato schema 1 — espelhado no ViberEditor)
+// Documento bake.json (contrato schema 1)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -441,7 +441,7 @@ pub fn check_bake_target(world_path: &Path) -> Result<()> {
     let doc = crate::xml::parse_file(world_path)?;
     if is_static_root(&doc.root_attrs) {
         anyhow::bail!(
-            "{} já é um mundo estático — edita-o com `viber scene`/`viber tool`/ViberEditor \
+            "{} já é um mundo estático — edita-o com `viber scene`/`viber tool` \
              (o bake só converte mundos procedurais)",
             world_path.display()
         );

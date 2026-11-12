@@ -9,6 +9,16 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+/// O jogo apresenta as falas de `viber.say` sozinho.
+///
+/// Com este recurso presente a engine continua a resolver o locale, a baixar
+/// a música e a publicar [`crate::luau::ScriptSay`], mas NÃO escreve o balão
+/// nativo do HUD (nem avisa que ele falta). É o que deixa um jogo desenhar
+/// balões no mundo, uma caixa de diálogo ou legendas sem ficar com a linha
+/// duplicada no HUD.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct ExternalSayPresenter;
+
 /// Resolve um texto `@chave` contra a tabela de locale; sem tabela devolve o original.
 pub fn localized<'a>(text: &'a str, table: Option<&HashMap<String, String>>) -> String {
     let Some(key) = text.strip_prefix('@') else {

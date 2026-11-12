@@ -954,6 +954,7 @@ dependencies = [
  "bevy",
  "flate2",
  "jackdaw_bsn",
+ "jackdaw_prefab",
  "roxmltree",
  "serde",
  "serde_yaml",
@@ -4304,6 +4305,18 @@ dependencies = [
  "serde",
  "smol_str",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "jackdaw_prefab"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56fcbeed57ba8ce22050bd8eb8a73d17487a8d48e61c93d993b423988b15ab5c"
+dependencies = [
+ "bevy",
+ "jackdaw_bsn",
+ "path-slash",
+ "pathdiff",
 ]
 
 [[package]]

@@ -330,6 +330,15 @@ pub enum EntityKind {
         radius: Option<f32>,
         shadows: Option<bool>,
     },
+    /// Luz de área retangular (LTC, Bevy 0.19+). Sem sombras; pensada para
+    /// fill de interiores (forge, janelas, salas).
+    RectLight {
+        color: Option<[f32; 3]>,
+        intensity: Option<f32>,
+        range: Option<f32>,
+        width: Option<f32>,
+        height: Option<f32>,
+    },
     DirectionalLight {
         color: Option<[f32; 3]>,
         /// Lux; unset uses the Bevy default (10,000 — ambient daylight).
@@ -536,6 +545,18 @@ pub enum EntityKind {
         night_speed_scale: f32,
         /// Minuto em que o visual da noite congela (`night-cap-minute`).
         night_cap_minute: f32,
+        /// `continuous` ou `day-night` (`mode`).
+        mode: crate::worldsys::DayCycleMode,
+        /// Âncora visual do dia (`day-minute`, default 12:00).
+        day_minute: f32,
+        /// Âncora visual da noite (`night-minute`; sem atributo herda o
+        /// `night-cap-minute`, senão 22:00).
+        night_minute: f32,
+        /// Duração da travessia dia↔noite (`transition-seconds`).
+        transition_seconds: f32,
+        /// Cadência das sombras do sol em `day-night` (`shadow-refresh-hz`,
+        /// 0 = todos os frames).
+        shadow_refresh_hz: f32,
     },
     /// `<Weather>` — wind/clouds/rain config (rain spawns a rain emitter).
     Weather {
@@ -631,6 +652,16 @@ pub struct DayCycleConfig {
     pub day_speed_scale: f32,
     pub night_speed_scale: f32,
     pub night_cap_minute: f32,
+    /// `mode="continuous|day-night"`.
+    pub mode: crate::worldsys::DayCycleMode,
+    /// `day-minute` (default 12:00).
+    pub day_minute: f32,
+    /// `night-minute`; `None` herda o `night-cap-minute` (ou 22:00).
+    pub night_minute: Option<f32>,
+    /// `transition-seconds` (default 4 s).
+    pub transition_seconds: f32,
+    /// `shadow-refresh-hz` (default 0 = todos os frames).
+    pub shadow_refresh_hz: f32,
 }
 
 /// `<Weather>` config (wind/clouds/rain).
@@ -1007,7 +1038,7 @@ pub fn parse_world(root_attrs: &[(String, String)], nodes: &[XmlNode]) -> Result
         static_world_findings(&entities, &mut violations);
         if !violations.is_empty() {
             bail!(
-                "mundo estático com geração em runtime ({} problema(s)):\n  {}\nUm estático é editado por `viber scene`/`viber tool`/ViberEditor; gera com `viber tool scatter` ou converte o procedural com `viber bake`.",
+                "mundo estático com geração em runtime ({} problema(s)):\n  {}\nUm estático é editado por `viber scene`/`viber tool`; gera com `viber tool scatter` ou converte o procedural com `viber bake`.",
                 violations.len(),
                 violations.join("\n  ")
             );
@@ -1376,6 +1407,7 @@ fn parse_entity_kind(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Option<Entity
         "scatter" => Ok(None),
         "use" => finish_use(node, ctx).map(Some),
         "pointlight" => finish_point_light(node, ctx).map(Some),
+        "rectlight" => finish_rect_light(node, ctx).map(Some),
         "directionallight" => finish_directional_light(node, ctx).map(Some),
         "ambientlight" => finish_ambient_light(node, ctx).map(Some),
         "orbitcamera" => finish_orbit_camera(node, ctx, false).map(Some),
@@ -1930,6 +1962,48 @@ fn finish_point_light(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> 
             intensity,
             radius,
             shadows,
+        },
+        children: parse_entities(&node.children, ctx)?,
+        source: None,
+    })
+}
+
+fn finish_rect_light(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
+    let (common, rest) = parse_common(node, ctx)?;
+    let ctx_tag = format!("<{}>", node.tag);
+    let mut color = None;
+    let mut intensity = None;
+    let mut range = None;
+    let mut width = None;
+    let mut height = None;
+    for (key, value) in rest {
+        let kctx = format!("{ctx_tag} {key}");
+        match key.as_str() {
+            "color" => color = Some(values::parse_color(&value, &kctx)?),
+            "intensity" => intensity = Some(values::parse_f32(&value, &kctx)?),
+            "range" => range = Some(values::parse_f32(&value, &kctx)?),
+            "width" => width = Some(values::parse_f32(&value, &kctx)?),
+            "height" => height = Some(values::parse_f32(&value, &kctx)?),
+            other => ctx
+                .warnings
+                .push(format!("{ctx_tag}: ignored attribute `{other}`")),
+        }
+    }
+    Ok(EntitySpec {
+        prototype_instance: None,
+        name: common.name,
+        tag: common.tag,
+        script: common.script,
+        props: common.props,
+        links: common.links,
+        transform: common.transform,
+        physics: common.physics,
+        kind: EntityKind::RectLight {
+            color,
+            intensity,
+            range,
+            width,
+            height,
         },
         children: parse_entities(&node.children, ctx)?,
         source: None,
@@ -2848,6 +2922,11 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         day_speed_scale: 1.0,
         night_speed_scale: 1.0,
         night_cap_minute: 0.0,
+        mode: crate::worldsys::DayCycleMode::Continuous,
+        day_minute: 720.0,
+        night_minute: None,
+        transition_seconds: 4.0,
+        shadow_refresh_hz: 0.0,
     };
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
@@ -2867,6 +2946,24 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "day-speed-scale" => c.day_speed_scale = values::parse_f32(&value, &kctx)?,
             "night-speed-scale" => c.night_speed_scale = values::parse_f32(&value, &kctx)?,
             "night-cap-minute" => c.night_cap_minute = values::parse_f32(&value, &kctx)?,
+            "mode" => {
+                c.mode = match value.trim().to_ascii_lowercase().as_str() {
+                    "continuous" => crate::worldsys::DayCycleMode::Continuous,
+                    "day-night" | "daynight" | "baked" => {
+                        crate::worldsys::DayCycleMode::DayNight
+                    }
+                    other => {
+                        ctx.warnings.push(format!(
+                            "{ctx_tag} mode: `{other}` desconhecido (continuous|day-night) — usando continuous"
+                        ));
+                        crate::worldsys::DayCycleMode::Continuous
+                    }
+                };
+            }
+            "day-minute" => c.day_minute = values::parse_f32(&value, &kctx)?,
+            "night-minute" => c.night_minute = Some(values::parse_f32(&value, &kctx)?),
+            "transition-seconds" => c.transition_seconds = values::parse_f32(&value, &kctx)?,
+            "shadow-refresh-hz" => c.shadow_refresh_hz = values::parse_f32(&value, &kctx)?,
             other => ctx
                 .warnings
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
@@ -2883,6 +2980,33 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
         ));
         c.dawn_minute = 330.0;
         c.dusk_minute = 1170.0;
+    }
+    // Âncoras do modo `day-night`: sem `night-minute`, a noite herda o
+    // `night-cap-minute` (o visual que o autor já congelava); sem cap, 22:00.
+    let day_minute = if c.day_minute.is_finite() {
+        c.day_minute.rem_euclid(DAY_MINUTES)
+    } else {
+        720.0
+    };
+    let night_minute = c
+        .night_minute
+        .unwrap_or(if c.night_cap_minute > 0.0 {
+            c.night_cap_minute
+        } else {
+            1320.0
+        });
+    let night_minute = if night_minute.is_finite() {
+        night_minute.rem_euclid(DAY_MINUTES)
+    } else {
+        1320.0
+    };
+    if c.mode == crate::worldsys::DayCycleMode::DayNight
+        && (day_minute - night_minute).abs() < 1.0
+    {
+        ctx.warnings.push(format!(
+            "{ctx_tag}: day-minute e night-minute iguais ({day_minute}) — sem estados distintos, a usar continuous"
+        ));
+        c.mode = crate::worldsys::DayCycleMode::Continuous;
     }
     Ok(EntitySpec {
         prototype_instance: None,
@@ -2907,6 +3031,11 @@ fn finish_daycycle(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             day_speed_scale: c.day_speed_scale,
             night_speed_scale: c.night_speed_scale,
             night_cap_minute: c.night_cap_minute,
+            mode: c.mode,
+            day_minute,
+            night_minute,
+            transition_seconds: c.transition_seconds.max(0.0),
+            shadow_refresh_hz: c.shadow_refresh_hz.max(0.0),
         },
         children: Vec::new(),
         source: None,
@@ -4875,6 +5004,7 @@ pub struct WorldSummary {
     pub composition_parts: usize,
     pub primitives: usize,
     pub point_lights: usize,
+    pub rect_lights: usize,
     pub directional_lights: usize,
     pub cameras: usize,
     pub has_ambient: bool,
@@ -4944,6 +5074,7 @@ impl WorldSummary {
             + self.compositions
             + self.primitives
             + self.point_lights
+            + self.rect_lights
             + self.directional_lights
             + self.cameras
             + self.gltf_scenes
@@ -5041,6 +5172,7 @@ pub fn summarize(world: &ParsedWorld) -> WorldSummary {
                     out.primitives += 1;
                 }
                 EntityKind::PointLight { .. } => out.point_lights += 1,
+                EntityKind::RectLight { .. } => out.rect_lights += 1,
                 EntityKind::DirectionalLight { .. } => out.directional_lights += 1,
                 EntityKind::AmbientLight { .. } => out.has_ambient = true,
                 EntityKind::OrbitCamera { .. } => out.cameras += 1,
@@ -5405,6 +5537,36 @@ mod tests {
         assert!(color.is_some() && intensity == Some(1200.0));
         assert_eq!(radius, Some(0.2));
         assert_eq!(shadows, Some(true));
+    }
+
+    #[test]
+    fn test_rect_light_overrides() {
+        let (spec, _) = parse_one(&node(
+            "RectLight",
+            &[
+                ("color", "#ffd8b0"),
+                ("intensity", "1800"),
+                ("range", "18"),
+                ("width", "7"),
+                ("height", "5"),
+            ],
+        ))
+        .unwrap();
+        let EntityKind::RectLight {
+            color,
+            intensity,
+            range,
+            width,
+            height,
+        } = spec.kind
+        else {
+            panic!("expected rect light");
+        };
+        assert!(color.is_some());
+        assert_eq!(intensity, Some(1800.0));
+        assert_eq!(range, Some(18.0));
+        assert_eq!(width, Some(7.0));
+        assert_eq!(height, Some(5.0));
     }
 
     #[test]
@@ -5846,6 +6008,64 @@ mod tests {
         assert!(w.is_empty(), "{w:?}");
     }
 
+    /// `mode="day-night"` lê as âncoras; sem `night-minute`, a noite herda o
+    /// `night-cap-minute` (o look que o autor já congelava).
+    #[test]
+    fn test_daycycle_parses_day_night_mode_and_anchors() {
+        let (spec, w) = parse_one(&node(
+            "DayCycle",
+            &[
+                ("mode", "day-night"),
+                ("day-minute", "600"),
+                ("night-minute", "1320"),
+                ("transition-seconds", "2.5"),
+                ("shadow-refresh-hz", "15"),
+            ],
+        ))
+        .unwrap();
+        let EntityKind::DayCycle {
+            mode,
+            day_minute,
+            night_minute,
+            transition_seconds,
+            shadow_refresh_hz,
+            ..
+        } = spec.kind
+        else {
+            panic!("expected DayCycle");
+        };
+        assert_eq!(mode, crate::worldsys::DayCycleMode::DayNight);
+        assert_eq!((day_minute, night_minute), (600.0, 1320.0));
+        assert_eq!(transition_seconds, 2.5);
+        assert_eq!(shadow_refresh_hz, 15.0);
+        assert!(w.is_empty(), "{w:?}");
+
+        let (spec, _) = parse_one(&node(
+            "DayCycle",
+            &[("mode", "day-night"), ("night-cap-minute", "1200")],
+        ))
+        .unwrap();
+        let EntityKind::DayCycle { night_minute, .. } = spec.kind else {
+            panic!("expected DayCycle");
+        };
+        assert_eq!(night_minute, 1200.0);
+    }
+
+    /// Âncoras iguais não fazem dois estados: avisa e volta ao contínuo.
+    #[test]
+    fn test_daycycle_rejects_equal_day_night_anchors() {
+        let (spec, w) = parse_one(&node(
+            "DayCycle",
+            &[("mode", "day-night"), ("day-minute", "720"), ("night-minute", "720")],
+        ))
+        .unwrap();
+        let EntityKind::DayCycle { mode, .. } = spec.kind else {
+            panic!("expected DayCycle");
+        };
+        assert_eq!(mode, crate::worldsys::DayCycleMode::Continuous);
+        assert!(w.iter().any(|m| m.contains("day-minute e night-minute iguais")), "{w:?}");
+    }
+
     /// `src` vira ficheiro; o texto inline fica CSS mesmo abrindo com `@`.
     #[test]
     fn test_ui_style_src_and_inline_at_rule() {
@@ -6126,6 +6346,7 @@ mod tests {
                 groups: 1,
                 primitives: 1,
                 point_lights: 1,
+                rect_lights: 0,
                 directional_lights: 1,
                 cameras: 1,
                 has_ambient: true,

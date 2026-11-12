@@ -24,8 +24,8 @@
 use bevy::light::{GeneratedEnvironmentMapLight, LightProbe};
 use bevy::prelude::*;
 
+use crate::terrain::pads::ResolvedPad;
 use crate::terrain::runtime::TerrainRuntime;
-use crate::terrain::sampler::ResolvedPad;
 use crate::worldsys::{AtmosphereState, BiomeRegionData, BiomeRegions, DayCycleState};
 
 /// Teto de probes regionais (98 KB/cubemap CPU + filtro GPU por fase).
@@ -134,15 +134,11 @@ fn pick_pads<'a>(
     picked
 }
 
-/// Fase do dia (0..6) — o MESMO ciclo que regenera o probe mundial
-/// ([`crate::ibl`]); os regionais acompanham para o tint acompanhar a luz.
+/// Fase do dia — o MESMO ciclo que regenera o probe mundial
+/// ([`crate::ibl::day_phase`]); os regionais acompanham para o tint
+/// acompanhar a luz. No modo `day-night` são só duas fases.
 fn day_phase(clock: Option<&DayCycleState>) -> Option<u32> {
-    let clock = clock?;
-    // Minuto VISUAL (com night-cap), não o `daylight_factor` binário — ver
-    // `ibl::day_phase`: o dia inteiro dava sempre a mesma fase.
-    let minute = clock.visual_minute().rem_euclid(1440.0);
-    let per_phase = 1440.0 / crate::ibl::DAY_PHASES as f32;
-    Some(((minute / per_phase).floor() as u32).min(crate::ibl::DAY_PHASES - 1))
+    crate::ibl::day_phase(clock)
 }
 
 /// Nasce uma vez (quando o bootstrap publica o `TerrainRuntime`) e repinta

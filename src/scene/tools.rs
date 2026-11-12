@@ -1,5 +1,5 @@
 //! Ferramentas geradoras: o que antes corria em runtime (spawners) passa a ser executado À
-//! MÃO — por um agente (`viber tool scatter`, `viber.tool.scatter`) ou no ViberEditor — e o
+//! MÃO — por um agente (`viber tool scatter`, `viber.tool.scatter`) ou no editor externo — e o
 //! resultado entra no documento como UMA transação de operações (desfazível, gravada no
 //! ficheiro do nó, igual venha de onde vier).
 //!

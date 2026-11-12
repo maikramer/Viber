@@ -183,6 +183,8 @@ impl Plugin for ReflectPlugin {
 
         // ── mundo: dia, clima, cenas, sentidos ─────────────────────────
         app.register_type::<crate::worldsys::DayCycleState>()
+            .register_type::<crate::worldsys::DayCycleMode>()
+            .register_type::<crate::worldsys::DayNightConfig>()
             .register_type::<crate::worldsys::WeatherState>()
             .register_type::<crate::worldsys::WeatherScheduler>()
             .register_type::<crate::scene_loader::CurrentScene>()
@@ -234,7 +236,7 @@ impl Plugin for ReflectPlugin {
             .register_type::<crate::terrain::water::LakeShape>()
             .register_type::<crate::terrain::roads::RoadPath>()
             .register_type::<crate::terrain::roads::RoadProfile>()
-            .register_type::<crate::terrain::sampler::ResolvedPad>()
+            .register_type::<crate::terrain::pads::ResolvedPad>()
             .register_type::<crate::terrain::splat::SplatTuning>()
             .register_type::<crate::terrain::layer_material::TerrainChunkConfig>()
             .register_type::<crate::terrain::voxel::spawn::VoxelBoxSpec>()

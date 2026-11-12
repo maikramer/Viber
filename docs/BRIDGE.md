@@ -40,7 +40,7 @@ do `bevy_remote` (`world.query`, `world.spawn_entity`,
 
 ### Edição de mundos (`viber.scene.*` / `viber.tool.*` — `src/bridge/scene.rs`)
 
-A MESMA API da CLI `viber scene`/`viber tool` e do ViberEditor, sobre o
+A MESMA API da CLI `viber scene`/`viber tool`, sobre o
 documento do mundo carregado — histórico (undo/redo), sync ao vivo e save
 (`src/scene/live.rs`). Ferramentas de QA além do debug: editar o mundo é uma
 chamada.
@@ -55,9 +55,9 @@ chamada.
 | `viber.scene.save` | grava os ficheiros XML tocados (o `apply` com `save: true` já o faz) |
 | `viber.scene.pick` | pixel {x,y} (câmara de editor) → seletor do nó sob o raio |
 | `viber.scene.entities` | entidades VIVAS do nó (pose local + mundo) — verificar o efeito de uma edição |
-| `viber.scene.catalog` | catálogo de tags com snippets válidos (o Add Node do editor) |
+| `viber.scene.catalog` | catálogo de tags com snippets válidos (o Add Node) |
 | `viber.scene.lint` | lint estático do mundo (`{strict?}`): sintaxe Luau de todos os scripts, alvos `viber.load`, quest JSON vs schema, nomes duplicados — `{strict: true}` devolve erro se houver findings de severidade error |
-| `viber.scene.drop` | drop de um `.glb` no mundo → op de insert (o drag-drop do editor) |
+| `viber.scene.drop` | drop de um `.glb` no mundo → op de insert (o drag-drop) |
 | `viber.scene.files` | a pasta do mundo em árvore JSON (world/scene/lua/glb/…) |
 | `viber.tool.list` | enumera as receitas `<Scatter>` (geradores) do mundo |
 | `viber.tool.scatter` | recalcula o grupo `generated-by` de um gerador sobre o terreno ATUAL (transação desfazível) |
@@ -203,6 +203,12 @@ viber debug lua 'viber.debug.postfx{bloom=false, motion_blur=false} return true'
 # scripts longos sem quoting: lê o ficheiro
 viber debug lua --file qa/inspect.lua
 # teclas: o click dura <1 frame; para andar/voar segura
+#
+# A tecla é aplicada no `PreUpdate` do frame SEGUINTE ao pedido (depois do
+# input core, antes de todos os sistemas de jogo). Assim o `just_pressed`
+# vale para o `Update` inteiro — antes o handler BRP escrevia a meio do
+# `Update` e os sistemas que já tinham corrido perdiam o edge (o `[J]` da
+# colheita do Vael, o combate). Também com `viber debug step`.
 viber debug key w --hold-ms 1200
 viber debug key f1                      # voo (dev mode do jogo)
 viber debug key w --state press         # fica em baixo…

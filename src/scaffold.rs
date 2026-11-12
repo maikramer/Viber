@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 /// Mundo inicial gerado por `viber create` — ESTÁTICO desde o primeiro minuto: terreno
 /// plano editável (`world.data/terrain.ahgt`, pincéis do editor / `viber terrain brush`),
-/// primitivas, luz e câmara. Edita-se com `viber scene`, `viber tool` ou o ViberEditor.
+/// primitivas, luz e câmara. Edita-se com `viber scene`, `viber tool` ou o editor externo.
 pub const WORLD_XML_TEMPLATE: &str = r##"<?xml version="1.0"?>
 <world clear-color="#87ceeb" static="true">
   <AmbientLight brightness="300" />

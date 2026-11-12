@@ -226,13 +226,7 @@ fn prop_daynight_tint(
     } else {
         clock
             .as_deref()
-            .map(|clock| {
-                crate::worldsys::daylight_factor(
-                    clock.minute_of_day,
-                    clock.dawn_minute,
-                    clock.dusk_minute,
-                )
-            })
+            .map(|clock| clock.visual_daylight())
             .unwrap_or(1.0)
     };
     let tint = day_tint(day);
@@ -309,6 +303,13 @@ mod tests {
             day_speed_scale: 1.0,
             night_speed_scale: 1.0,
             night_cap_minute: 0.0,
+            mode: crate::worldsys::DayCycleMode::Continuous,
+            day_night: crate::worldsys::DayNightConfig::default(),
+            visual_now: 0.0,
+            visual_from: 0.0,
+            visual_transition: 1.0,
+            visual_day: false,
+            shadow_refresh_hz: 0.0,
         });
         let handles: Vec<_> = {
             let mut assets = app

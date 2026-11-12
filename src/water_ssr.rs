@@ -890,6 +890,7 @@ fn prepare_bind_groups(
             &ViewTarget,
             Option<&ViewPrepassTextures>,
             Option<&bevy::render::camera::TemporalJitter>,
+            Option<&bevy::render::camera::ExtractedCamera>,
             Option<&mut WaterSsrViewGpu>,
         ),
         With<WaterSsr>,
@@ -903,7 +904,7 @@ fn prepare_bind_groups(
     );
     let bind_group_layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
 
-    for (entity, view, target, prepass_opt, jitter, mut gpu) in &mut views {
+    for (entity, view, target, prepass_opt, jitter, camera, mut gpu) in &mut views {
         let Some(prepass) = prepass_opt else { continue };
         let Some(depth) = prepass.depth.as_ref() else {
             continue;
@@ -911,6 +912,16 @@ fn prepare_bind_groups(
         let Some(normal) = prepass.normal.as_ref() else {
             continue;
         };
+        // Vistas offscreen (o bake de impostores do `bevy_flora` mete 16
+        // vistas de 256×256 num atlas de 2048×512): o histórico é
+        // dimensionado pelo viewport, mas o passe usa o alvo completo e o
+        // wgpu rejeita anexos de tamanhos diferentes. Só vistas que cobrem o
+        // alvo inteiro entram no SSR.
+        if let Some(camera) = camera
+            && camera.physical_viewport_size != camera.physical_target_size
+        {
+            continue;
+        }
         let key = WaterSsrPipelineKey {
             target_format: view.target_format,
         };

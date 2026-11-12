@@ -55,7 +55,7 @@ mod tests;
 pub use commands::ScriptCommand;
 pub use components::{
     DEFAULT_ACTIVATION_RADIUS, Groups, LuaScriptRef, ScriptActivation, ScriptInteraction,
-    ScriptProps, ScriptToast, SignalConnections, link_components,
+    ScriptProps, ScriptSay, ScriptToast, SignalConnections, link_components,
 };
 pub use ctx::{ScriptCtx, SurfaceCache, SurfaceRegistries};
 pub use events::{EVENT_QUEUE_CAP, ScriptEventQueue, ScriptGameEvent};
@@ -77,12 +77,17 @@ use std::path::PathBuf;
 pub struct LuauScriptPlugin {
     /// Directory scripts load from: `<world_dir>/scripts`.
     pub scripts_dir: PathBuf,
+    /// Reconstrói o espelho de `viber.ecs` por frame. Desligado, o sistema
+    /// exclusivo não corre; `viber.ecs` continua disponível para o bridge
+    /// através de `build_mirror_live` (custo só quando alguém o pede).
+    pub ecs_mirror: bool,
 }
 
 impl Default for LuauScriptPlugin {
     fn default() -> Self {
         Self {
             scripts_dir: PathBuf::from("scripts"),
+            ecs_mirror: true,
         }
     }
 }
@@ -102,15 +107,17 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         host.set_ecs_pool(spawn_queue.clone());
         app.insert_resource(ecs::EcsSpawnPool::new(spawn_queue));
         app.init_resource::<ecs::EcsMirror>();
-        app.add_systems(
-            Update,
-            // Antes de qualquer `on_update`: o espelho é o snapshot que
-            // `viber.ecs.get/query` leem no frame. Exclusivo (precisa do
-            // `&mut World` para a travessia por arquétipo/reflexão).
-            ecs::mirror_system
-                .before(luau_on_add)
-                .run_if(crate::app::scripts_enabled),
-        );
+        if self.ecs_mirror {
+            app.add_systems(
+                Update,
+                // Antes de qualquer `on_update`: o espelho é o snapshot que
+                // `viber.ecs.get/query` leem no frame. Exclusivo (precisa do
+                // `&mut World` para a travessia por arquétipo/reflexão).
+                timed(Group::Scripts, ecs::mirror_system)
+                    .before(luau_on_add)
+                    .run_if(crate::app::scripts_enabled),
+            );
+        }
         // Garante o clock mesmo sem TimePlugin (plugin autossuficiente em apps mínimos).
         app.init_resource::<Time>();
         // Input para `viber.interacted` + evento de toasts de script.
@@ -120,6 +127,9 @@ impl bevy::app::Plugin for LuauScriptPlugin {
         app.init_resource::<crate::interact::InteractionFocus>();
         app.add_systems(bevy::app::PreUpdate, crate::interact::focus_interactions);
         app.add_message::<ScriptToast>();
+        // Linhas faladas (`viber.say`): a engine desenha o balão nativo ou o
+        // jogo ouve a mensagem e apresenta a fala (`ExternalSayPresenter`).
+        app.add_message::<ScriptSay>();
         // SFX de scripts (`viber.sound`) — idempotente com o AmbientPlugin.
         app.add_message::<crate::ambient::SfxEvent>();
         // O dano de scripts segue o path único do feedback (i-frames etc.).
@@ -192,7 +202,7 @@ impl bevy::app::Plugin for LuauScriptPlugin {
                 luau_on_remove,
             )
                 .chain(),
-            // Modo Edit (ViberEditor): a cena está congelada — nenhum
+            // Modo Edit (editor externo): a cena está congelada — nenhum
             // `on_update`/`on_add` corre enquanto se edita; só as remoções.
         );
         // Depois do step do Rapier (PostUpdate): os eventos deste frame e os

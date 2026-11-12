@@ -24,6 +24,15 @@ fn spawn_app() -> App {
     app
 }
 
+/// A mesma app, mas com o store do material gradiente: é o que liga o
+/// caminho `bevy_gradmesh` no spawn (em produção o `GradMeshPlugin` da
+/// engine registra-o).
+fn spawn_app_gradmesh() -> App {
+    let mut app = spawn_app();
+    app.init_asset::<bevy_gradmesh::GradMeshMaterial>();
+    app
+}
+
 fn node(tag: &str, attrs: &[(&str, &str)]) -> XmlNode {
     XmlNode {
         tag: tag.to_string(),
@@ -296,4 +305,83 @@ fn test_world_load_with_include_and_prototype_end_to_end() {
     assert_eq!(bodies, 2);
     assert_eq!(lights, 2);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_composition_parts_spawn_as_gradmesh_with_exact_colliders() {
+    let mut app = spawn_app_gradmesh();
+    let mut comp = node("Composition", &[]);
+    comp.children = vec![
+        node(
+            "Box",
+            &[("half-size", "2 0.1 0.2"), ("base-color", "#8a5a30")],
+        ),
+        node(
+            "Box",
+            &[("half-size", "2 0.1 0.2"), ("base-color", "#8a5a30")],
+        ),
+        node("Cylinder", &[("radius", "0.3"), ("half-height", "1")]),
+        // `Plane` fica no StandardMaterial (decals/soalhos texturados).
+        node("Plane", &[("half-size", "2 2")]),
+    ];
+    spawn_world(&mut app, &[comp]);
+
+    let root = app
+        .world_mut()
+        .query_filtered::<Entity, With<RigidBody>>()
+        .single(app.world())
+        .expect("composition root");
+    let kids = children_of(&app, root);
+    assert_eq!(kids.len(), 4);
+
+    let grad_material = |app: &App, entity: Entity| {
+        app.world()
+            .get::<MeshMaterial3d<bevy_gradmesh::GradMeshMaterial>>(entity)
+            .map(|material| material.0.id())
+    };
+    assert!(grad_material(&app, kids[0]).is_some(), "Box → gradmesh");
+    assert!(grad_material(&app, kids[1]).is_some(), "Box → gradmesh");
+    assert_eq!(
+        grad_material(&app, kids[0]),
+        grad_material(&app, kids[1]),
+        "mesma cor + mesma forma → material partilhado"
+    );
+    assert_ne!(
+        grad_material(&app, kids[2]),
+        grad_material(&app, kids[0]),
+        "cilindro sem cor → material próprio"
+    );
+    assert!(
+        app.world()
+            .get::<MeshMaterial3d<StandardMaterial>>(kids[3])
+            .is_some(),
+        "Plane continua no StandardMaterial"
+    );
+
+    // Os colisores são os mesmos: a migração é só de render.
+    assert!(
+        app.world()
+            .get::<Collider>(kids[2])
+            .and_then(Collider::as_cylinder)
+            .is_some(),
+        "cilindro → colisor cilíndrico"
+    );
+    for kid in &kids {
+        assert!(
+            app.world().get::<Collider>(*kid).is_some(),
+            "cada parte mantém colisor exato"
+        );
+    }
+
+    // Duas boxes de forma igual partilham mesh; o cilindro tem a sua.
+    let mesh_id = |app: &App, entity: Entity| app.world().get::<Mesh3d>(entity).unwrap().0.id();
+    assert_eq!(mesh_id(&app, kids[0]), mesh_id(&app, kids[1]));
+    assert_ne!(mesh_id(&app, kids[1]), mesh_id(&app, kids[2]));
+    // 2 materiais gradiente (marrom e branco); o Plane não entra na conta.
+    assert_eq!(
+        app.world()
+            .resource::<Assets<bevy_gradmesh::GradMeshMaterial>>()
+            .len(),
+        2
+    );
 }

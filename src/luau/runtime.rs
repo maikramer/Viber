@@ -191,6 +191,11 @@ pub struct LuauRuntimeLocals<'w, 's> {
     pub balloon_texts: Query<'w, 's, &'static mut Text>,
     /// Warn 1× quando um mundo não declara `<DialogueBalloon>`.
     pub balloon_warned: bevy::ecs::system::Local<'s, bool>,
+    /// `viber.say` → apresentação do jogo (balões no mundo, caixa, legendas).
+    /// `Option` pelas apps mínimas de teste, que não registam a mensagem.
+    pub spoken: Option<bevy::ecs::message::MessageWriter<'w, crate::luau::ScriptSay>>,
+    /// O jogo apresenta as falas sozinho: o balão nativo fica por escrever.
+    pub external_say: Option<bevy::ecs::system::Res<'w, crate::dialogue::ExternalSayPresenter>>,
     /// Recursos de FX das primitivas de script (`viber.burst/ring/shake/…`).
     pub fx: super::fx::ScriptFx<'w>,
     /// Decals de impacto pedidos por script (`viber.decal`).
@@ -1547,7 +1552,11 @@ pub fn luau_update(
                     }
                 });
             }
-            ScriptCommand::Say { text, secs } => {
+            ScriptCommand::Say {
+                text,
+                secs,
+                speaker,
+            } => {
                 let text = locals
                     .locale
                     .as_deref()
@@ -1558,6 +1567,16 @@ pub fn luau_update(
                 } else {
                     crate::hud::BALLOON_DURATION
                 };
+                // A linha resolvida chega ao jogo (com o orador) mesmo quando
+                // o HUD nativo a desenha: é o contrato para um presenter
+                // próprio e para legendas/QA.
+                if let Some(spoken) = locals.spoken.as_mut() {
+                    spoken.write(crate::luau::ScriptSay {
+                        speaker,
+                        text: text.clone(),
+                        seconds: duration,
+                    });
+                }
                 // Fala no balão baixa a música (genérico: qualquer `viber.say`
                 // é diálogo, não um toast de sistema). A voz, quando existir,
                 // fica por cima; o SFX não é tocado.
@@ -1569,16 +1588,18 @@ pub fn luau_update(
                         time.elapsed_secs_f64(),
                     );
                 }
-                let shown = crate::dialogue::show_balloon(
-                    &mut locals.balloons,
-                    &mut locals.balloon_texts,
-                    &text,
-                    duration,
-                );
-                if !shown && !*locals.balloon_warned {
-                    *locals.balloon_warned = true;
-                    warn!(target: "viber::luau",
-                        "viber.say: o mundo não declara <DialogueBalloon> — o texto não aparece no HUD");
+                if locals.external_say.is_none() {
+                    let shown = crate::dialogue::show_balloon(
+                        &mut locals.balloons,
+                        &mut locals.balloon_texts,
+                        &text,
+                        duration,
+                    );
+                    if !shown && !*locals.balloon_warned {
+                        *locals.balloon_warned = true;
+                        warn!(target: "viber::luau",
+                            "viber.say: o mundo não declara <DialogueBalloon> — o texto não aparece no HUD");
+                    }
                 }
             }
             ScriptCommand::SaveNow => {

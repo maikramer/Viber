@@ -1,23 +1,24 @@
-//! Declarative terrain for Viber — Bevy 0.19 port of the ideas from
-//! [`bevy_mesh_terrain`](https://github.com/ethereumdegen/bevy_mesh_terrain)
-//! (MIT) corrected and merged with the feature contracts of the original
-//! terrain plugin.
+//! Terrain declarativo do Viber — heightfield como input de um campo 3D.
 //!
-//! # Design contracts (ported from the original plugin)
+//! # Contratos
 //!
-//! * **Sampler CPU único** — [`sampler::HeightSampler`] is the only shape
-//!   authority; mesh, colliders, pads and gameplay queries read the same grid.
-//! * **Skirts + frontier normals** instead of neighbor stitching — no cracks
-//!   and no seam lighting between chunks/LODs.
-//! * **LOD com histerese** and a camera-move reselect gate to avoid thrashing.
-//! * **Pads** flatten the heightfield with a rounded-rect SDF + smoothstep
-//!   falloff and write the resolved height back (auto mode).
-//! * **Ground look** — two paths: the legacy height/slope tint in vertex
-//!   colors (no custom WGSL), or the `layers` splat blend
-//!   ([`splat`] + [`layer_material`], 12 pool textures incl. the shore
-//!   sand/mud bands), which replaces the tint entirely.
-//! * **Collider heightfields** are generated per chunk at an independent
-//!   `collision-resolution`, ready for the Phase 3 physics integration.
+//! * **O heightfield é input, não a forma.** O [`brush::BrushGrid`] é o termo
+//!   base do SDF (`densidade(p) = p.y − base.sample(p.xz)`); o
+//!   [`voxel::VoxelField`] combina-o em CSG com os mods 3D e o transvoxel
+//!   mesha o zero do campo. A grelha não é renderizada nem colide
+//!   directamente — é o alvo dos carves e a fonte dos registries.
+//! * **Colunas, não chunks 2.5D.** Cada coluna de `chunk-size` metros é
+//!   meshada por caixas voxel e colide por um trimesh Rapier com os mesmos
+//!   triângulos do render (`physics.rs`), assado no swap atómico do LOD.
+//! * **LOD por coluna** com histerese e clamp 2:1; o transvoxel faz as
+//!   transições laterais sem saias.
+//! * **Pads** achatam o heightfield com um SDF de rounded-rect e falloff
+//!   smoothstep; o [`pads::ResolvedPad`] guarda a cota resolvida.
+//! * **Duas vias de look:** o tint legado de altura/inclinação em vertex
+//!   colors, ou o splat blend de [`splat`] + [`layer_material`] (13 slots de
+//!   camada, material bindless único), que substitui o tint.
+//! * **Edições vivas** ficam no overlay [`delta::DeltaGrid`]; nenhum
+//!   consumidor lê a grelha crua em runtime.
 //!
 //! # XML
 //!
@@ -40,13 +41,13 @@ pub mod features;
 pub mod heightmap;
 pub mod layer_material;
 pub mod mesh;
+pub mod pads;
 pub mod paint;
 pub mod paths;
 pub mod plateau;
 pub mod plugin;
 pub mod roads;
 pub mod runtime;
-pub mod sampler;
 pub mod shore_rocks;
 pub mod spec;
 pub mod splat;
@@ -63,12 +64,12 @@ pub use delta::{DeltaGrid, EditedBase, TerrainEdit, TerrainEditQueue};
 pub use heightmap::HeightMapU16;
 pub use layer_material::TerrainChunkMaterial;
 pub use mesh::{ChunkMeshData, HeightField};
+pub use pads::ResolvedPad;
 pub use paths::{chaikin_smooth, resample};
 pub use plateau::PlateauSpec;
 pub use plugin::TerrainPlugin;
 pub use roads::{RoadNetworkSpec, RoadPath, RoadProfile, RoadSpec, SegmentSpec, WaySpec};
 pub use runtime::TerrainFeaturesPlugin;
-pub use sampler::{HeightSampler, ResolvedPad};
 pub use spec::{TerrainPadSpec, TerrainSpec, TerrainTint};
 pub use voxel::{
     Bounds3, BoxMod, CapsuleMod, ChunkClass, ModIndex, ModOp, Span, VoxelChunkParams, VoxelField,

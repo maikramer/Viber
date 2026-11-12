@@ -57,6 +57,7 @@ pub const SFX_NAME_REGISTRY: &[(&str, crate::ambient::SfxClip)] = &[
     ("arrow_hit", crate::ambient::SfxClip::ArrowHit),
     ("fire_crackle", crate::ambient::SfxClip::FireCrackle),
     ("item_drop", crate::ambient::SfxClip::ItemDrop),
+    ("thunder", crate::ambient::SfxClip::Thunder),
 ];
 
 /// Nome de clip SFX Lua (`"hit"`, `"UI"`) → [`crate::ambient::SfxClip`]

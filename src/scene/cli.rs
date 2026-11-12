@@ -1,4 +1,4 @@
-//! `viber scene …` — edição offline de mundos para agentes (a mesma API do ViberEditor).
+//! `viber scene …` — edição offline de mundos para agentes (a mesma API do editor externo).
 //!
 //! Toda a saída é JSON. As mutações gravam os ficheiros alterados logo (`--dry-run` só
 //! mostra o que mudaria). Exemplos:

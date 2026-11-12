@@ -696,7 +696,8 @@ Um NPC/dador pode conduzir o seu PRÓPRIO diálogo em Lua:
 
 | Função | Efeito |
 |--------|--------|
-| `viber.say(texto [, segundos])` | escreve no **balão nativo** do HUD (o mesmo do diálogo de quests); sem `<DialogueBalloon>` no mundo = no-op com warn 1×; `\n` faz multi-linha; default 4 s |
+| `viber.say(texto [, segundos [, orador]])` | publica a fala: resolve o locale, baixa a música e emite `ScriptSay { speaker, text, seconds }`. Sem `ExternalSayPresenter` (o jogo apresenta sozinho) escreve também no **balão nativo** do HUD; sem `<DialogueBalloon>` = no-op com warn 1×; `\n` faz multi-linha; default 4 s. `orador` são bits de entidade — necessário numa callback que corre noutra entidade (a barra de fala corre no HUD); por omissão é a entidade actual |
+| `viber.entity_id()` | bits da entidade que corre o `on_update` agora (`nil` fora dele). Para guardar o orador e passá-lo a `viber.say` numa callback adiada |
 | `viber.localize(texto)` | resolve as chaves `@nome` do locale ativo (`locale/<lang>.json`). `say`/`toast` já o fazem por linha; isto serve quem compõe (`Falante: @chave`) |
 | `viber.prompt(key, label)` | publica um prompt de interação de MUNDO (um controller mostra o verbo de um prop que não é a sua entidade). `label` vazio/nil limpa. UI genérica: o jogo decide quando. Republicar por frame renova o TTL (0,25 s); um `<ScriptInteraction>` ao alcance tem prioridade |
 | `viber.quest_def(id)` | tabela da definição autoral (`id/title/npc/biome/kind/target/count/radius/gold/xp/items/lines_intro/lines_progress/lines_complete`) ou `nil` — lê o MESMO `<mundo>/quests/*.json` da engine |

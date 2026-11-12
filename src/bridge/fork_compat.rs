@@ -1,5 +1,5 @@
 //! Compatibilidade de protocolo BRP com o cliente do **Bevy main** (o fork
-//! local `../../bevy` usado pelo ViberEditor e pelo `bevy_inspector`).
+//! local `../../bevy` usado pelo editor externo e pelo `bevy_inspector`).
 //!
 //! O `bevy_remote` do motor é o 0.20.0 do crates.io; o do fork mudou a
 //! serialização de entidades no BRP: o 0.20.0 emite os *bits opacos* do

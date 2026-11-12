@@ -191,6 +191,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // viber.entity_id() -> bits | nil — a entidade que corre o script agora.
+    // `viber.say` usa-a para atribuir a fala a quem a diz quando a chamada
+    // corre numa callback de outro script (a barra de fala corre no HUD).
+    api.set(
+        "entity_id",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<ScriptCtx>()
+                .and_then(|ctx| ctx.entity)
+                .map(|entity| entity.to_bits() as i64))
+        })?,
+    )?;
+
     // viber.ground_below(x, y, z) -> y | nil — a superfície sólida mais
     // alta em ou abaixo de `y` nesta coluna. Acima do mundo = o topo;
     // dentro de uma gruta = o piso da gruta; sob um arco = o chão do
@@ -1567,24 +1580,36 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // viber.say(texto [, segundos]) — escreve no BALÃO nativo do HUD
-    // (o mesmo do diálogo de quests). Sem `<DialogueBalloon>` no mundo é
-    // no-op com warn 1×.
+    // viber.say(texto [, segundos [, orador]]) — fala. A engine resolve o
+    // locale, baixa a música e publica `ScriptSay`; o balão nativo do HUD só
+    // aparece sem `ExternalSayPresenter`. O `orador` explícito (bits de
+    // entidade) existe para callbacks que correm noutro script e não podem
+    // herdar o `ctx.entity` de quem falou.
     api.set(
         "say",
-        lua.create_function(|lua, (text, secs): (String, Option<f32>)| {
-            let secs = secs.unwrap_or(0.0);
-            if !secs.is_finite() || secs < 0.0 {
-                return Err(mlua::Error::runtime(
-                    "viber.say: segundos têm de ser finitos e >= 0",
-                ));
-            }
-            lua.app_data_mut::<ScriptCtx>()
-                .expect("ScriptCtx app data seeded in LuaScriptHost::new")
-                .commands
-                .push(ScriptCommand::Say { text, secs });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (text, secs, speaker): (String, Option<f32>, Option<i64>)| {
+                let secs = secs.unwrap_or(0.0);
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "viber.say: segundos têm de ser finitos e >= 0",
+                    ));
+                }
+                let speaker = match speaker {
+                    Some(bits) => Some(super::entity::entity_from_id(bits)?),
+                    None => lua.app_data_ref::<ScriptCtx>().and_then(|ctx| ctx.entity),
+                };
+                lua.app_data_mut::<ScriptCtx>()
+                    .expect("ScriptCtx app data seeded in LuaScriptHost::new")
+                    .commands
+                    .push(ScriptCommand::Say {
+                        text,
+                        secs,
+                        speaker,
+                    });
+                Ok(())
+            },
+        )?,
     )?;
 
     // viber.save() / viber.load_save() — gravam/carregam o save do mundo

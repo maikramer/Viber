@@ -20,6 +20,7 @@ fn test_app(host: LuaScriptHost) -> bevy::app::App {
     app.init_resource::<Time>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.add_message::<ScriptToast>();
+    app.add_message::<crate::luau::ScriptSay>();
     app.add_message::<crate::ambient::SfxEvent>();
     app.insert_resource(host);
     app.add_systems(Update, (luau_on_add, luau_update, luau_on_remove).chain());
@@ -1523,12 +1524,15 @@ fn test_say_writes_native_balloon() {
             p.spawn(Text::new(""));
         })
         .id();
-    app.world_mut().spawn((
-        Transform::default(),
-        LuaScriptRef {
-            path: "say.lua".to_string(),
-        },
-    ));
+    let speaker = app
+        .world_mut()
+        .spawn((
+            Transform::default(),
+            LuaScriptRef {
+                path: "say.lua".to_string(),
+            },
+        ))
+        .id();
     app.update();
     let (vis, balloon) = {
         let entity = app.world().entity(parent);
@@ -1548,6 +1552,110 @@ fn test_say_writes_native_balloon() {
         texts.iter().any(|t| t.contains("Lobos ao norte")),
         "texto no balão: {texts:?}"
     );
+    let said: Vec<crate::luau::ScriptSay> = app
+        .world()
+        .resource::<bevy::ecs::message::Messages<crate::luau::ScriptSay>>()
+        .iter_current_update_messages()
+        .cloned()
+        .collect();
+    assert_eq!(said.len(), 1, "uma linha falada: {said:?}");
+    assert_eq!(
+        said[0].speaker,
+        Some(speaker),
+        "o orador é a entidade que correu o script"
+    );
+    assert_eq!(said[0].seconds, crate::hud::BALLOON_DURATION);
+}
+
+#[test]
+fn test_say_explicit_speaker_and_entity_id() {
+    let host = host_with(
+        "function on_update(dt)\n\
+               local st = viber.state()\n\
+               if st.done then return end\n\
+               st.done = true\n\
+               local me = viber.entity_id()\n\
+               viber.say('Até logo.', 2.5, me)\n\
+             end",
+        "say_speaker.lua",
+    );
+    let mut app = test_app(host);
+    let entity = app
+        .world_mut()
+        .spawn((
+            Transform::default(),
+            LuaScriptRef {
+                path: "say_speaker.lua".to_string(),
+            },
+        ))
+        .id();
+    app.update();
+    let said: Vec<crate::luau::ScriptSay> = app
+        .world()
+        .resource::<bevy::ecs::message::Messages<crate::luau::ScriptSay>>()
+        .iter_current_update_messages()
+        .cloned()
+        .collect();
+    assert_eq!(said.len(), 1, "uma linha falada: {said:?}");
+    assert_eq!(said[0].speaker, Some(entity), "o id explícito vence");
+    assert_eq!(said[0].text, "Até logo.");
+    assert_eq!(said[0].seconds, 2.5);
+}
+
+#[test]
+fn test_entity_id_is_nil_outside_on_update() {
+    let host = LuaScriptHost::new(PathBuf::from("scripts")).expect("host");
+    let id: Option<i64> = host
+        .lua
+        .load("return viber.entity_id()")
+        .eval()
+        .expect("entity_id");
+    assert_eq!(id, None, "fora de on_update não há entidade corrente");
+}
+
+#[test]
+fn test_external_say_presenter_skips_native_balloon() {
+    let host = host_with(
+        "function on_update(dt)\n\
+               local st = viber.state()\n\
+               if st.done then return end\n\
+               st.done = true\n\
+               viber.say('A noite chega.')\n\
+             end",
+        "say_external.lua",
+    );
+    let mut app = test_app(host);
+    app.insert_resource(crate::dialogue::ExternalSayPresenter);
+    let balloon = app
+        .world_mut()
+        .spawn((Visibility::Hidden, crate::hud::HudBalloon { timer: 0.0 }))
+        .with_children(|p| {
+            p.spawn(Text::new(""));
+        })
+        .id();
+    let speaker = app
+        .world_mut()
+        .spawn((
+            Transform::default(),
+            LuaScriptRef {
+                path: "say_external.lua".to_string(),
+            },
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        *app.world().entity(balloon).get::<Visibility>().unwrap(),
+        Visibility::Hidden,
+        "com presenter externo o HUD nativo não escreve"
+    );
+    let said: Vec<crate::luau::ScriptSay> = app
+        .world()
+        .resource::<bevy::ecs::message::Messages<crate::luau::ScriptSay>>()
+        .iter_current_update_messages()
+        .cloned()
+        .collect();
+    assert_eq!(said.len(), 1, "a linha continua a chegar ao jogo");
+    assert_eq!(said[0].speaker, Some(speaker));
 }
 
 #[test]

@@ -10,7 +10,7 @@
 # Regras — só toca em unidades do workspace e no lixo derivado delas; as
 # rlibs de crates.io são estáveis (bevy/ort/ash) e nunca são apagadas:
 #   * deps/: mantém a geração mais recente de cada unidade do workspace
-#     (`viber`, `vibereditor`, `libviber`, … e os alvos de tests/*.rs),
+#     (`viber`, `libviber`, … e os alvos de tests/*.rs),
 #     agrupada pelo mesmo `-<hash>`; apaga as gerações antigas — binários,
 #     rlibs, .rmeta, .d e os .rcgu.dwo do split-debuginfo, que acompanham a
 #     geração pelo mtime.
@@ -30,11 +30,11 @@ dry=0
 age_days="${VIBER_TARGET_GC_AGE:-3}"
 grace=120   # segundos de tolerância dentro da mesma geração
 
-# Unidades do workspace: os dois bins + os alvos de teste (o nome do exe de
-# teste é o do ficheiro tests/*.rs). Exemplos/benches não existem; se um dia
+# Unidades do workspace: o bin + os alvos de teste (o nome do exe de teste é
+# o do ficheiro tests/*.rs). Exemplos/benches não existem; se um dia
 # existirem, entram aqui.
-units="viber|vibereditor"
-for f in "$checkout"/tests/*.rs "$checkout"/editor/tests/*.rs; do
+units="viber"
+for f in "$checkout"/tests/*.rs; do
   [[ -e "$f" ]] && units="$units|$(basename "$f" .rs)"
 done
 

@@ -28,7 +28,7 @@ Contrato XML completo: `AGENTS.md` da raiz.
 | Ficheiro | Responsabilidade |
 |----------|------------------|
 | `spec.rs` | contrato XML: `TerrainSpec`, `TerrainPadSpec`, tint. `resolution` = célula do LOD0 voxel (`chunk_size/resolution`, 1 m no default); `collision-resolution` = interruptor (`0` desliga os colliders; já não define geometria); `levels`/`lod-distance-ratio`/`lod-hysteresis`/`render-distance` alimentam o ladder de colunas |
-| `sampler.rs` | `HeightSampler` + guard `apply_pads` (só para testes) |
+| `pads.rs` | `ResolvedPad` — cota resolvida de um pad, partilhada por `features.rs`, `runtime.rs`, `probes.rs` e `voxel/scatter.rs` |
 | `heightmap.rs` | PNG 8/16-bit ou `.ahgt` (header JSON + grid u16 deflate); sem ficheiro → procedural determinístico via `seed` |
 | `brush.rs` | brush engine: modos blend/lower/raise, **journal por owner** (`pad:0`, `road:3`…) com revert para re-carve idempotente, `min_effective` (larguras < 1.5 texéis promovidas). O produção é deliberadamente **unguarded** |
 | `features.rs` | **ordem de carve:** Plateaus (raise) → Pads → Lakes → Rivers → Cuts → Roads (arteriais primeiro, **pontes por último**); estradas saltam núcleos de pads e zonas de água. Cliffs não carvam — são sólidos voxel |
@@ -37,7 +37,7 @@ Contrato XML completo: `AGENTS.md` da raiz.
 | `cliffs.rs` | `CliffSpec` (parser) + **`CliffMask`** — scan de declive → abertura morfológica → BFS → filtro regional (área/queda/extent) → camadas core/dilatada + wall space (canal R). Consumidores: splat (pedra no core), relva/spawners (exclusão), shader (gate triplanar). `sharpen_terrain` (opt-in): terraceia rampas > `sharpen-angle` do campo FINAL dentro do core da máscara |
 | `water.rs` | `LakeSpec`/`RiverSpec` + `WaterBody` (queries `contains`/`is_near`/`surface_y_at`/`distance_to_waterline`); lake = contorno orgânico lower-only; river = Chaikin + prefixo-mínimo (água nunca sobe). **Quedas**: o scan contíguo produz `CascadeInfo { lip, base, drop, waterfall, wall, top_y, bot_y }` — queda ≥ `waterfall_min_drop` é CACHOEIRA (cortina ×`WATERFALL_CURTAIN`, caldeirão ∝ queda); `river_cliff_crossings` cruza rio×cliff em specs (2D) e `carve_river_with_falls` conduz o perfil pelo cruzamento (hold a montante + queda garantida) |
 | `splat.rs` | **blend de solo** (`layers="…"`): gerador puro do splat map por chunk (top-4 slots), leito forçado a `pebbles`. Aliases → `/assets/textures/<alias>/albedo.ktx2` |
-| `layer_material.rs` | `TerrainChunkMaterial` bindless (4 texturas + splat por chunk), shader `chunk.wgsl` reescrito por mundo; `terrain_daynight_tint` |
+| `layer_material.rs` | `TerrainChunkMaterial` bindless: 13 slots de camada + 4 planos splat globais, shader `chunk.wgsl` reescrito por mundo; `terrain_daynight_tint` |
 | `water_material.rs` / `water_fx.rs` | `WaterMaterial` (Beer–Lambert, fresnel, glint) + splash/esteira |
 | `roads.rs` | `RoadSpec`/`RoadNetworkSpec` + `RoadPath`; profiles, flatten com teto de grade, ribbons + discos de junção |
 | `decal.rs` | `GroundDecalSpec` + `ground_decal_mesh` — manchas de chão drapejadas, só visuais |
@@ -50,7 +50,7 @@ Contrato XML completo: `AGENTS.md` da raiz.
 
 ## Regras duras (não quebrar)
 
-- **Sampler CPU único:** nenhuma segunda fonte de verdade de altura. O
+- **Fonte de altura única:** nenhuma segunda fonte de verdade. O
   `BrushGrid` é o base(p) do SDF; numa coluna sem mod o campo É o heightfield
   (mesmo valor, custo de Catmull-Rom).
 - **Visual do chão, dois caminhos exclusivos:** tint LEGADO por
@@ -136,10 +136,10 @@ Contrato XML completo: `AGENTS.md` da raiz.
 ## Colunas voxel — regras duras
 
 - **Ladder por coluna, não por caixa:** `lod_shape(lod0_cell, edge, lod)`
-  deriva `(cells, per_edge)` — LOD0 2×2 caixas de 32³ @1 m, LOD1 1×64³ @2 m,
-  LOD2 16³ @4 m (chunk 64 m). Determinístico e global: vizinhos ao mesmo LOD
-  derivam o MESMO shape — é isso que fecha costuras por coincidência de
-  vértices.
+  deriva `(cells, per_edge)` — LOD0 2×2 caixas de 32³ @1 m, LOD1 1 caixa de
+  32³ @2 m, LOD2 16³ @4 m (chunk 64 m). Determinístico e global: vizinhos ao
+  mesmo LOD derivam o MESMO shape — é isso que fecha costuras por
+  coincidência de vértices.
 - **Refinamento perto de mods (`VIBER_VOXEL_REFINE=1`, OPT-IN):** coluna ao
   LOD 0 cujo rect toca a bounding dos mods E com TODOS os vizinhos ao LOD 0
   amostra a MEIA célula (0.5 m) — o "fix real" das folhas finas sub-voxel
@@ -161,24 +161,21 @@ Contrato XML completo: `AGENTS.md` da raiz.
 - **Construção staged:** as caixas do novo LOD nascem `Visibility::Hidden`
   sob o budget; quando a fila esvazia, as velhas morrem e as novas ficam
   visíveis — troca atómica, nunca dois LODs do mesmo chão nem buraco.
-- **Seals de fronteira de coluna:** saia vertical (`seal_depth =
-  max(4×célula, 2 m)`) nas faces ±X/±Z na fronteira, SÓ em arestas com
-  traverso horizontal. "Sempre selar" é deliberado (parede enterrada quando
-  o vizinho concorda; saber o LOD do vizinho acoplava colunas).
 - **As caixas são iteradas a partir da grelha de chunks de terreno**, não de
   uma grelha voxel própria — as origens não coincidem num mundo de 4 km
   (−2000 não é múltiplo de 32 m); transbordar é z-fighting.
-- **Material por coluna do `ChunkLayerMap`**; o standard fallback é
-  double-sided (folhas finas sub-voxel com culling leem-se como buracos).
-- **Despawn de coluna é recursivo** (Bevy 0.19): as caixas morrem com ela no
+- **Material único para todas as colunas** (`ChunkLayerMap`); o standard
+  fallback é double-sided (folhas finas sub-voxel com culling leem-se como
+  buracos).
+- **Despawn de coluna é recursivo** (Bevy 0.20): as caixas morrem com ela no
   cull.
 - **Normais vêm do gradiente do campo** — contínuas através das fronteiras,
   sem estado partilhado entre builds.
 - **Flaps sub-voxel conhecidos:** folhas finas (lips de carve a centímetros)
   produzem ~0,4% de triângulos degenerados num mundo carvado ao passo de
-  1 m — o REFINAMENTO perto de mods (acima) é o fix real e está ligado por
-  omissão; o `cull_mode = None` do material continua como rede (folhas
-  remanescentes com culling leem-se como buracos).
+  1 m — o REFINAMENTO perto de mods (acima) é o fix real e está **desligado
+  por omissão** (`VIBER_VOXEL_REFINE=1`); o `cull_mode = None` do material
+  continua como rede (folhas remanescentes com culling leem-se como buracos).
 
 ## Desvios conhecidos vs a referência (documentados, não afetam o simple-rpg)
 

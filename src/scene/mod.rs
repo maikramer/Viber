@@ -1,4 +1,4 @@
-//! Edição de mundos — a API ÚNICA partilhada por agentes de IA e pelo ViberEditor.
+//! Edição de mundos — a API ÚNICA partilhada por agentes de IA e pelo editor externo.
 //!
 //! * [`doc::SceneDoc`] — o mundo e os seus includes, cada ficheiro com o seu documento;
 //!   nós endereçados por seletores (`world/village.xml#3/0`, `name=well`).
@@ -7,7 +7,7 @@
 //!
 //! Superfícies (todas sobre estas funções, nunca com lógica própria):
 //! `viber scene …` (CLI, offline, grava no disco), `viber.scene.*` (bridge, mundo vivo) e o
-//! ViberEditor (in-process). Uma operação feita por um agente e a mesma feita à mão no editor
+//! editor externo (in-process). Uma operação feita por um agente e a mesma feita à mão no editor
 //! produzem o mesmo XML.
 
 pub mod catalog;

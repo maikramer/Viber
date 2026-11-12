@@ -760,13 +760,7 @@ pub fn terrain_daynight_tint(
 ) {
     let day = clock
         .as_deref()
-        .map(|clock| {
-            crate::worldsys::daylight_factor(
-                clock.minute_of_day,
-                clock.dawn_minute,
-                clock.dusk_minute,
-            )
-        })
+        .map(|clock| clock.visual_daylight())
         .unwrap_or(1.0);
     let tint = terrain_day_tint(day);
     let tinted = Color::linear_rgb(tint[0], tint[1], tint[2]);

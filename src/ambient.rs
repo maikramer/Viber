@@ -222,6 +222,8 @@ pub enum SfxClip {
     FireCrackle,
     /// Item a cair ao chão.
     ItemDrop,
+    /// Trovão distante (one-shot; o `bevy_elements` emite `Thunder`).
+    Thunder,
 }
 
 /// Todos os clips, pela ordem do enum — alimenta o preload dos handles, o
@@ -271,6 +273,7 @@ pub const SFX_CLIPS_ALL: &[SfxClip] = &[
     SfxClip::ArrowHit,
     SfxClip::FireCrackle,
     SfxClip::ItemDrop,
+    SfxClip::Thunder,
 ];
 
 /// Loops ambientes carregados por path fixo (`setup_water_ambience`,
@@ -333,6 +336,7 @@ impl SfxClip {
             SfxClip::ArrowHit => "combat/arrow_hit.ogg",
             SfxClip::FireCrackle => "world/fire_crackle.ogg",
             SfxClip::ItemDrop => "world/item_drop.ogg",
+            SfxClip::Thunder => "ambient/thunder.ogg",
         }
     }
 }
@@ -343,6 +347,38 @@ pub struct SfxEvent {
     pub clip: SfxClip,
     /// Posição no mundo; `None` = som de interface (volume cheio).
     pub position: Option<Vec3>,
+}
+
+/// Toca um SFX com um GANHO explícito (0..1 linear), sem a atenuação de
+/// 40 m do [`SfxEvent`]. É para sons cuja distância já foi calculada na
+/// fonte — o trovão do `bevy_elements` traz `distance_m`/`loudness` e a
+/// atenuação de 40 m clampava-o a 0,05 sempre.
+#[derive(Debug, Clone, Copy, bevy::ecs::message::Message)]
+pub struct SfxLoudEvent {
+    pub clip: SfxClip,
+    /// Posição no mundo (informativa), em unidades de mundo.
+    pub position: Option<Vec3>,
+    /// Ganho linear 0..1, aplicado tal-e-qual.
+    pub volume: f32,
+}
+
+/// O emissor de chuva da engine (partículas CPU) está ligado?
+///
+/// O `bevy_elements` desenha a chuva em GPU; com o clima ligado no Vael os
+/// dois donos davam chuva dupla. A engine continua a manter as ondulações no
+/// terreno real (`rain_ripple_spawner`) e o loop de áudio
+/// (`rain_ambience_driver`); só o emissor de gotas é desligado.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct EngineRainVisuals(pub bool);
+
+impl Default for EngineRainVisuals {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+fn engine_rain_visuals(flag: Res<EngineRainVisuals>) -> bool {
+    flag.0
 }
 
 // ── ponto-em-polígono ───────────────────────────────────────────────────
@@ -375,6 +411,7 @@ impl Plugin for AmbientPlugin {
         app.init_resource::<CurrentBiome>()
             .init_resource::<PointShadowsEnabled>()
             .init_resource::<RainLook>()
+            .init_resource::<EngineRainVisuals>()
             .init_resource::<TorchLightOverride>()
             // GLUE da atmosfera (peça céu): [`crate::worldsys::AtmosphereState`]
             // é a paleta da hora partilhada por céu/fog/grading. Era escrita
@@ -384,6 +421,7 @@ impl Plugin for AmbientPlugin {
             // params todos os frames (céu/fog congelados no default de dia).
             .init_resource::<crate::worldsys::AtmosphereState>()
             .add_message::<SfxEvent>()
+            .add_message::<SfxLoudEvent>()
             .add_systems(PostStartup, load_sfx_assets)
             .add_systems(
                 Update,
@@ -393,6 +431,7 @@ impl Plugin for AmbientPlugin {
                     light_budget_system,
                     npc_gesture_system,
                     sfx_player_system,
+                    sfx_loud_player_system,
                     setup_water_ambience,
                     water_ambience_driver,
                     setup_waterfall_ambience,
@@ -403,7 +442,8 @@ impl Plugin for AmbientPlugin {
                     // mesmo frame em que a âncora anda.
                     rain_emitter_driver
                         .after(crate::worldsys::weather_drive)
-                        .before(crate::particles::particle_emitter_update),
+                        .before(crate::particles::particle_emitter_update)
+                        .run_if(engine_rain_visuals),
                     rain_ripple_spawner,
                     setup_rain_ambience,
                     rain_ambience_driver,
@@ -940,6 +980,22 @@ fn pitch_jitter(clip: SfxClip, rng: &mut u32) -> f32 {
     0.92 + ((*rng >> 16) as f32 / u16::MAX as f32) * 0.16
 }
 
+/// Reproduz um clip no bus de SFX com um ganho linear já decidido.
+fn play_sfx(
+    sfx: &bevy_kira_audio::AudioChannel<crate::music::SfxBus>,
+    handles: &SfxHandles,
+    clip: SfxClip,
+    volume: f32,
+    rng: &mut u32,
+) {
+    let Some(handle) = handles.get(clip) else {
+        return;
+    };
+    sfx.play(handle)
+        .with_volume(crate::music::linear_to_db(volume))
+        .with_playback_rate(pitch_jitter(clip, rng) as f64);
+}
+
 fn sfx_player_system(
     mut events: MessageReader<SfxEvent>,
     handles: Option<Res<SfxHandles>>,
@@ -959,9 +1015,6 @@ fn sfx_player_system(
         return;
     }
     for event in events.read() {
-        let Some(handle) = handles.get(event.clip) else {
-            continue;
-        };
         // Atenuação por distância no momento do evento; os buses sfx×master
         // são aplicados pelo kira (crate::music::mixer_sync) — um som a meio
         // responde a mudanças de volume, coisa que o modelo antigo (bus
@@ -975,9 +1028,35 @@ fn sfx_player_system(
             }
             None => 0.6,
         };
-        sfx.play(handle)
-            .with_volume(crate::music::linear_to_db(volume))
-            .with_playback_rate(pitch_jitter(event.clip, &mut rng) as f64);
+        play_sfx(&sfx, &handles, event.clip, volume, &mut rng);
+    }
+}
+
+/// O irmão de [`sfx_player_system`] para sons com ganho já calculado
+/// (trovão, eventos a longa distância): sem a atenuação de 40 m.
+fn sfx_loud_player_system(
+    mut events: MessageReader<SfxLoudEvent>,
+    handles: Option<Res<SfxHandles>>,
+    mixer: Option<Res<crate::music::AudioMixerSettings>>,
+    sfx: Option<Res<bevy_kira_audio::AudioChannel<crate::music::SfxBus>>>,
+    mut rng: Local<u32>,
+) {
+    let (Some(handles), Some(sfx)) = (handles, sfx) else {
+        return;
+    };
+    if let Some(mixer) = mixer
+        && (mixer.sfx * mixer.master) <= 0.0
+    {
+        return;
+    }
+    for event in events.read() {
+        play_sfx(
+            &sfx,
+            &handles,
+            event.clip,
+            event.volume.clamp(0.0, 1.0),
+            &mut rng,
+        );
     }
 }
 

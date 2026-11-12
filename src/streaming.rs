@@ -5,7 +5,7 @@
 //! registo e volta quando o herói se aproxima, com a pose e o `viber.state`
 //! que deu para serializar. `stream="resident"` nunca arrefece.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -134,6 +134,9 @@ pub fn stream_rings(
         let _ = key;
     }
     let mut sleep: Vec<(Entity, ColdRecord)> = Vec::new();
+    // Chaves já escolhidas nesta passagem: `sleep.iter().any(...)` era O(n²)
+    // quando muitos irmãos da mesma origem adormeciam no mesmo frame.
+    let mut sleeping_keys: HashSet<String> = HashSet::new();
     for (entity, global, source, name, scene, script, has_mesh, pending, resident, streamable) in
         &query
     {
@@ -166,9 +169,7 @@ pub fn stream_rings(
         // adormecidos no MESMO frame ficavam ambos com a chave base (o
         // segundo `insert` apagava o primeiro).
         let base = source_key(source);
-        let key = if store.records.contains_key(&base)
-            || sleep.iter().any(|(_, record)| record.key == base)
-        {
+        let key = if store.records.contains_key(&base) || !sleeping_keys.insert(base.clone()) {
             format!("{}#{}", base, entity.to_bits())
         } else {
             base

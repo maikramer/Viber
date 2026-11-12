@@ -283,6 +283,18 @@ impl SceneLoader {
     pub fn busy(&self) -> bool {
         self.phase != LoaderPhase::Idle || self.request.is_some()
     }
+
+    /// O sistema exclusivo também precisa de correr em `Idle` enquanto o
+    /// contador de silêncio dos portais não chega a zero (é ele que o
+    /// decrementa). Fora disso, `Idle` não tem trabalho.
+    pub fn needs_tick(&self) -> bool {
+        self.busy() || self.quiet_frames > 0
+    }
+}
+
+/// Run condition do `drive_scene_loader` (ver [`SceneLoader::needs_tick`]).
+pub fn scene_loader_needs_tick(loader: Option<Res<SceneLoader>>) -> bool {
+    loader.is_some_and(|loader| loader.needs_tick())
 }
 
 /// Duração de cada metade do fade (s).
@@ -418,7 +430,7 @@ impl Plugin for SceneLoaderPlugin {
             .add_systems(Startup, (spawn_fade_overlay, index_scenes))
             .add_systems(PostStartup, mark_first_scene_loaded)
             .add_systems(Update, (scene_portal_system, release_portal_grace))
-            .add_systems(Last, drive_scene_loader);
+            .add_systems(Last, drive_scene_loader.run_if(scene_loader_needs_tick));
     }
 }
 

@@ -21,7 +21,7 @@ contratos de terreno, render wgpu. Nomenclatura segue **Bevy**
   `world.xml` (+ includes) É a fonte da verdade, com os dados binários em
   `world.data/` (heightmap + pintura, vegetação `.vinst`, `bake.json`).
   Edição por operações (`viber scene`, `viber tool`, `viber terrain`, offline
-  ou `--live`) com undo, em paridade total com o ViberEditor. `viber bake` é
+  ou `--live`) com undo. `viber bake` é
   só a conversão única, no sítio, de mundos procedurais antigos. Contrato
   completo no `AGENTS.md` ("Mundos estáticos + edição por agentes").
 - O exemplo `../Vael` é **jogável de ponta a ponta**: combate,
@@ -62,7 +62,7 @@ QA headless:
 | `src/bake.rs` | conversão procedural → estático no sítio (mesmos ficheiros + `<stem>.data/`) |
 | `src/vinst.rs` | binário `.vinst` de vegetação pré-gerada (zlib; posição/quat/escala/template) |
 | `src/app.rs` | `build_app`: lê mundo + `config.yaml`, monta plugins, especializa shaders |
-| `src/terrain/` | terreno volumétrico: sampler/carve (`brush`, features), colunas voxel meshadas por transvoxel (`voxel/`), LOD, pintura (`paint`), edições vivas (`delta`) |
+| `src/terrain/` | terreno volumétrico: heightfield como input + carve (`brush`, features), colunas voxel meshadas por transvoxel (`voxel/`), LOD, pintura (`paint`), edições vivas (`delta`) |
 | `src/ui/` | UI declarativa (XML + CSS-like + Luau), menus e modais |
 | `src/hud/` | widgets bevy_ui vivos: minimapa, compasso, prompt, balão, profiler |
 | `src/bridge/` | debug bridge BRP/HTTP + REPL Luau + `viber.scene.*`/`viber.tool.*` (`scene.rs`, `selection.rs`) |
@@ -90,7 +90,7 @@ QA headless:
   antes de verificação visual; engines simultâneas podem esgotar VRAM —
   verificar o log antes de culpar código.
 - **Só estático:** editar `world.xml`/`world/**` via `viber scene`/`viber tool`
-  (offline/`--live`) ou ViberEditor — nunca hand-edit à espera de
+  (offline/`--live`) — nunca hand-edit à espera de
   seating/settle/geração em runtime (não existem; `place`/spawners num
   estático são erro de parse). Depois de pincéis de terreno: `viber tool settle`.
 - **XML self-closing:** acrescentar filhos a `<Entity … />` cria um *irmão*

@@ -1048,6 +1048,8 @@ pub fn particle_emitter_update(
     };
     let camera_pos = camera.translation();
     let dt = time.delta_secs().clamp(0.0, 0.1);
+    // Uma leitura por frame; antes era uma por emissor (centenas de env vars).
+    let idle_gate = idle_gate_enabled();
     *frame = frame.wrapping_add(1);
     for (entity, transform, mut emitter, mesh_handle) in &mut emitters {
         let position = transform.translation();
@@ -1080,7 +1082,7 @@ pub fn particle_emitter_update(
         // `VIBER_PARTICLE_IDLE_GATE=0` desliga o gate — é o braço de controlo
         // do A/B (com ele, o emissor de chuva a 0 reescreve `capacity × 4`
         // vértices e re-uploada o mesh em todos os frames, para nada).
-        if emitter.sim.particles.is_empty() && idle_gate_enabled() {
+        if emitter.sim.particles.is_empty() && idle_gate {
             if emitter.idle {
                 continue;
             }

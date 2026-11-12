@@ -8,16 +8,18 @@ não Unity/three.js.
 
 ## Mundos estáticos + edição por agentes (2026-10-13) — LER PRIMEIRO
 
-O Viber é feito para ser construído por **agentes de IA**; o ViberEditor é a UI de debug e
-trabalho manual. Os dois têm **paridade**: toda a edição vive em `viber::scene` e sai igual
-pela CLI, pelo bridge e pelo editor.
+O Viber é feito para ser construído por **agentes de IA**; a UI de autoria do jogo
+vive no checkout irmão [`../Vael/editor`](../Vael/editor). Toda a edição de mundo vive
+em `viber::scene` e sai igual pela CLI e pelo bridge.
 
 * **O runtime só corre mundos ESTÁTICOS** (`<world static="true">`, 2026-10-14). Não há mundo
-  procedural no arranque: `viber run`/editor recusam um `world.xml` sem a marca, apontando
+  procedural no arranque: `viber run` recusa um mundo sem a marca, apontando
   para `viber bake`. O estático é a fonte da verdade — agentes e editor editam-no, nos MESMOS
-  ficheiros (`world.xml` + `world/**`).
-* **Layout de um mundo:** `world.xml` (+ includes) = XML estático; `world.data/` (pasta de
-  dados, `<stem>.data` — `viber::bake::data_dir`) = `terrain.ahgt` (+ `.paint`),
+  ficheiros. Aceita `world.xml` e o formato `.bsn` do Jackdaw: neste, cada nó é um
+  `bevy_world_xml::bsn::WorldNode { tag, attrs, text }` e o loader reconstrói os `XmlNode`
+  antes do `parse_world` — a CLI de cena (`viber scene`/`tool`) continua XML.
+* **Layout de um mundo:** `world.xml` (ou `world.bsn`) + includes = mundo estático; `world.data/`
+  (pasta de dados, `<stem>.data` — `viber::bake::data_dir`) = `terrain.ahgt` (+ `.paint`),
   `veg/NNN.vinst`, `bake.json` (o documento do World Overview). `viber create` já gera um
   mundo estático com terreno plano editável (`world.data/terrain.ahgt`).
 * **`viber bake mundo.xml` = conversão ÚNICA, no sítio**, de um mundo procedural antigo
@@ -73,8 +75,8 @@ pela CLI, pelo bridge e pelo editor.
   ordem XYZ o ângulo do meio é o YAW: com |Y| ≈ 90° e inclinação a string euler não é estável
   em f32 — aí `rotation` em quaternião (6 casas, w ≥ 0). Uma rotação que não muda e já está
   canónica NUNCA é re-decomposta (`pose_op`) — é isso que dá diffs estáveis.
-* **Agente dentro do editor:** `vibereditor --bridge PORT` expõe `viber.scene.*`/`viber.tool.*`
-  do documento ABERTO no editor — humano e agente partilham undo e veem as edições ao vivo
+* **Agente contra a engine viva:** `viber run --bridge PORT` expõe `viber.scene.*`/`viber.tool.*`
+  do documento carregado — humano e agente veem as edições ao vivo
   (`viber scene --live --port PORT …`, `viber terrain --live --port PORT …`).
 * **Props exportadas de scripts (o `@export` do Godot):** um script declara o que cada
   instância pode afinar em anotações — `--@export speed: number(0..4) = 1.1 -- m/s`
@@ -235,7 +237,7 @@ project:                     # config.yaml — sem este bloco o mundo é de uma 
 | IR de entidades + spawn Bevy | `src/recipes/` | `mod.rs` (IR + `KNOWN_TAGS`), `spawn.rs`, `transform.rs` (euler→quat) |
 | Cenas (projeto) + troca in-process | `src/project.rs`, `src/scene_loader.rs` | Ver "Cenas" acima. Interiores = 9 cenas `../Vael/scenes/interiors/*.xml` (cada uma `<InteriorScene at="0 0">` + `<SceneEntry from-town>` + `<ScenePortal exit @back>`); portas da vila = `<ScenePortal>` em `world/cities/discordia/portals.xml`. NPCs de sala usam o MESMO `townsfolk.lua` de rua, afinado por props (`prop-radius="1.6" prop-speed="0.6"` dentro de casa, `prop-radius="0"` ao balcão, falas em `prop-banter`) |
 | Camada de pintura do terreno | `src/terrain/paint.rs` | `PaintGrid` (sidecar `<ahgt>.paint`), blend + eleição forçada nos chunks (`splat.rs bake_chunk`), repaint in-place (`runtime::repaint_chunks`), op `terrain_paint`/`splat_patch` |
-| Terreno (specs, sampler, mesh, LOD) | `src/terrain/` | `spec.rs` (contrato), `sampler.rs`/`heightmap.rs` (altura), `mesh.rs` (chunks), `plugin.rs` (LOD runtime + rebuild por edições), `runtime.rs` (bootstrap + carve + applier das edições vivas), `cliffs.rs` (cliffs procedurais + sharpen + CliffMask), `delta.rs` (**terreno vivo**: overlay de edições, Fase 3) |
+| Terreno (specs, heightmap, mesh, LOD) | `src/terrain/` | `spec.rs` (contrato), `heightmap.rs`/`brush.rs` (altura), `pads.rs` (pads resolvidos), `mesh.rs` (buffers/tint), `plugin.rs` (LOD runtime + rebuild por edições), `runtime.rs` (bootstrap + carve + applier das edições vivas), `cliffs.rs` (cliffs procedurais + sharpen + CliffMask), `delta.rs` (**terreno vivo**: overlay de edições, Fase 3) |
 | Preview de estado de UI (editor) | `src/ui/runtime.rs` | `UiPreviewState(StyleState)` sobrepõe a interação na cascata (`:hover`/`:active` sem ponteiro); entidades de UI carimbadas com `scene::SceneSource` |
 | Scripts Luau + API `viber.*` | `src/luau/` | módulos categorizados: `host` (VM/chunks), `ctx` (snapshot), `commands` (fila Lua→engine), `runtime` (sistemas), `api` + `input`/`events`/`timers`/`entity`/`game` (grupos da API), `sfx`; referência completa em **`docs/LUA_API.md`**; hooks `on_update(dt)`/`on_player_attack`; "LOD de IA" via `ScriptActivation`. **Luau JIT** (feature `luau-jit`, default ON desde 2026-10-18): chunks novos compilam para código nativo (codegen do Luau, mlua 0.12) — `VIBER_LUAU_JIT=0` volta ao interpretador; o orçamento de 500 ms interrompe TAMBÉM código JIT (testado ao vivo + `test_infinite_loop_is_interrupted_by_the_cpu_budget`) |
 | Hot-reload de scripts | `src/hot_reload.rs` | watcher (`notify`) sobre `<mundo>/scripts/` — recarga ao gravar com re-corrida do top-level; erro de compilação mantém o chunk antigo; `VIBER_HOT_RELOAD=0` desliga |
@@ -348,12 +350,10 @@ monorepo saiu com a separação):
 
 ```bash
 ./install.sh                  # cargo build --release + ~/.local/bin/viber
-./install.sh editor           # idem para o ViberEditor (crate `editor/`)
 ./install.sh --debug          # perfil dev, mais rápido de compilar
 viber create <nome>           # scaffold <nome>/{world.xml,config.yaml} (falha se a pasta existe)
 viber analyze [world.xml]     # valida headless; sem caminho procura world.xml / worlds/*.xml
 viber run [world.xml]         # janela Bevy em RELEASE; `--debug` e `--no-cargo` disponíveis
-viber editor [world.xml]      # GUI; procura `editor/` deste checkout (ou `vibereditor` no PATH)
 viber prune [--debug]         # housekeeping manual do target/ (o mesmo do `run`)
 viber --version | help
 ```
@@ -1191,8 +1191,7 @@ em zona bloqueada). Todo o mutate passa pelo brush engine (`brush.rs`): modos
 blend/lower/raise, journal por owner (`pad:0`, `road:3`…) com revert para
 re-carve idempotente e `min_effective` (larguras < 1.5 texéis são promovidas —
 senão o carve no-op). Nota: o `BrushGrid` de produção é deliberadamente
-**unguarded** (o clamp lower-only ao anel de stencil fabricava falésias);
-a implementação com guard (`HeightSampler::apply_pads`) existe só para testes.
+**unguarded** (o clamp lower-only ao anel de stencil fabricava falésias).
 
 Runtime: `TerrainFeaturesPlugin` (bootstrap one-shot: heightmap → carve
 pads→água→estradas → mods voxel → COLUNAS voxel dentro do raio de render →

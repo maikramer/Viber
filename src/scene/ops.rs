@@ -1,5 +1,5 @@
 //! Operações de edição sobre o [`SceneDoc`] — o vocabulário único partilhado por agentes
-//! (`viber scene apply ops.json`), pelo bridge (`viber.scene.apply`) e pelo ViberEditor.
+//! (`viber scene apply ops.json`), pelo bridge (`viber.scene.apply`) e pelo editor externo.
 //!
 //! Cada operação aplicada devolve a sua **inversa** (o undo) e as [`Change`]s que provocou (o
 //! que o sync ao vivo precisa de refletir no ECS). Um lote ([`apply_batch`]) é atómico: se uma

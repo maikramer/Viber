@@ -1,6 +1,6 @@
 //! Câmara livre de editor (`--camera free`): uma única câmara orbital em
 //! torno de um alvo, conduzida pelo bridge (`viber.camera.orbit/pan/zoom/
-//! look_at/pose`) — a navegação de mundos do ViberEditor (preview ~400 px
+//! look_at/pose`) — a navegação de mundos do editor externo (preview ~400 px
 //! com minimapa). Sem a flag o plugin não regista NADA e a App fica igual à
 //! de sempre (ver [`EditorCameraPlugin`]).
 //!
@@ -40,7 +40,7 @@ pub const DEFAULT_DISTANCE: f32 = 120.0;
 /// Pitch de arranque (graus) — o clássico isométrico suave dos editores.
 pub const DEFAULT_PITCH_DEG: f32 = 35.0;
 /// Metros de pan por pixel de drag, a distância 1 (escala com a distância ao
-/// alvo). Calibrado para o preview ~400 px do ViberEditor: um drag de ecrã
+/// alvo). Calibrado para o preview ~400 px do editor externo: um drag de ecrã
 /// inteiro a 120 m move ~96 m (≈ 2/3 da largura visível a FOV 64°) — rápido
 /// o suficiente para atravessar um mapa, lento o suficiente para mirar um
 /// prop.
@@ -92,7 +92,7 @@ impl EditorCamState {
 #[reflect(Component)]
 pub struct EditorCamera;
 
-/// Câmaras que o modo editor NÃO desativa — as do próprio ViberEditor
+/// Câmaras que o modo editor NÃO desativa — as do próprio editor externo
 /// in-process (UI do editor, preview do jogo); todas as outras são de jogo.
 #[derive(Debug, Default, Clone, Copy, Component, Reflect)]
 #[reflect(Component)]

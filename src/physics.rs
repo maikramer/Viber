@@ -525,6 +525,22 @@ pub fn body_bundle(
     Some((body, GravityScale(gravity)))
 }
 
+/// Troca o collider de uma estação de árvore pelo do toco: o tronco deitado
+/// (bevy_flora) não colide, mas o toco continua sólido e curto — sem isto o
+/// cilindro autorado de 2,2 m de meia-altura ficava como parede invisível
+/// depois do corte.
+pub fn replace_with_stump_collider(
+    commands: &mut Commands,
+    entity: Entity,
+    radius: f32,
+    half_height: f32,
+) {
+    commands.entity(entity).try_insert(Collider::cylinder(
+        half_height.max(1e-3),
+        radius.max(1e-3),
+    ));
+}
+
 /// Builds the collider for a shape that needs no asset (explicit box,
 /// sphere, cylinder, capsule). Deferred shapes return `None` and are handled
 /// by the resolver.

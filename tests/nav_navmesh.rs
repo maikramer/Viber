@@ -155,7 +155,7 @@ fn roads_become_convex_area_volumes_clipped_to_the_tile() {
 fn a_paved_pad_is_priced_as_a_road() {
     let mut terrain = world_with_a_road();
     terrain.roads.clear();
-    terrain.pads = vec![viber::terrain::sampler::ResolvedPad {
+    terrain.pads = vec![viber::terrain::pads::ResolvedPad {
         at: Vec2::ZERO,
         size: Vec2::splat(20.0),
         falloff: 4.0,
