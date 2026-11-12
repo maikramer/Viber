@@ -387,6 +387,21 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
             shaders_dir.display()
         );
     }
+    // O loader de glTF é recursivo por nó e os personagens novos (text3d)
+    // têm hierarquias fundas: o stack default do IO Task Pool (2 MiB)
+    // estourava com o pool atual do Vael. Inicializa o pool ANTES do
+    // `TaskPoolPlugin` do `DefaultPlugins` (que respeita o global já criado)
+    // com 32 MiB e o mesmo escalonamento de threads do default.
+    let io_threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 4).clamp(1, 4))
+        .unwrap_or(1);
+    bevy::tasks::IoTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new()
+            .num_threads(io_threads)
+            .thread_name("IO Task Pool".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .build()
+    });
     let mut app = App::new();
     // Cinemáticas do mundo (`<Cinematic>`): biblioteca antes do plugin (o
     // `init_resource` dele não a substitui).
