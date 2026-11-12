@@ -87,17 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # O root é `publish = false`; os pacotes `bevy_*` são os publicáveis.
-      # `--list` garante que o root não arrasta mundos/QA/exemplos; os
-      # dry-runs validam metadata, licença e o conteúdo dos pacotes.
+      # O root é `publish = false`; os pacotes publicáveis vivem no monorepo
+      # `../bevy_extensions` (CI próprio). Aqui valida-se só o root.
       - name: list package files (viber)
         run: cargo package --list -p viber --allow-dirty
-      - name: publish dry-run (bevy_engine_core)
-        run: cargo publish --dry-run -p bevy_engine_core
-      - name: publish dry-run (bevy_world_xml)
-        run: cargo publish --dry-run -p bevy_world_xml
-      # `bevy_save_slots` depende do `bevy_world_xml`; o dry-run só resolve
-      # depois de world_xml 0.1.0 estar no crates.io. Até lá, valida o
-      # conteúdo do pacote (o `cargo package` local usa o path).
-      - name: package list (bevy_save_slots)
-        run: cargo package --list -p bevy_save_slots

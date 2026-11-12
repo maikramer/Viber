@@ -921,8 +921,8 @@ mod tests {
             if let Some(data) = build_box_mesh(&spec, &grid, &field, b, !spec.layers.is_empty()) {
                 meshed += 1;
                 for (i, pos) in data.positions.iter().enumerate() {
-                    // Os vértices de selo pendem seal_depth abaixo da
-                    // superfície — só a pele para cima tem de acertar o nível.
+                    // As células de transição do transvoxel podem descer
+                    // abaixo da superfície — só a pele para cima acerta o nível.
                     if data.normals[i][1] < 0.5 {
                         continue;
                     }

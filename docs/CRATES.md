@@ -37,16 +37,19 @@ A Fase 1 começou a extrair o monólito (plano em
 
 | Pacote | O que saiu do root |
 |---|---|
-| `bevy_engine_core` 0.1.0 | `rng`, `script_kind`, `PlayerBody`, `MenusOpen`, `ScriptToast`, `AudioMixerSettings`, `UiSet`, `TerrainQuery`/`NavQuery` |
-| `bevy_world_xml` 0.1.0 | `XmlNode`/`XmlDocument`, parser tolerante, `values`, `include`, `emit`, `project`/`root_of`, `vinst`, `PlacedInstance`, `DeltaPatch` |
-| `bevy_save_slots` 0.1.0 | `SaveGame`, paths/slots, `capture`, `save_to_disk`/`load_from_disk`; o `SavePlugin` e a aplicação ao runtime ficam no root |
+| `bevy_ext_core` 0.1.0 | `rng`, `script_kind`, `PlayerBody`, `MenusOpen`, `ScriptToast`, `AudioMixerSettings`, `UiSet`, `TerrainQuery`/`NavQuery` |
+| `bevy_ext_world` 0.1.0 | `XmlNode`/`XmlDocument`, parser tolerante, `values`, `include`, `emit`, `project`/`root_of`, `vinst`, `PlacedInstance`, `DeltaPatch`, BSN |
+| `bevy_ext_gltf` 0.1.0 | decoder GLB (meshopt, `KHR_mesh_quantization`, `KHR_texture_basisu`, UASTC RRR), `glb_bounds` e `textures` |
+| `bevy_voxel_terrain` 0.1.0 | `VoxelField`, mods CSG, caves/arcos/pontes, `ModIndex`, Transvoxel, `HeightField` |
+| `bevy_ext_terrain` 0.1.0 | contrato de cena do voxel e adapter `.ahgt` |
+| `bevy_ext_save` 0.1.0 | `SaveGame`, paths/slots, `capture`, `save_to_disk`/`load_from_disk`; o `SavePlugin` e a aplicação ao runtime ficam no root |
 
-O root `viber` re-exporta os tipos e mantém as paths antigas; os três
-crates são os publicáveis (`cargo publish --dry-run` como gate).
-`bevy_audio_buses` fica para a onda seguinte: `music`/`ambient` dependem de
-`player`/`worldsys`/`particles`/`editor_camera`/`luau::sfx`; mover os
-ficheiros arrastaria o runtime. O próximo passo é inverter essas
-dependências, não mover o código como está.
+Os pacotes vivem no monorepo irmão `../bevy_extensions`, com CI e publicação
+próprios; o root `viber` consome-os por path com os aliases históricos e
+re-exporta as paths antigas. `bevy_audio_buses` fica para a onda seguinte:
+`music`/`ambient` dependem de `player`/`worldsys`/`particles`/`editor_camera`/
+`luau::sfx`; mover os ficheiros arrastaria o runtime. O próximo passo é
+inverter essas dependências, não mover o código como está.
 
 ## Adotados nesta ronda
 

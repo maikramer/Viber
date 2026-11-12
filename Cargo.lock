@@ -919,10 +919,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_engine_core"
+name = "bevy_ext_core"
 version = "0.1.0"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "bevy_ext_gltf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "meshopt",
+ "serde_json",
+]
+
+[[package]]
+name = "bevy_ext_save"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_ext_world",
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bevy_ext_world"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "flate2",
+ "jackdaw_bsn",
+ "roxmltree",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -1760,18 +1794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_save_slots"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_world_xml",
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "bevy_scene"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2157,6 +2179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_voxel_terrain"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "transvoxel",
+]
+
+[[package]]
 name = "bevy_window"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2228,20 +2258,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "uuid",
-]
-
-[[package]]
-name = "bevy_world_xml"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bevy",
- "flate2",
- "jackdaw_bsn",
- "roxmltree",
- "serde",
- "serde_yaml",
- "tempfile",
 ]
 
 [[package]]
@@ -7592,14 +7608,16 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "bevy",
- "bevy_engine_core",
+ "bevy_ext_core",
+ "bevy_ext_gltf",
+ "bevy_ext_save",
+ "bevy_ext_world",
  "bevy_gradmesh",
  "bevy_kira_audio",
  "bevy_landmass",
  "bevy_rapier3d",
  "bevy_rerecast",
- "bevy_save_slots",
- "bevy_world_xml",
+ "bevy_voxel_terrain",
  "celer-decision",
  "celer-nlu",
  "clap",

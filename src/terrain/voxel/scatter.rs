@@ -40,9 +40,9 @@ use bevy::math::Vec2;
 
 use super::super::cliffs::{CliffMask, hash01};
 use super::super::mesh::HeightField;
+use super::super::pads::ResolvedPad;
 use super::super::paths::resample;
 use super::super::roads::RoadPath;
-use super::super::sampler::ResolvedPad;
 use super::super::water::WaterBody;
 use super::arch::{ArchProfile, ArchSpec};
 use super::bridge::{BridgeSpec, BridgeStyle};

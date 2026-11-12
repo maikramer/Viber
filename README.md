@@ -11,21 +11,27 @@ debug bridge.
 > autoria do jogo vive agora em [`../Vael/editor`](../Vael/editor) (Jackdaw);
 > o Viber deixou de trazer um editor próprio.
 
-## Pacotes extraídos (Fase 1)
+## Pacotes extraídos
 
-- [`crates/bevy_engine_core`](crates/bevy_engine_core) — contratos:
-  `PlayerBody`, `MenusOpen`, `ScriptToast`, `AudioMixerSettings`, `UiSet`,
-  `TerrainQuery`/`NavQuery`, `rng`, `script_kind`.
-- [`crates/bevy_world_xml`](crates/bevy_world_xml) — `XmlNode`/parser,
-  `values`, `include`, `emit`, `project`/`root_of`, `vinst`,
-  `PlacedInstance` e `DeltaPatch`.
-- [`crates/bevy_save_slots`](crates/bevy_save_slots) — `SaveGame`,
-  paths/slots, `capture`, IO atómico e migração legacy; o `SavePlugin` e a
-  aplicação ao runtime ficam no root.
+Vivem no monorepo irmão [`../bevy_extensions`](../bevy_extensions), com CI e
+publicação próprios:
 
-O root re-exporta as paths antigas (`viber::xml`, `viber::project`,
-`viber::save`, `viber::vinst`, `viber::rng`, …). `bevy_audio_buses` entra
-depois de inverter `music`/`ambient` para o runtime.
+- `bevy_ext_core` — contratos (`PlayerBody`, `MenusOpen`, `ScriptToast`,
+  `AudioMixerSettings`, `UiSet`, `rng`, `script_kind`).
+- `bevy_ext_world` — XML/BSN/vinst, parser, `include`/`emit`,
+  `project`/`root_of`, `DeltaPatch`.
+- `bevy_ext_gltf` — decoder GLB (meshopt, `KHR_mesh_quantization`,
+  `KHR_texture_basisu`, UASTC RRR), bounds e texturas tiled.
+- `bevy_voxel_terrain` — núcleo voxel/SDF (mods CSG, caves, arcos, pontes,
+  Transvoxel) e o trait `HeightField`.
+- `bevy_ext_terrain` — contrato de cena do voxel e adapter `.ahgt`.
+- `bevy_ext_save` — `SaveGame`, slots, IO atómico e migração legacy; o
+  `SavePlugin` e a aplicação ao runtime ficam no root.
+
+O root `viber` consome-os por path com os aliases históricos
+(`bevy_engine_core`/`bevy_world_xml`/`bevy_save_slots`) e re-exporta as
+paths antigas (`viber::xml`, `viber::save`, …). A publicação e o CI dos
+pacotes vivem no monorepo; aqui fica só o `cargo package --list` do root.
 
 ## Correr
 

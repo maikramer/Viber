@@ -15,9 +15,9 @@ publish = false
 exclude = ["worlds/**", "gauntlet/**", "examples/**", "target/**"]
 
 [workspace]
-# A raiz (este crate) já é membro. `members = ["."]` faria o `exclude`
-# abaixo falhar: o cargo trata "." como membro explícito de toda a árvore.
-members = ["crates/bevy_engine_core", "crates/bevy_world_xml", "crates/bevy_save_slots"]
+# A raiz (este crate) já é membro. Os pacotes `bevy_ext_*` vivem no monorepo
+# irmão `../bevy_extensions`; não são membros deste workspace.
+members = []
 # Path-deps dentro do checkout entram no workspace. Os testes e exemplos
 # destes forks não compilam com `--workspace --all-targets`.
 exclude = [
@@ -35,11 +35,15 @@ authors = ["Maikeu Locatelli"]
 
 [dependencies]
 anyhow = "1.0"
-# Pacotes extraídos na Fase 1: o root `viber` re-exporta-os e mantém a fachada
-# transitória. Os crates publicáveis são estes, não o monólito.
-bevy_engine_core = { version = "0.1.0", path = "crates/bevy_engine_core" }
-bevy_world_xml = { version = "0.1.0", path = "crates/bevy_world_xml" }
-bevy_save_slots = { version = "0.1.0", path = "crates/bevy_save_slots" }
+# Pacotes extraídos para o monorepo irmão `../bevy_extensions`. Os aliases
+# mantêm os nomes históricos (`bevy_engine_core`, `bevy_world_xml`,
+# `bevy_save_slots`) nos imports do root durante a transição.
+bevy_engine_core = { package = "bevy_ext_core", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_core" }
+bevy_world_xml = { package = "bevy_ext_world", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_world" }
+bevy_save_slots = { package = "bevy_ext_save", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_save" }
+# Decoder GLB (meshopt/quantização/basisu) e núcleo voxel/transvoxel.
+bevy_ext_gltf = { version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_gltf" }
+bevy_voxel_terrain = { version = "0.1.0", path = "../bevy_extensions/crates/bevy_voxel_terrain" }
 base64 = "0.23"
 # `basis-universal` transcodes the KTX2/UASTC textures the asset pipeline
 # bakes into its GLBs (`KHR_texture_basisu`); without it those textures are

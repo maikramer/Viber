@@ -333,6 +333,30 @@ pub struct TerrainTint {
     pub height_blend_strength: f32,
 }
 
+impl From<&TerrainTint> for bevy_voxel_terrain::TintParams {
+    fn from(t: &TerrainTint) -> Self {
+        // Linear, not sRGB. `Mesh::ATTRIBUTE_COLOR` is consumed by the PBR
+        // shader as linear RGBA, so handing it sRGB components renders every
+        // band far too bright (sRGB 0.29 read as linear is ~4x the intended
+        // 0.068) — which is why the tint used to wash out to near-white.
+        let conv = |c: Color| {
+            let l = c.to_linear();
+            [l.red, l.green, l.blue, l.alpha]
+        };
+        Self {
+            base_color: conv(t.base_color),
+            color_low: conv(t.color_low),
+            color_mid: conv(t.color_mid),
+            color_high: conv(t.color_high),
+            color_rock: conv(t.color_rock),
+            snow_height: t.snow_height,
+            slope_threshold: t.slope_threshold,
+            slope_softness: t.slope_softness,
+            height_blend_strength: t.height_blend_strength,
+        }
+    }
+}
+
 impl Default for TerrainTint {
     fn default() -> Self {
         Self {
