@@ -6,8 +6,26 @@
 //! - [`ScriptInteraction`]: alvo de interação registado por script
 //!   (`viber.set_interaction`), arbitrado pelo `interact::InteractionFocus`.
 //! - [`ScriptToast`]: mensagem de toast pedida por `viber.toast`.
+//! - [`ScriptSay`]: linha falada por `viber.say`, para o jogo a apresentar.
 
 use bevy::prelude::*;
+
+pub use bevy_engine_core::ScriptToast;
+
+/// Uma linha falada por um script (`viber.say`), já resolvida do locale e com
+/// a duração final. A engine desenha o balão nativo do HUD por omissão; com
+/// [`crate::dialogue::ExternalSayPresenter`] presente, o jogo ouve esta
+/// mensagem e apresenta a fala onde quiser (balão no mundo, caixa, legenda).
+#[derive(Message, Debug, Clone)]
+pub struct ScriptSay {
+    /// Entidade que correu o script (quem falou), quando conhecida. Numa
+    /// callback chamada de outro script pode ser a entidade do HUD: o jogo
+    /// resolve o orador visual e cai para um toast quando não há nenhum.
+    pub speaker: Option<Entity>,
+    pub text: String,
+    /// Duração final em segundos (nunca 0; o default do HUD já resolvido).
+    pub seconds: f32,
+}
 
 /// A component marking an entity as owned by a Luau script (`scripts/<path>`
 /// relative to the world directory).
@@ -69,10 +87,6 @@ pub fn link_components(
     let connections = (!parsed.is_empty()).then(|| SignalConnections(std::sync::Arc::new(parsed)));
     (groups, connections)
 }
-/// Evento disparado quando um script pede `viber.toast(msg)` — o HUD pode
-/// consumir; enquanto isso cada toast também vai para o log (bridge).
-#[derive(Debug, Clone, bevy::ecs::message::Message)]
-pub struct ScriptToast(pub String);
 /// Raio de ativação do script ("LOD de IA"): além deste raio do player o
 /// `on_update` NEM RODA — inimigo congelado (lógica + animação paradas).
 /// Autoria via `activation-radius` no spawner; default 45 m.

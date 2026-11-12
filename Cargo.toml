@@ -1,31 +1,45 @@
 [package]
 name = "viber"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.97.1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Viber — native Bevy engine for AiGameKit declarative world XML"
-license = "MIT"
-repository = "https://github.com/maikramer/Viber"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 keywords = ["gamedev", "bevy", "engine", "xml"]
 categories = ["game-development"]
+# O monólito fica como app/fachada transitória; os pacotes `bevy_*` são os
+# publicáveis (Vael/docs/PACKAGES.md).
+publish = false
+exclude = ["worlds/**", "gauntlet/**", "examples/**", "target/**"]
 
 [workspace]
 # A raiz (este crate) já é membro. `members = ["."]` faria o `exclude`
 # abaixo falhar: o cargo trata "." como membro explícito de toda a árvore.
-members = ["editor"]
+members = ["crates/bevy_engine_core", "crates/bevy_world_xml", "crates/bevy_save_slots"]
 # Path-deps dentro do checkout entram no workspace. Os testes e exemplos
 # destes forks não compilam com `--workspace --all-targets`.
 exclude = [
-    "vendor/bevy_landmass",
-    "vendor/bevy_rerecast",
-    "vendor/bevy_rerecast_core",
-    "vendor/landmass_rerecast",
     "vendor/rerecast",
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/maikramer/Viber"
+authors = ["Maikeu Locatelli"]
+
 [dependencies]
 anyhow = "1.0"
+# Pacotes extraídos na Fase 1: o root `viber` re-exporta-os e mantém a fachada
+# transitória. Os crates publicáveis são estes, não o monólito.
+bevy_engine_core = { version = "0.1.0", path = "crates/bevy_engine_core" }
+bevy_world_xml = { version = "0.1.0", path = "crates/bevy_world_xml" }
+bevy_save_slots = { version = "0.1.0", path = "crates/bevy_save_slots" }
 base64 = "0.23"
 # `basis-universal` transcodes the KTX2/UASTC textures the asset pipeline
 # bakes into its GLBs (`KHR_texture_basisu`); without it those textures are
@@ -42,6 +56,9 @@ bevy = { version = "0.20.1", features = [
     # Estudo: docs/VISUAL_ROADMAP.md P0.1.
     "dfg_lut",
     "bluenoise_texture",
+    # LTC das RectLight (Bevy 0.19+): luzes de área retangulares para
+    # interiores (forge/janelas). Sem esta feature o componente não compila.
+    "area_light_luts",
     # PCSS (soft shadows físicos): soft_shadow_size nas luzes — ver spawn.rs.
     # Experimental no 0.19, exigido explícito pelo bevy_pbr.
     "experimental_pbr_pcss",
@@ -55,8 +72,8 @@ clap = { version = "4.6", features = ["derive"] }
 # NLU (GLiNER2) e d1-omni (decisão): runtimes próprios no checkout irmão
 # CelerAI (models/ + estudos lá). O ORT traz um binário pré-construído
 # (download-binaries); sem as features a engine compila como antes.
-celer-nlu = { path = "../CelerAI/crates/nlu", optional = true }
-celer-decision = { path = "../CelerAI/crates/decision", optional = true }
+celer-nlu = { version = "0.3.0", path = "../CelerAI/crates/nlu", optional = true }
+celer-decision = { version = "0.1.0", path = "../CelerAI/crates/decision", optional = true }
 
 image = { version = "0.25", default-features = false, features = ["png"] }
 roxmltree = "0.21"
@@ -78,6 +95,12 @@ bevy_rapier3d = { version = "0.37", default-features = false, features = [
     "async-collider",
     "debug-render-3d",
 ] }
+# Primitivas/composições procedurais (`<Box>`/`<Cylinder>`/`<Sphere>`/…):
+# meshes watertight com nível de detalhe e material PBR de gradiente. O crate
+# fixa `bevy ^0.20`, a mesma versão da engine, por isso as features unificam.
+# Pin EXACTO: foram 25 releases em 13 dias (0.3.x) — a API ainda muda de
+# semana para semana; subir é uma decisão explícita (docs/CRATES.md).
+bevy_gradmesh = "=0.3.7"
 
 # Luau scripting runtime (`src/luau.rs`). `luau` = sandboxed Luau VM;
 # `vendored` builds the VM from source (needs a C++ toolchain);
@@ -100,9 +123,9 @@ dirs = "7"
 half = "2"
 notify = "8"
 # Navegação (docs/CRATES.md): Recast portado para Rust + pathfinding com
-# evitamento local. Os três são ports de Bevy 0.20 (vendor/, ver
-# vendor/FORKS_020.md) e do mesmo autor/família, por isso não há risco de
-# duas versões do ECS na árvore.
+# evitamento local. Os três saíram no crates.io com Bevy 0.20 em 2026-10-26/27
+# (bevy_rerecast 0.6, bevy_landmass 0.13, landmass_rerecast 0.4) e já não são
+# vendorizados; o `rerecast` core é a única exceção (patch abaixo).
 #   bevy_rerecast     — gera a navmesh a partir da geometria real (o backend
 #                       de geometria é NOSSO: src/nav/backend.rs).
 #   bevy_landmass     — A* sobre a navmesh + evitamento RVO entre agentes +
@@ -111,9 +134,9 @@ notify = "8"
 #   landmass_rerecast — a ponte entre os dois.
 # Sem o editor nem o debug plugin: o `bevy_rerecast` default arrasta uma UI
 # de editor que esta engine não usa.
-bevy_rerecast = { path = "vendor/bevy_rerecast", default-features = false, features = ["bevy_mesh"] }
-bevy_landmass = { path = "vendor/bevy_landmass" }
-landmass_rerecast = { path = "vendor/landmass_rerecast" }
+bevy_rerecast = { version = "0.6", default-features = false, features = ["bevy_mesh"] }
+bevy_landmass = "0.13"
+landmass_rerecast = "0.4"
 bevy_kira_audio = { version = "0.27.1", features = ["ogg", "spatial"] }
 
 [dev-dependencies]
@@ -138,7 +161,10 @@ tempfile = "3"
 # luau-jit: codegen do Luau (mlua 0.12) — chunks compilam para código nativo.
 # O orçamento de script (interrupt em host.rs) é a rede de segurança;
 # `VIBER_LUAU_JIT=0` volta ao interpretador no MESMO binário (A/B).
-default = ["experimental_pbr_pcss", "luau-jit", "nlu", "decision"]
+# `ai` é opt-in: o default da engine não exige o checkout irmão CelerAI.
+# Quem usa `viber.nlu`/`viber.decision` liga `--features ai` (o Vael liga).
+default = ["experimental_pbr_pcss", "luau-jit"]
+ai = ["nlu", "decision"]
 experimental_pbr_pcss = ["bevy/experimental_pbr_pcss"]
 luau-jit = ["mlua/luau-jit"]
 nlu = ["dep:celer-nlu"]
@@ -180,11 +206,12 @@ lto = "thin"
 codegen-units = 16
 
 # ---------------------------------------------------------------- patches
-# `rerecast` 0.4 com dois fixes de robustez (vendor/rerecast/VIBER_PATCH.md):
-# uma triangulação de contorno falhada deixava de abortar a navmesh INTEIRA
-# (o spawn do simple-rpg nunca teve navmesh — todas as criaturas em linha
-# recta) e o comprimento das diagonais deixou de dar a volta em `u16`.
+# `rerecast` 0.5 (crates.io, 2026-10-26) ainda não traz os dois fixes de
+# robustez (vendor/rerecast/VIBER_PATCH.md): uma triangulação de contorno
+# falhada aborta a navmesh INTEIRA (o spawn do simple-rpg nunca teve navmesh —
+# todas as criaturas em linha recta) e o comprimento das diagonais dá a volta
+# em `u16` (com tiles de 256 m, qualquer diagonal acima de 255 células). O
+# vendor é o 0.5.0 + só estes dois fixes; remover quando o upstream aceitar o
+# equivalente.
 [patch.crates-io]
-# Bevy 0.20.0 oficial (crates.io, 2026-10-08) — os forks de vendor/ e o
-# bevy_kira_audio 0.27-rc.1 resolvem agora ao registry; sem patches git.
 rerecast = { path = "vendor/rerecast" }

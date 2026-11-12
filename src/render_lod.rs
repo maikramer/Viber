@@ -23,6 +23,7 @@ use crate::profiler::{Group, timed};
 use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::Gltf;
 use bevy::light::NotShadowCaster;
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 
 /// Raio de corte (metros) de uma raiz de cena — a especificação autoral.

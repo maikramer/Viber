@@ -5,17 +5,99 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   viber:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev pkg-config \
+            libx11-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            cmake g++
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      # O default já não inclui `ai`: a engine compila sem o checkout irmão
+      # CelerAI. Este é o gate do build mínimo.
+      - name: engine without default features
+        run: cargo check -p viber --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev pkg-config \
+            libx11-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            cmake g++
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: check on the declared MSRV
+        run: cargo check --workspace
+
+  ai:
+    runs-on: ubuntu-latest
+    steps:
+      # Os dois checkouts têm de ser irmãos: o Viber resolve o CelerAI por
+      # `../CelerAI/crates/*`.
+      - uses: actions/checkout@v4
+        with:
+          path: Viber
+      - uses: actions/checkout@v4
+        with:
+          repository: Celer-Brasil/CelerAI
+          path: CelerAI
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev pkg-config \
+            libx11-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            cmake g++
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Viber
+      - name: engine with AI
+        run: cargo check -p viber --features ai
+        working-directory: Viber
+
+  package-list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # O root é `publish = false`; os pacotes `bevy_*` são os publicáveis.
+      # `--list` garante que o root não arrasta mundos/QA/exemplos; os
+      # dry-runs validam metadata, licença e o conteúdo dos pacotes.
+      - name: list package files (viber)
+        run: cargo package --list -p viber --allow-dirty
+      - name: publish dry-run (bevy_engine_core)
+        run: cargo publish --dry-run -p bevy_engine_core
+      - name: publish dry-run (bevy_world_xml)
+        run: cargo publish --dry-run -p bevy_world_xml
+      # `bevy_save_slots` depende do `bevy_world_xml`; o dry-run só resolve
+      # depois de world_xml 0.1.0 estar no crates.io. Até lá, valida o
+      # conteúdo do pacote (o `cargo package` local usa o path).
+      - name: package list (bevy_save_slots)
+        run: cargo package --list -p bevy_save_slots

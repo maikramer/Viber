@@ -27,8 +27,10 @@ use bevy::ecs::reflect::ReflectResource;
 use bevy::prelude::{Reflect, Resource};
 use serde::Deserialize;
 
-/// Nome do ficheiro, ao lado do `world.xml`.
-pub const CONFIG_FILE: &str = "config.yaml";
+/// Nome do ficheiro, ao lado do `world.xml`. A definição vive no
+/// `bevy_world_xml` (o `project` precisa dela sem depender do config);
+/// re-exportada aqui para as paths antigas.
+pub use bevy_world_xml::project::CONFIG_FILE;
 
 #[derive(Debug, Clone, Resource, Deserialize, Reflect)]
 #[reflect(Resource)]

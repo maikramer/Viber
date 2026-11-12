@@ -7,6 +7,47 @@ dependências publicadas, (2) substituir uma roda própria SEM mudar
 comportamento visível (contrato "mesma seed, mesmo mundo"), (3) risco de
 driver NV (materiais/shaders custom) avaliado, (4) manutenção ativa do crate.
 
+> O plano de dividir a engine em pacotes `bevy_*` publicáveis (fases, DAG,
+> ordem de publicação e gates) está em
+> [`../../Vael/docs/PACKAGES.md`](../../Vael/docs/PACKAGES.md). Este
+> documento continua a ser o registo de adoção de dependências da engine.
+
+## 2026-11-11 — des-vendorização da navegação
+
+Os três crates de navegação saíram no crates.io com Bevy 0.20 em
+2026-10-26/27 e já não são vendorizados:
+
+| Crate | Versão | Antes |
+|---|---|---|
+| `bevy_rerecast` | 0.6 (registry, `default-features = false`, `bevy_mesh`) | fork 0.5 em `vendor/` |
+| `bevy_landmass` | 0.13 (registry) | fork 0.13 em `vendor/` |
+| `landmass_rerecast` | 0.4 (registry) | fork 0.3 em `vendor/` |
+
+O `rerecast` 0.5 continua a ser o **único** `[patch.crates-io]`: o registry
+ainda não tem os dois fixes de robustez de `vendor/rerecast/VIBER_PATCH.md`
+(triangulação falhada não aborta a navmesh inteira; diagonais em `u32` em vez
+de `u16`). Remover o vendor e o patch quando os fixes entrarem upstream. A
+adaptação de API vive em `src/nav/backend.rs`; o gate é a navmesh do `main`
+e `cargo tree -d` sem duplicar Bevy/glam.
+
+## 2026-11-12 — primeiros pacotes `bevy_*`
+
+A Fase 1 começou a extrair o monólito (plano em
+[`../../Vael/docs/PACKAGES.md`](../../Vael/docs/PACKAGES.md)):
+
+| Pacote | O que saiu do root |
+|---|---|
+| `bevy_engine_core` 0.1.0 | `rng`, `script_kind`, `PlayerBody`, `MenusOpen`, `ScriptToast`, `AudioMixerSettings`, `UiSet`, `TerrainQuery`/`NavQuery` |
+| `bevy_world_xml` 0.1.0 | `XmlNode`/`XmlDocument`, parser tolerante, `values`, `include`, `emit`, `project`/`root_of`, `vinst`, `PlacedInstance`, `DeltaPatch` |
+| `bevy_save_slots` 0.1.0 | `SaveGame`, paths/slots, `capture`, `save_to_disk`/`load_from_disk`; o `SavePlugin` e a aplicação ao runtime ficam no root |
+
+O root `viber` re-exporta os tipos e mantém as paths antigas; os três
+crates são os publicáveis (`cargo publish --dry-run` como gate).
+`bevy_audio_buses` fica para a onda seguinte: `music`/`ambient` dependem de
+`player`/`worldsys`/`particles`/`editor_camera`/`luau::sfx`; mover os
+ficheiros arrastaria o runtime. O próximo passo é inverter essas
+dependências, não mover o código como está.
+
 ## Adotados nesta ronda
 
 | Crate | Versão | Substitui | Notas |
@@ -17,11 +58,28 @@ driver NV (materiais/shaders custom) avaliado, (4) manutenção ativa do crate.
 | `notify` | 8.2 | — (feature nova) | Hot-reload de scripts Luau: `src/hot_reload.rs`, watcher recursivo sobre `<mundo>/scripts/`, debounce 250 ms, erro de compilação mantém o chunk antigo. `VIBER_HOT_RELOAD=0` desliga. |
 | `bevy_kira_audio` | 0.27.1 (kira 0.12; era 0.26, depois rc.1) | `bevy_audio`/rodio como backend de playback | Buses tipados `MusicBus`/`SfxBus` (`crate::music`); `mixer_sync` empurra o `AudioMixerSettings` (save/menu/XML) para os canais — volumes respondem AO VIVO, mesmo em one-shots a meio. Crossfade `fade_step` preservado em linear (testes intactos); conversão `linear_to_db` só na fronteira. Jitter de pitch via `with_playback_rate`. Cachoeiras/água/chuva/BGM todos no bus SFX/Music. |
 | `serde_yaml` | 0.9 | parsing do `config.yaml` do jogo (`src/config.rs`) | Contrato de paths lido em runtime (roots/bgm/sfx/texturas/scripts/ui/save). Arquivada (dtolnay) mas congelada-estável e é o parser de referência; ~1 dep transitiva (`unsafe-libyaml`). Chaves desconhecidas avisam e não partem o parse. |
+| `bevy_gradmesh` | **=0.3.7** (pin exato) | `Mesh::from(Cuboid/Sphere/Cylinder/Capsule)` + `StandardMaterial` nas primitivas de `<Composition>` | Meshes watertight com `ShapeDetail` e `GradMeshMaterial` (ExtendedMaterial PBR). `recipes::spawn` converte `Box`/`Sphere`/`Cylinder`/`Capsule`; `Plane` fica no StandardMaterial (decals/soalhos texturados). Os colisores Rapier não mudam. **O material gradiente não amostra texturas**: albedo/normal são ignorados e `texture-tile-size` vira ruído (`gradmesh_style`); o fecho do spawn avisa os URLs ignorados. `VIBER_PRIMITIVES=standard` volta ao caminho antigo; `VIBER_PRIMITIVES_DETAIL=minimal|low|medium|high|extreme` escolhe o detalhe (default `high`, 24 segmentos). Pin exato porque o crate teve 25 releases em 13 dias (0.3.x) — subir é decisão explícita. |
 | `dlss_wgpu` | 6.0.0 (via `bevy/dlss`, feature `dlss` do Viber) | — (feature nova) | DLSS Super Resolution nativo do Bevy 0.20 (Linux/Vulkan). **NÃO-default**: o build com `--features dlss` exige o SDK da NVIDIA (`DLSS_SDK` → clone de github.com/NVIDIA/DLSS tag v310.9.1; `VULKAN_SDK` com headers + libclang para o bindgen) e em runtime a `libnvidia-ngx-dlss.so.310.9.1` junto ao binário (rpath `$ORIGIN` no `.cargo/config.toml`). Gate em `src/dlss.rs` (`VIBER_DLSS` > config.yaml `dlss:` > auto). Pin `prettyplease` 0.2.37 RETIRADO (2026-10-18): o lock resolve `bindgen 0.73.2` + `prettyplease 0.3` sem âncora. |
 
 O `bevy_audio`/rodio do Bevy fica compilado (tirar a feature do `bevy` exige
 re-listar ~20 features default — frágil); NENHUM som nasce por ele —
 `AudioPlayer`/`PlaybackSettings` deixaram de ser usados em runtime.
+
+### `bevy_gradmesh`: limites da v1
+
+O material gradiente calcula o progresso do gradiente relativo a
+`world_center` (uniforme do material, default a origem do mundo). Num objeto
+longe da origem — o caso do Vael, a ~40–140 m de cota — um `Style::shaded`
+ficaria todo no extremo claro/escuro. Por isso a v1 usa **cor única**
+(`opaque`/`transparent`) com os campos PBR preservados; o ruído/stripes do
+crate (que usam o espaço local da entidade) continuam disponíveis e são o que
+substitui o grão do albedo perdido. Para ligar gradientes por objeto seria
+preciso um `GradMeshMaterial` por entidade com `with_gradient_bounds` — fica
+como follow-up (custa o dedup de materiais e o batching).
+
+`GradMeshMaterial` translúcido continua a desenhar no passe de sombra (só o
+alpha-test corta), por isso as primitivas com `opacity < 1` levam
+`NotShadowCaster`, como manda o contrato do crate.
 
 ## Forks vendored para o Bevy 0.20 (2026-09-25; bevy oficial 2026-10-09)
 
@@ -166,10 +224,29 @@ Confirmados compatíveis com Bevy 0.19 (dependências publicadas verificadas a
 - **`bevy_sonus`** — áudio espacial COM oclusão/difração — encaixe perfeito
   para as caves voxel; crate novo, vigiar maturidade. O bus kira atual já
   dá o caminho (spatial é por-instância).
-- **`bevy_hanabi`** 0.19 — partículas GPU (fogo/chuva/magia em milhares).
-  ⚠ Histórico de crash do driver NV 595.84 com shaders custom
-  (`docs/PERFORMANCE.md`) — só com env-gate tipo `VIBER_CHUNK_LAYERS` e QA
-  pesada de render.
+- **`bevy_hanabi`** 0.20.0 — partículas GPU (fogo/chuva/magia em milhares).
+  Compatível com Bevy 0.20/wgpu 30; o protótipo do Vael vive em
+  `Vael/src/hanabi_fx.rs` (feature `hanabi`, `VAEL_HANABI=1`). Não substitui
+  o sistema CPU do Viber sem A/B; ⚠ histórico de crash do driver NV 595.84
+  com shaders custom (`docs/PERFORMANCE.md`).
+- **`bevy_mod_outline`** 0.14.0 — outline de seleção/interatuáveis;
+  compatível com `bevy ^0.20.1`. Watch-list: testar TAA/skinned antes de
+  adotar; a seleção do editor continua por AABB+Rapier.
+- **`bevy_sonus`** 0.1.0 — incompatível (Bevy 0.19, puxa rodio); rever se
+  houver versão 0.20/kira.
+
+## Ronda 2026-11-11 — Bevy 0.19/0.20 e o refino do Vael
+
+- **`area_light_luts`** (feature do `bevy`, não crate): adotada para
+  `RectLight` nos interiores do Vael. LUT embutida, sem textura/shaders
+  próprios; os testes de bindless do terreno continuam a ser o gate.
+- **`bevy_hanabi` 0.20.0**: protótipo feature-gated no Vael; não entra no
+  default nem substitui o sistema CPU.
+- **`bevy_mod_outline` 0.14.0**: watch-list, não adotado.
+- **`bevy_sonus` 0.1.0**: rejeitado (Bevy 0.19/rodio).
+- **`bevy_tnua` / `bevy_camera_controller` / `bevy_water` / `bevy_framepace`**:
+  rejeitados; o Viber já tem implementações mais específicas.
+- Detalhe e justificação: [`docs/BEVY_0.19_0.20.md`](BEVY_0.19_0.20.md).
 
 ## Rejeitados / não adotar sem reavaliar
 

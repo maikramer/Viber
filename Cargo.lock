@@ -919,6 +919,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_engine_core"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_extract"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1101,6 +1108,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_gradmesh"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd9503d85e4f09025d72a2f36c40a056f83faea65dd4769cfa803d30588f1849"
+dependencies = [
+ "bevy",
+ "bevy_asset",
+ "bevy_material",
+ "bytemuck",
+]
+
+[[package]]
 name = "bevy_image"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,6 +1274,8 @@ dependencies = [
 [[package]]
 name = "bevy_landmass"
 version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18dc3f2e762e1ac7333145e9fa7401ed918311d0987db395264dd6170b0a47c7"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -1700,7 +1721,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_rerecast"
-version = "0.5.0"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1937c5b8a885fced8da891ab557c7593da0f912218c2ee461b505d36622aec1a"
 dependencies = [
  "bevy_app",
  "bevy_rerecast_core",
@@ -1708,7 +1731,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_rerecast_core"
-version = "0.5.0"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70c3f3e9a533575b186ff2aea81b2a382c6a90c69651e5b29c660e9a0d595c9c"
 dependencies = [
  "anyhow",
  "bevy_app",
@@ -1732,6 +1757,18 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "bevy_save_slots"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_world_xml",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2191,6 +2228,20 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "bevy_world_xml"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "flate2",
+ "jackdaw_bsn",
+ "roxmltree",
+ "serde",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
@@ -4223,6 +4274,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jackdaw_bsn"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edefe90f16cdc66e5eea768bc2c5768dc84411d29b61b03906047b6279c55194"
+dependencies = [
+ "bevy",
+ "bevy_reflect",
+ "log",
+ "nom 8.0.0",
+ "path-slash",
+ "pathdiff",
+ "serde",
+ "smol_str",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4416,7 +4484,9 @@ dependencies = [
 
 [[package]]
 name = "landmass_rerecast"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe517c3e12e0b4b97083d037ae951c5cf4dcc8626b864daeb268d55422aa4f54"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -5824,6 +5894,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "path-slash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e91099d4268b0e11973f036e885d652fb0b21fedcf69738c627f94db6a44f42"
+
+[[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6305,7 +6387,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rerecast"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bevy_reflect",
@@ -7510,10 +7592,14 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "bevy",
+ "bevy_engine_core",
+ "bevy_gradmesh",
  "bevy_kira_audio",
  "bevy_landmass",
  "bevy_rapier3d",
  "bevy_rerecast",
+ "bevy_save_slots",
+ "bevy_world_xml",
  "celer-decision",
  "celer-nlu",
  "clap",
@@ -7533,21 +7619,6 @@ dependencies = [
  "tempfile",
  "transvoxel",
  "wesl",
-]
-
-[[package]]
-name = "vibereditor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bevy",
- "clap",
- "flate2",
- "mlua",
- "serde",
- "serde_json",
- "tempfile",
- "viber",
 ]
 
 [[package]]

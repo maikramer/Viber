@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "rerecast"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Jan Hohenheim <jan@hohenheim.ch>"]
 build = false
 autolib = false
@@ -92,6 +92,11 @@ default-features = false
 
 [dependencies.glam]
 version = "0.33.2"
+features = [
+    "u16",
+    "u32",
+    "i32",
+]
 default-features = false
 
 [dependencies.libm]

@@ -1,0 +1,22 @@
+[package]
+name = "bevy_save_slots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Save envelope, slots and atomic JSON I/O for Bevy games"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["bevy", "save", "slots", "persistence"]
+categories = ["game-development"]
+
+[dependencies]
+bevy = { version = "0.20.1", default-features = false, features = ["std"] }
+bevy_world_xml = { version = "0.1.0", path = "../bevy_world_xml" }
+dirs = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

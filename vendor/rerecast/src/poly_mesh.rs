@@ -282,7 +282,12 @@ impl ContourSet {
             let mut npolys = 0;
             polys.fill(u16::MAX);
             for t in tris.iter().take(ntris) {
-                if t.x != t.y && t.x != t.z && t.y != t.z {
+                // Viber patch: ver `wound_right`.
+                if t.x != t.y
+                    && t.x != t.z
+                    && t.y != t.z
+                    && wound_right(&cont.vertices, *t)
+                {
                     polys[npolys * nvp] = indices[t.x as usize] as u16;
                     polys[npolys * nvp + 1] = indices[t.y as usize] as u16;
                     polys[npolys * nvp + 2] = indices[t.z as usize] as u16;
@@ -681,7 +686,8 @@ impl InternalPolygonNavmesh {
         let mut npolys = 0;
         polys[..ntris * nvp].fill(u16::MAX);
         for t in tris.iter().take(ntris) {
-            if t.x != t.y && t.x != t.z && t.y != t.z {
+            // Viber patch: ver `wound_right`.
+            if t.x != t.y && t.x != t.z && t.y != t.z && wound_right(&tverts, *t) {
                 let t_x = t.x as usize;
                 let t_y = t.y as usize;
                 let t_z = t.z as usize;
@@ -971,6 +977,24 @@ fn get_poly_merge_value(
 }
 
 #[inline]
+/// Viber patch: o triângulo tem a orientação dos polígonos convexos do mesh
+/// (`uleft`: área < 0). A triangulação recuperada de um contorno dobrado (o
+/// diagonal "loose" ou o resultado parcial do patch 1) pode produzir um
+/// triângulo invertido ou de área zero; fundido com os vizinhos, dava um
+/// polígono côncavo/no sentido errado e o `landmass` rejeitava a navmesh do
+/// tile INTEIRO (`The polygon at index N is concave or has edges in clockwise
+/// order`). Deitá-lo fora deixa um buraco do tamanho do sliver.
+fn wound_right<T>(verts: &[(U16Vec3, T)], t: U16Vec3) -> bool {
+    match (
+        verts.get(t.x as usize),
+        verts.get(t.y as usize),
+        verts.get(t.z as usize),
+    ) {
+        (Some(a), Some(b), Some(c)) => area2(a.0, b.0, c.0) <= 0,
+        _ => false,
+    }
+}
+
 fn uleft(a: U16Vec3, b: U16Vec3, c: U16Vec3) -> bool {
     let cross = (b.x as i32 - a.x as i32) * (c.z as i32 - a.z as i32)
         - (c.x as i32 - a.x as i32) * (b.z as i32 - a.z as i32);
@@ -1062,8 +1086,8 @@ fn triangulate(
 
                 let d = p2.as_ivec3() - p0.as_ivec3();
                 // Viber patch: `as u16` wrapped any diagonal longer than 255
-                    // cells and made the ear picker choose arbitrary ears.
-                    let len = d.xz().length_squared() as u32;
+                // cells and made the ear picker choose arbitrary ears.
+                let len = d.xz().length_squared() as u32;
                 if min_len.is_none_or(|min| len < min) {
                     min_len = Some(len);
                     mini = Some(i);
@@ -1087,8 +1111,8 @@ fn triangulate(
                     let p0 = verts[indices[i] & INDEX_MASK].0;
                     let p2 = verts[indices[next(i2, n)] & INDEX_MASK].0;
                     let d = p2.as_ivec3() - p0.as_ivec3();
-                    // Viber patch: `as u16` wrapped any diagonal longer than 255
-                    // cells and made the ear picker choose arbitrary ears.
+                    // Viber patch: `as u16` wrapped any diagonal longer than
+                    // 255 cells and made the ear picker choose arbitrary ears.
                     let len = d.xz().length_squared() as u32;
                     if min_len.is_none_or(|min| len < min) {
                         min_len = Some(len);
@@ -1105,7 +1129,7 @@ fn triangulate(
             // Viber patch: Recast (C++) returns the triangles built so far
             // (`return -ntris`) and `rcBuildPolyMesh` only logs a warning —
             // one folded contour leaves a small hole in the navmesh. Upstream
-            // rerecast turned it into a hard error, which throws away the
+            // rerecast turns it into a hard error, which throws away the
             // WHOLE navmesh for one bad contour (a 256 m tile in the Viber
             // simple-rpg failed deterministically this way).
             #[cfg(feature = "tracing")]
@@ -1359,4 +1383,23 @@ pub enum PolygonNavmeshError {
         "Invalid contour. This sometimes happens if the contour simplification is too aggressive."
     )]
     InvalidContour,
+}
+
+#[cfg(test)]
+mod viber_patch_tests {
+    use super::*;
+
+    #[test]
+    fn only_inverted_triangles_are_dropped() {
+        let v = |x, z| (U16Vec3::new(x, 0, z), 0u32);
+        let verts = [v(0, 0), v(0, 4), v(4, 0), v(8, 0)];
+        // (0,1,2): área2 = (0)(0) - (4)(4) = -16 → orientação do mesh.
+        assert!(wound_right(&verts, U16Vec3::new(0, 1, 2)));
+        // (0,2,1): invertido.
+        assert!(!wound_right(&verts, U16Vec3::new(0, 2, 1)));
+        // (0,2,3): colinear — fica (não abre T-junctions).
+        assert!(wound_right(&verts, U16Vec3::new(0, 2, 3)));
+        // Índice fora: fora.
+        assert!(!wound_right(&verts, U16Vec3::new(0, 1, 9)));
+    }
 }

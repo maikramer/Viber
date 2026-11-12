@@ -209,7 +209,7 @@ fn walk_bones(
 }
 
 #[derive(Clone, Copy)]
-struct CachedFootIkBones {
+pub(crate) struct CachedFootIkBones {
     left: (Entity, Entity, Entity),
     right: (Entity, Entity, Entity),
 }
@@ -365,7 +365,7 @@ fn solve_leg(
 }
 
 /// Assenta os pés e, com lock-on, vira a cabeça. Corre depois da animação.
-pub fn foot_ik_system(
+pub(crate) fn foot_ik_system(
     characters: Query<(Entity, &CharacterAnimator), With<FootIk>>,
     names: Query<&Name>,
     children: Query<&Children>,

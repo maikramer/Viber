@@ -14,6 +14,8 @@ use bevy::prelude::*;
 use bevy_kira_audio::prelude::{Mix, ReverbHandle};
 use bevy_kira_audio::{AudioChannel, AudioControl, AudioInstance, AudioTween};
 
+pub use bevy_engine_core::AudioMixerSettings;
+
 /// Piso de silêncio em dB — kira trata ≤ −60 dB como inaudível.
 const DB_SILENCE: f32 = -60.0;
 
@@ -79,36 +81,6 @@ pub struct ScriptSoundLoops {
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
 pub struct MusicLayerOverride(pub Option<String>);
-
-/// Bus volumes from `<AudioMixer master music sfx>`.
-///
-/// The resource always exists (worlds without an `<AudioMixer>` get this
-/// default): a derived `Default` would zero every bus — i.e. a silent game —
-/// and any system taking `ResMut<AudioMixerSettings>` used to panic outright
-/// on a world that never declared the tag.
-#[derive(Debug, Clone, Resource, Reflect)]
-#[reflect(Resource)]
-pub struct AudioMixerSettings {
-    pub master: f32,
-    pub music: f32,
-    pub sfx: f32,
-    /// Falas/barks (`<AudioMixer voice>`).
-    pub voice: f32,
-    /// Ambiente/loops de mundo (`<AudioMixer ambience>`).
-    pub ambience: f32,
-}
-
-impl Default for AudioMixerSettings {
-    fn default() -> Self {
-        Self {
-            master: 1.0,
-            music: 1.0,
-            sfx: 1.0,
-            voice: 1.0,
-            ambience: 1.0,
-        }
-    }
-}
 
 /// Nome de bus aceite por `viber.audio.duck`/`reverb` e pelos saves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -19,6 +19,8 @@
 
 use bevy::prelude::*;
 
+pub use bevy_engine_core::MenusOpen;
+
 use crate::luau::ScriptToast;
 use crate::player::Player;
 
@@ -65,32 +67,6 @@ pub fn is_zone_notice(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.starts_with("Entraste em:") || trimmed == "De volta ao vale."
 }
-/// Abre/fecha o estado dos menus que roubam input à hotbar.
-#[derive(Debug, Clone, Resource, Default, Reflect)]
-#[reflect(Resource)]
-pub struct MenusOpen {
-    pub modal: bool,
-    pub shop: bool,
-    /// Painel de viagem rápida [G] (`travel::TravelMenuState.open` — o
-    /// espelho vive no `travel_menu_system`). Sem este campo, com o painel
-    /// aberto o player andava (W/S navegavam E moviam) e o [J] que confirma
-    /// a viagem disparava o melee.
-    pub travel: bool,
-    /// Mapa regional [M] (`hud::map::RegionalMapState.open` — o espelho
-    /// vive no `map_key_system`). O mapa é um menu: com ele aberto o herói
-    /// não anda e o [L] que o fecha não dispara a guarda.
-    pub map: bool,
-    /// Uma cinemática está a tocar (`crate::cinematic`): o herói não anda,
-    /// não ataca e a hotbar cala-se.
-    pub cinematic: bool,
-}
-
-impl MenusOpen {
-    pub fn any(&self) -> bool {
-        self.modal || self.shop || self.travel || self.map || self.cinematic
-    }
-}
-
 pub const TAB_COUNT: usize = 4;
 
 /// Próxima tab (cíclica); pura para os testes.
@@ -394,7 +370,7 @@ pub fn options_body(selected: usize, volumes: (f32, f32, f32), controls: &str) -
 ///
 /// Não nasce no modo Edit: aí o `Time<Virtual>` está em pausa desde o
 /// `Startup`, `loading_hide_system` nunca vê `elapsed > 2 s` e o véu ficava
-/// VISÍVEL para sempre — no ViberEditor tapava o viewport de UI (a
+/// VISÍVEL para sempre — no editor externo tapava o viewport de UI (a
 /// `GameUiCamera` desenha a UI do jogo por cima da imagem).
 fn spawn_loading_screen(
     mut commands: Commands,

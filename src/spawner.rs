@@ -26,6 +26,7 @@ use crate::terrain::runtime::TerrainRuntime;
 /// engine); re-exportado aqui porque metade do código de gameplay refere
 /// `crate::spawner::Rng`.
 pub use crate::rng::Rng;
+pub use bevy_world_xml::PlacedInstance;
 
 /// Todos os discos `<SpawnExclusion>` do mundo, como RECURSO.
 ///
@@ -54,21 +55,6 @@ impl SpawnExclusions {
 pub struct SpawnExclusion {
     pub center: bevy::math::Vec2,
     pub radius: f32,
-}
-
-/// One placed template instance.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlacedInstance {
-    pub position: Vec3,
-    /// Heading alone (diagnóstico/testes); a rotação completa vive em
-    /// [`PlacedInstance::rotation`].
-    pub yaw_deg: f32,
-    /// Rotação final mundo: yaw e (com `align-to-terrain`) o tilt parcial
-    /// clampado em direção à normal do terreno.
-    pub rotation: Quat,
-    pub scale: Vec3,
-    /// Index into the spawner's `template_urls` (and `handles`).
-    pub template_index: usize,
 }
 
 /// Largura da célula do registo de ocupação (metros) — props são
@@ -692,7 +678,7 @@ pub struct SpawnGroupState {
     /// [`crate::ai::EnemyCreature`] e o driver de IA conduz-as.
     pub dynamic: bool,
     /// Entidade-grupo de editor sob a qual as instâncias nascem
-    /// (`crate::recipes::EditorGroups`) — hierarquia navegável no ViberEditor.
+    /// (`crate::recipes::EditorGroups`) — hierarquia navegável no editor externo.
     pub editor_group: Entity,
     /// Script do template (criaturas): cada instância spawna com
     /// [`LuaScriptRef`] e o comportamento vive no Luau.

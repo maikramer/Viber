@@ -3,10 +3,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "bevy_reflect")]
 use bevy_reflect::prelude::*;
 
-use core::{
-    f32,
-    ops::{Deref, DerefMut},
-};
+use core::ops::{Deref, DerefMut};
 use glam::{U16Vec3, Vec2, Vec3, Vec3A, Vec3Swizzles as _, u16vec3};
 use thiserror::Error;
 
@@ -304,11 +301,19 @@ impl DetailNavmesh {
                 }
                 dmesh.triangles.reserve(tcap - dmesh.triangles.len());
             }
-            for tri in &tris {
-                dmesh.triangles.push([tri[0], tri[1], tri[2]]);
-            }
-            for flag in &flags {
-                dmesh.triangle_flags.push(*flag);
+            // Viber patch: o contrato é "clockwise no plano XZ", mas a
+            // triangulação gulosa deixa às vezes um triângulo quase colinear
+            // (sliver) com a orientação trocada por ruído de f32. O
+            // `landmass` valida a orientação de TODOS os triângulos e deita
+            // fora a navmesh inteira do tile por um só (`The triangle at
+            // index N in the height mesh is clockwise…`): nenhuma criatura
+            // navegava nesse tile. Inverte-se o triângulo (B↔C, com as flags
+            // de aresta AB↔CA) — num sliver, a área é ~0 e a altura igual.
+            let base = submesh_base_vertex(&dmesh, i);
+            for (tri, flag) in tris.iter().zip(flags.iter()) {
+                let (t, f) = clockwise_xz(&dmesh.vertices[base..], *tri, *flag);
+                dmesh.triangles.push(t);
+                dmesh.triangle_flags.push(f);
             }
         }
 
@@ -1531,5 +1536,57 @@ impl Bounds {
     #[inline]
     fn height(&self) -> u16 {
         self.zmax - self.zmin
+    }
+}
+
+/// Viber patch: índice global do primeiro vértice do sub-mesh `i`.
+fn submesh_base_vertex(dmesh: &DetailNavmesh, i: usize) -> usize {
+    dmesh.meshes[i].base_vertex_index as usize
+}
+
+/// Viber patch: garante a orientação "clockwise no plano XZ" do contrato do
+/// [`DetailNavmesh`]: `cross_xz(b - a, c - a) <= 0` (o sinal que o `landmass`
+/// aceita depois da conversão; zero — degenerado — passa). Um triângulo
+/// trocado vira-se (B↔C) e as flags das arestas AB e CA trocam.
+pub(crate) fn clockwise_xz(verts: &[Vec3], tri: [u8; 3], flags: u8) -> ([u8; 3], u8) {
+    let (Some(a), Some(b), Some(c)) = (
+        verts.get(tri[0] as usize),
+        verts.get(tri[1] as usize),
+        verts.get(tri[2] as usize),
+    ) else {
+        return (tri, flags);
+    };
+    let (ab, ac) = (*b - *a, *c - *a);
+    let cross = ab.x * ac.z - ab.z * ac.x;
+    if cross <= 0.0 {
+        return (tri, flags);
+    }
+    let ab_flag = flags & 0x3;
+    let bc_flag = (flags >> 2) & 0x3;
+    let ca_flag = (flags >> 4) & 0x3;
+    // Depois da troca: AC (era CA), CB (era BC), BA (era AB).
+    let flipped = (flags & !0x3f) | ca_flag | (bc_flag << 2) | (ab_flag << 4);
+    ([tri[0], tri[2], tri[1]], flipped)
+}
+
+#[cfg(test)]
+mod viber_patch_tests {
+    use super::*;
+
+    #[test]
+    fn a_flipped_sliver_is_turned_clockwise_with_its_edge_flags() {
+        let verts = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        // (0,2,1): cross_xz((0,1),(1,0)) = -1 ≤ 0 (clockwise) — fica.
+        assert_eq!(clockwise_xz(&verts, [0, 2, 1], 0b01_10_11), ([0, 2, 1], 0b01_10_11));
+        // (0,1,2) está trocado: vira (0,2,1) e AB↔CA trocam de lugar.
+        let (tri, flags) = clockwise_xz(&verts, [0, 1, 2], 0b01_10_11);
+        assert_eq!(tri, [0, 2, 1]);
+        assert_eq!(flags, 0b11_10_01);
+        // Índice fora do sub-mesh: não mexe (a validação a jusante reporta).
+        assert_eq!(clockwise_xz(&verts, [0, 9, 1], 0), ([0, 9, 1], 0));
     }
 }

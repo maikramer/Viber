@@ -130,15 +130,7 @@ pub struct DeltaGrid {
     revision: u64,
 }
 
-/// Recorte gravável no save (alturas absolutas).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, bevy::prelude::Reflect)]
-pub struct DeltaPatch {
-    pub min: [f32; 2],
-    pub step: [f32; 2],
-    pub cols: u32,
-    pub rows: u32,
-    pub data: Vec<f32>,
-}
+pub use bevy_world_xml::DeltaPatch;
 
 impl DeltaGrid {
     /// Cópia dos recortes para o save. Vazio quando ninguém editou o terreno.

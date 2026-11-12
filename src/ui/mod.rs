@@ -55,28 +55,7 @@ pub use writer::UiWriter;
 
 use bevy::prelude::*;
 
-/// System ordering inside one frame: gather → bind → script → style.
-///
-/// Explicit sets, because the order is the contract: a script has to see this
-/// frame's bindings, and the restyle has to run after whatever the script
-/// changed, or every class toggle would land a frame late.
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum UiSet {
-    /// Snapshot gameplay state into [`UiData`] and the list sources.
-    Collect,
-    /// Rebuild data-driven repeaters whose source changed.
-    Build,
-    /// Push bindings into elements and publish the script view.
-    Bind,
-    /// Apply the mutations scripts queued.
-    Script,
-    /// Recompute styles and mirror widget values into their child nodes.
-    Style,
-    /// A segunda metade do estilo (syncs de widgets e motion); existe porque o
-    /// tuplo de sistemas de uma cadeia tem tecto no Bevy e o estilo ficou
-    /// grande de mais para uma cadeia só.
-    StyleLate,
-}
+pub use bevy_engine_core::UiSet;
 
 /// Registers the declarative UI.
 #[derive(Default)]

@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+pub use bevy_world_xml::xml::escape_attr;
+
 use super::ops::EditOp;
 use super::pose;
 
@@ -277,20 +279,6 @@ pub fn add_node(parent: &str, tag: &str, index: Option<usize>) -> EditOp {
         index,
         xml: snippet_for(tag),
     }
-}
-
-/// Escapa um valor para ir dentro de `attr="…"`.
-pub fn escape_attr(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '<' => out.push_str("&lt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// Nome único no documento. Dois carimbos do mesmo GLB não podem partilhar `name=`

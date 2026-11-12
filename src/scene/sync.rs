@@ -1,5 +1,5 @@
 //! Sync documento → mundo vivo: cada [`SceneEdited`] (de um agente pelo bridge, ou do
-//! ViberEditor) é refletido nas entidades com [`SceneSource`].
+//! editor externo) é refletido nas entidades com [`SceneSource`].
 //!
 //! * mudança só de pose (`translation`/`euler`/`rotation`/`scale`/aliases) → patch do
 //!   `Transform`, sem re-spawn;
@@ -25,15 +25,7 @@ use super::pose::read_pose;
 use crate::recipes::spawn::{EditorGroups, spawn_specs, spawns_incrementally};
 use crate::xml::{NodeOrigin, XmlNode};
 
-/// Atributos cuja mudança é só pose (patch do `Transform`).
-pub const POSE_KEYS: &[&str] = &[
-    "translation",
-    "pos",
-    "euler",
-    "rotation",
-    "scale",
-    "transform",
-];
+pub use bevy_world_xml::xml::POSE_KEYS;
 
 /// Mudanças que o mundo vivo não conseguiu refletir (o editor mostra "recarregar").
 #[derive(Resource, Debug, Default, Clone, Reflect)]
