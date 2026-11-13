@@ -16,3 +16,6 @@ worlds/assets
 logs/
 __pycache__/
 *.bak
+
+# Cache de build que ferramentas de revisão deixam cair no repo.
+.review-target*/
