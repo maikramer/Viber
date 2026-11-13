@@ -143,7 +143,8 @@ Contrato XML completo: `AGENTS.md` da raiz.
 - **Refinamento perto de mods (`VIBER_VOXEL_REFINE=1`, OPT-IN):** coluna ao
   LOD 0 cujo rect toca a bounding dos mods E com TODOS os vizinhos ao LOD 0
   amostra a MEIA célula (0.5 m) — o "fix real" das folhas finas sub-voxel
-  (medido na qa-cliffs: triângulos VIRADOS caem; os degenerados de área
+  (medido no antigo mundo QA `qa-cliffs`, removido a 2026-11-12: triângulos
+  VIRADOS caem; os degenerados de área
   zero — invisíveis — crescem com a contagem e têm teto proporcional em
   teste). A comparação de transições é em CÉLULA EFETIVA
   (`effective_cell`): um refinado ponteia como um nível do ladder, e o teto
@@ -191,7 +192,7 @@ deliberada.
 cd Viber && cargo test          # inclui tests/terrain_mesh_health.rs (voxel)
 cargo test --release --test chunk_build_bench -- --nocapture
 cargo run -- analyze worlds/terrain.xml    # mundo demo de terreno
-cargo run -- analyze worlds/qa-voxel.xml   # grutas, arcos, overhangs
-cargo run -- analyze worlds/qa-pontes.xml  # travessias, salas, viaduto, dispersão
-cargo run -- analyze worlds/qa-autoria.xml # cut/road-cut, plateau, lago autoral
 ```
+
+Os mundos `qa-*.xml` usados para grutas e travessias foram removidos a
+2026-11-12; os testes que dependem deles ficam `#[ignore]`.

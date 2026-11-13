@@ -662,6 +662,21 @@ impl PostFxState {
     }
 }
 
+/// Câmara cuja exposição (`Exposure`) pertence a outro dono.
+///
+/// O `drive_postfx` deixa de escrever o EV base nestas câmaras: a curva
+/// [`BASE_EV100`] foi calibrada para o domo antigo e branqueava o céu físico
+/// do `bevy_elements` ao meio-dia (EV100 ~13,3 medido). O dono do EV
+/// (o jogo) continua a ser o único a escrevê-lo; o kick de juice
+/// ([`PostFxState::kick`], `viber.punch`) é aplicado por ele, porque este
+/// sistema já não toca no `Exposure` da câmara.
+///
+/// O `Bloom`, o `ColorGrading` e a vinheta continuam a ser conduzidos aqui:
+/// a marca só retira a posse do EV.
+#[derive(Component, Default, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
+pub struct ExternalExposure;
+
 /// EV100 efetivo na câmara: o kick CLAREIA (menos EV = mais luz captada).
 pub fn ev_with_kick(ev100: f32, kick: f32) -> f32 {
     ev100 - kick
@@ -2626,6 +2641,7 @@ fn drive_postfx(
             &mut Exposure,
             Option<&mut bevy::render::view::ColorGrading>,
             Option<&mut Vignette>,
+            Has<ExternalExposure>,
         ),
         With<Camera3d>,
     >,
@@ -2689,7 +2705,7 @@ fn drive_postfx(
     let low_sun = low_sun_split_weight(sun.elevation_deg);
     let temperature = grade_temperature_full(golden, low_sun, night);
     let saturation = grade_saturation(golden, night);
-    for (mut camera_bloom, mut exposure, grading, vignette) in &mut cameras {
+    for (mut camera_bloom, mut exposure, grading, vignette, external_exposure) in &mut cameras {
         if camera_bloom.intensity != bloom {
             camera_bloom.intensity = bloom;
         }
@@ -2707,7 +2723,10 @@ fn drive_postfx(
                 vig.intensity = target;
             }
         }
-        if exposure.ev100 != ev100 {
+        // `ExternalExposure`: o EV é do dono externo (o céu físico do
+        // `bevy_elements` no Vael); o kick dele fica com o dono. A curva
+        // `BASE_EV100` é a do domo antigo e branqueava o céu físico.
+        if !external_exposure && exposure.ev100 != ev100 {
             exposure.ev100 = ev100;
         }
         // A câmara pode não ter ColorGrading (inserido pelo attach com o

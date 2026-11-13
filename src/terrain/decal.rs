@@ -17,6 +17,13 @@
 //! * **Feathered, never hard-edged.** Alpha ramps 1 → 0 across the feather
 //!   band with a smootherstep, so the patch dissolves into the terrain
 //!   instead of ending on a cut line.
+//! * **Stacked above the ones they sit on.** Two decals draped from the same
+//!   grid at the same [`DECAL_LIFT`] are coplanar, and their meshes do not
+//!   share a triangulation: the depth test picks a different winner per
+//!   triangle and the overlap shimmers as the camera moves. [`stack_decal_lifts`]
+//!   raises each decal above the larger ones it overlaps, so a dirt pit, a
+//!   wear trail or a market apron always wins over the plaza floor under it
+//!   instead of z-fighting with it.
 //!
 //! Decals are transparent and **never cast shadows** — a shadow caster
 //! hovering `LIFT` above the ground draws its own silhouette back onto the
@@ -30,8 +37,23 @@ use super::mesh::ChunkMeshData;
 
 /// Lift above the sampled ground (meters). Decals sit **below** the road
 /// ribbon so that where the two overlap the ribbon wins deterministically
-/// instead of z-fighting; see [`super::roads::RIBBON_LIFT`].
+/// instead of z-fighting; see [`super::roads::RIBBON_LIFT`]. Overlapping
+/// decals start here and climb by [`stack_decal_lifts`].
 pub const DECAL_LIFT: f32 = 0.04;
+
+/// Headroom kept between the top of a decal stack and the road ribbon
+/// (meters). The ribbon's skirt dips below its surface, so the stack must not
+/// reach it; 4 mm also leaves the stack's own steps room to be visible to the
+/// depth test at the far plane.
+const DECAL_STACK_HEADROOM: f32 = 0.004;
+/// Floor for the vertical step between two layers of the stack (meters). Only
+/// reached by pathological worlds with dozens of nested decals; the step is
+/// otherwise spread so the whole stack ends just under the ribbon.
+const DECAL_STACK_MIN_STEP: f32 = 0.0005;
+/// How close two decal cores may come before they count as overlapping
+/// (meters). Catches the plaza/street decals that meet exactly at the rim: the
+/// two meshes share that seam and would otherwise flicker along it.
+const DECAL_STACK_SLACK: f32 = 0.25;
 
 /// Target arc length between rim samples (meters).
 const RIM_ARC: f32 = 1.5;
@@ -108,6 +130,94 @@ impl GroundDecalSpec {
         }
         let d = (p - self.at) / h;
         d.length_squared() <= 1.0
+    }
+
+    /// Footprint of the opaque core (m², π omitted — only the order matters).
+    fn area(&self) -> f32 {
+        self.half_extent.x.max(0.0) * self.half_extent.y.max(0.0)
+    }
+
+    /// Radius of the wobbled core in the direction of the unit vector `dir`
+    /// (meters) — the support function of the ellipse that bounds the rim.
+    fn support(&self, dir: Vec2) -> f32 {
+        let r = self.half_extent * (1.0 + self.noise.clamp(0.0, 0.9));
+        ((r.x * dir.x).powi(2) + (r.y * dir.y).powi(2)).sqrt()
+    }
+
+    /// True when the two opaque cores can share ground: the centre line is
+    /// shorter than the two cores together (plus [`DECAL_STACK_SLACK`]).
+    /// Deliberately forgiving — a false positive costs a few millimetres of
+    /// lift, a false negative brings the z-fight back.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        let delta = other.at - self.at;
+        let dist = delta.length();
+        if dist <= f32::EPSILON {
+            return true;
+        }
+        let dir = delta / dist;
+        dist <= self.support(dir) + other.support(dir) + DECAL_STACK_SLACK
+    }
+}
+
+/// Raises each decal above the larger decals it overlaps, so overlapping
+/// patches stack in a deterministic order instead of sharing a plane.
+///
+/// A decal's *depth* is one more than the deepest decal below it — the
+/// longest chain of larger cores it overlaps (equal areas break the tie by
+/// declaration order, earlier below). Sibling patches that all sit on the same
+/// floor share one level instead of each adding a step. The step is spread
+/// over the headroom between [`DECAL_LIFT`] and [`super::roads::RIBBON_LIFT`],
+/// so the whole stack ends just below the road ribbon whatever the depth — a
+/// plaza floor keeps 4 cm, a dirt pit on top of it sits a few millimetres
+/// higher, and the ribbon still wins over both.
+///
+/// Bigger means lower on purpose: a plaza floor is the base, the apron, wear
+/// trail or tree pit painted on it goes above. Authored `lift` values are
+/// kept as the starting point and only ever raised, clamped below the ribbon.
+pub fn stack_decal_lifts(decals: &mut [GroundDecalSpec]) {
+    let n = decals.len();
+    if n < 2 {
+        return;
+    }
+    // Largest core first: every "below" decal (larger area, or equal area with
+    // a smaller index) is already resolved when its turn comes, so one pass
+    // gives the longest chain.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        decals[b]
+            .area()
+            .total_cmp(&decals[a].area())
+            .then_with(|| a.cmp(&b))
+    });
+    let mut depth = vec![0usize; n];
+    for &i in &order {
+        let mut below = 0;
+        for &j in &order {
+            if j == i {
+                continue;
+            }
+            // `j` is below `i` only when it comes earlier in `order` (larger
+            // core, or the same core with a smaller index).
+            let (mine, theirs) = (decals[i].area(), decals[j].area());
+            let is_below = theirs > mine || (theirs == mine && j < i);
+            if is_below && decals[j].overlaps(&decals[i]) {
+                below = below.max(depth[j] + 1);
+            }
+        }
+        depth[i] = below;
+    }
+    let max_depth = depth.iter().copied().max().unwrap_or(0);
+    if max_depth == 0 {
+        return;
+    }
+    let ceiling = super::roads::RIBBON_LIFT - DECAL_STACK_HEADROOM;
+    let headroom = (ceiling - DECAL_LIFT).max(0.0);
+    let step = (headroom / max_depth as f32).max(DECAL_STACK_MIN_STEP);
+    for (i, decal) in decals.iter_mut().enumerate() {
+        if depth[i] == 0 {
+            continue;
+        }
+        decal.lift = (decal.lift + depth[i] as f32 * step).min(ceiling);
     }
 }
 
@@ -372,5 +482,160 @@ mod tests {
         );
         assert!(mesh.positions.is_empty());
         assert!(mesh.indices.is_empty());
+    }
+
+    /// The plaza floor with a dirt pit on its rim — the Vael case: the two
+    /// cores overlap, they sit on the same `at` grid, so without stacking both
+    /// meshes are coplanar and the overlap shimmers.
+    fn plaza_and_pit() -> (GroundDecalSpec, GroundDecalSpec) {
+        let floor = GroundDecalSpec {
+            at: Vec2::ZERO,
+            half_extent: Vec2::splat(17.0),
+            feather: 3.5,
+            noise: 0.11,
+            ..GroundDecalSpec::default()
+        };
+        let pit = GroundDecalSpec {
+            at: Vec2::new(-13.0, 11.0),
+            half_extent: Vec2::splat(2.8),
+            feather: 1.2,
+            noise: 0.2,
+            ..GroundDecalSpec::default()
+        };
+        (floor, pit)
+    }
+
+    #[test]
+    fn test_stacking_raises_the_smaller_patch_above_the_floor() {
+        let (floor, pit) = plaza_and_pit();
+        assert!(floor.overlaps(&pit), "the pit sits on the plaza rim");
+        let mut decals = vec![floor, pit];
+        stack_decal_lifts(&mut decals);
+        assert_eq!(decals[0].lift, DECAL_LIFT, "the floor keeps the base lift");
+        assert!(
+            decals[1].lift > decals[0].lift,
+            "the pit must sit above the floor: {:?}",
+            decals.iter().map(|d| d.lift).collect::<Vec<_>>()
+        );
+        for d in &decals {
+            assert!(
+                d.lift < super::super::roads::RIBBON_LIFT,
+                "decal lift {} must stay under the ribbon",
+                d.lift
+            );
+        }
+    }
+
+    /// The mesh is what the depth test sees: after stacking, a shared ground
+    /// point has the two surfaces at different heights by the whole step.
+    #[test]
+    fn test_stacked_meshes_are_not_coplanar() {
+        let (floor, pit) = plaza_and_pit();
+        let mut decals = vec![floor, pit];
+        stack_decal_lifts(&mut decals);
+        let grid = test_grid();
+        let high = ground_decal_mesh(&grid, &decals[1]);
+        // The pit's hub (vertex 0) is the shared point; the floor's surface
+        // there is the same grid sample at the floor's lift.
+        let p = decals[1].at;
+        let low_surface = grid.sample(p.x, p.y) + decals[0].lift;
+        let high_surface = high.positions[0][1];
+        assert!(
+            high_surface - low_surface > 1e-3,
+            "stacked decals must not share a plane (low {low_surface}, high {high_surface})"
+        );
+    }
+
+    #[test]
+    fn test_disjoint_decals_keep_the_default_lift() {
+        let a = spec();
+        let b = GroundDecalSpec {
+            at: Vec2::new(60.0, 60.0),
+            ..spec()
+        };
+        assert!(!a.overlaps(&b));
+        let mut decals = vec![a, b];
+        stack_decal_lifts(&mut decals);
+        assert!(decals.iter().all(|d| d.lift == DECAL_LIFT));
+    }
+
+    /// A deep nest must still end under the ribbon, and every layer must be
+    /// strictly above the one below it.
+    #[test]
+    fn test_deep_stack_stays_below_the_ribbon() {
+        let mut decals: Vec<GroundDecalSpec> = (0..6)
+            .map(|i| GroundDecalSpec {
+                at: Vec2::ZERO,
+                half_extent: Vec2::splat(20.0 - i as f32 * 2.5),
+                feather: 0.5,
+                noise: 0.0,
+                ..GroundDecalSpec::default()
+            })
+            .collect();
+        stack_decal_lifts(&mut decals);
+        for (i, d) in decals.iter().enumerate() {
+            assert!(
+                d.lift < super::super::roads::RIBBON_LIFT,
+                "layer {i} reaches the ribbon: {}",
+                d.lift
+            );
+            if i > 0 {
+                assert!(
+                    d.lift > decals[i - 1].lift,
+                    "layer {i} is not above layer {}: {} <= {}",
+                    i - 1,
+                    d.lift,
+                    decals[i - 1].lift
+                );
+            }
+        }
+    }
+
+    /// Two patches of the same size must still stack deterministically:
+    /// declaration order breaks the tie, earlier below.
+    #[test]
+    fn test_equal_areas_break_the_tie_by_declaration_order() {
+        let a = spec();
+        let b = GroundDecalSpec {
+            at: Vec2::new(4.0, 0.0),
+            ..spec()
+        };
+        let mut decals = vec![a.clone(), b.clone()];
+        stack_decal_lifts(&mut decals);
+        assert_eq!(decals[0].lift, DECAL_LIFT);
+        assert!(decals[1].lift > decals[0].lift);
+
+        let mut swapped = vec![b, a];
+        stack_decal_lifts(&mut swapped);
+        assert_eq!(swapped[0].lift, DECAL_LIFT);
+        assert!(swapped[1].lift > swapped[0].lift);
+    }
+
+    /// Stacking is a pure function of the set of decals: the same world
+    /// always gets the same lifts, whatever order the parser produced.
+    #[test]
+    fn test_stacking_is_deterministic_and_order_independent() {
+        let (floor, pit) = plaza_and_pit();
+        let wear = GroundDecalSpec {
+            at: Vec2::new(9.0, -9.0),
+            half_extent: Vec2::new(5.0, 4.0),
+            feather: 3.0,
+            noise: 0.16,
+            ..GroundDecalSpec::default()
+        };
+        let mut a = vec![floor.clone(), pit.clone(), wear.clone()];
+        stack_decal_lifts(&mut a);
+        let mut b = vec![wear, pit, floor];
+        stack_decal_lifts(&mut b);
+        // Same area ⇒ same depth ⇒ same lift, regardless of slot.
+        let by_area = |v: &Vec<GroundDecalSpec>| {
+            let mut lifts: Vec<(u32, f32)> = v
+                .iter()
+                .map(|d| (d.area().to_bits(), d.lift))
+                .collect();
+            lifts.sort_by_key(|(a, _)| *a);
+            lifts.into_iter().map(|(_, l)| l).collect::<Vec<_>>()
+        };
+        assert_eq!(by_area(&a), by_area(&b));
     }
 }

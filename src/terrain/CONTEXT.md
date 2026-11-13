@@ -32,7 +32,8 @@ máscaras (CliffMask, splat, biomas).
 
 Estável pós-migração (commit "remove o heightfield 2.5D"). QA vivo:
 simple-rpg 4 km a ~89–103 fps (689 colunas / 900 caixas), grutas/arcos do
-qa-voxel com `ground_below` a dar 2 spans. Travessias em `qa-pontes.xml`:
+antigo mundo QA `qa-voxel` (removido a 2026-11-12) com `ground_below` a dar
+2 spans. Travessias do antigo `qa-pontes.xml`:
 `<Bridge>` (tabuleiro union — o collider da coluna traz o tabuleiro, ao
 contrário do ribbon de `<Road profile="bridge">`, que não tem collider
 nenhum e continua a não ter), `<Cave>` com `<Chamber>`/`<Shaft>` e raio por

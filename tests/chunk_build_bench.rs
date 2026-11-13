@@ -94,6 +94,15 @@ const MAX_MS_PER_BOX: f64 = 30.0;
 
 /// Constrói o campo voxel do mundo QA das travessias (pontes de pedra e
 /// natural, gruta com sala e chaminé, arco natural, viaduto, dispersão).
+///
+/// O mundo `worlds/qa-pontes.xml` foi removido a 2026-11-12; os benches que o
+/// usavam saltam quando o ficheiro não existe.
+fn qa_pontes_available() -> bool {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("worlds/qa-pontes.xml")
+        .exists()
+}
+
 fn qa_pontes_field() -> (TerrainSpec, BrushGrid, VoxelField) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("worlds")
@@ -149,6 +158,10 @@ fn qa_pontes_field() -> (TerrainSpec, BrushGrid, VoxelField) {
 /// consome-se inteiro). Tecto: 8× o do caminho normal.
 #[test]
 fn bench_voxel_box_build_refined() {
+    if !qa_pontes_available() {
+        eprintln!("skip: worlds/qa-pontes.xml removido");
+        return;
+    }
     let (spec, grid, field) = qa_pontes_field();
     let edge = spec.chunk_size;
     let coords = bevy::math::UVec2::new(2, 2); // a ponte de pedra
@@ -197,6 +210,10 @@ fn bench_voxel_box_build_refined() {
 
 #[test]
 fn bench_voxel_box_build_with_a_field_full_of_mods() {
+    if !qa_pontes_available() {
+        eprintln!("skip: worlds/qa-pontes.xml removido");
+        return;
+    }
     let (spec, grid, field) = qa_pontes_field();
     assert!(
         field.mods().len() >= 40,

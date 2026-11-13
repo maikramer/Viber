@@ -12,7 +12,19 @@ jobs:
   viber:
     runs-on: ubuntu-latest
     steps:
+      # Os três checkouts são irmãos: o Viber resolve `../bevy_extensions` e
+      # `../CelerAI` por path. Só o Viber é o workspace; os outros são deps.
       - uses: actions/checkout@v4
+        with:
+          path: Viber
+      - uses: actions/checkout@v4
+        with:
+          repository: maikramer/bevy_extensions
+          path: bevy_extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: Celer-Brasil/CelerAI
+          path: CelerAI
       - name: system dependencies
         run: |
           sudo apt-get update
@@ -25,21 +37,37 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Viber
       - name: fmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p viber -- --check
+        working-directory: Viber
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: Viber
       - name: test
         run: cargo test --workspace
+        working-directory: Viber
       # O default já não inclui `ai`: a engine compila sem o checkout irmão
       # CelerAI. Este é o gate do build mínimo.
       - name: engine without default features
         run: cargo check -p viber --no-default-features
+        working-directory: Viber
 
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: Viber
+      - uses: actions/checkout@v4
+        with:
+          repository: maikramer/bevy_extensions
+          path: bevy_extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: Celer-Brasil/CelerAI
+          path: CelerAI
       - name: system dependencies
         run: |
           sudo apt-get update
@@ -50,17 +78,22 @@ jobs:
             cmake g++
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Viber
       - name: check on the declared MSRV
         run: cargo check --workspace
+        working-directory: Viber
 
   ai:
     runs-on: ubuntu-latest
     steps:
-      # Os dois checkouts têm de ser irmãos: o Viber resolve o CelerAI por
-      # `../CelerAI/crates/*`.
       - uses: actions/checkout@v4
         with:
           path: Viber
+      - uses: actions/checkout@v4
+        with:
+          repository: maikramer/bevy_extensions
+          path: bevy_extensions
       - uses: actions/checkout@v4
         with:
           repository: Celer-Brasil/CelerAI
@@ -85,9 +118,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: Viber
+      - uses: actions/checkout@v4
+        with:
+          repository: maikramer/bevy_extensions
+          path: bevy_extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: Celer-Brasil/CelerAI
+          path: CelerAI
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Viber
       # O root é `publish = false`; os pacotes publicáveis vivem no monorepo
       # `../bevy_extensions` (CI próprio). Aqui valida-se só o root.
       - name: list package files (viber)
         run: cargo package --list -p viber --allow-dirty
+        working-directory: Viber

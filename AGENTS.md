@@ -1,6 +1,6 @@
 # AGENTS.md — Viber
 
-Engine de jogo NATIVA em Rust/Bevy **0.20.0** que corre mundos declarativos XML do
+Engine de jogo NATIVA em Rust/Bevy **0.20.1** que corre mundos declarativos XML do
 AiGameKit — sem browser, sem three.js. Estado: **Fases 0–3 ✅** (parse → IR →
 spawn → terreno → Luau → física; port do simple-rpg feito em 10 loops).
 Nomenclatura segue **Bevy** (`translation`, `euler`, `half-size`, `base-color`),
@@ -219,7 +219,7 @@ project:                     # config.yaml — sem este bloco o mundo é de uma 
 ## Bevy 0.20 (WESL + forks vendored + OIT)
 
 * **WESL substituiu o naga_oil** — os shaders do motor são `.wesl`: `#import a::b::{x}` → `import a::b::{x};` (imports no topo, podem ser condicionais), `#ifdef X` → `@if(X)` (anexado a declarações/instruções; blocos `@if(BINDLESS) { … } @else { … }` embrulham regiões inteiras), `#{CONST}` → `constants::CONST` (defs numéricas), e os módulos do PBR ganharam o prefixo `bevy_pbr::render::` (`prepass_utils`→`bevy_pbr::prepass::utils`, `ssao_utils`→`bevy_pbr::ssao::utils`). Os ficheiros gerados em `<mundo>/shaders/` são `.wesl`; WGSL puro SEM diretivas continua válido (`AERIAL_WGSL`/`water_ssr` ficam `from_wgsl`). Harnesses: `tests/common/mod.rs` compila WESL com `wesl::compile` + stubs por módulo + o módulo especial `constants` — o padrão do `bevy_shader::shader_cache`.
-* **bevy 0.20.0 do crates.io** (final a 2026-10-08; a tabela `[patch.crates-io]` de tags git foi removida e o único patch restante é o `rerecast` com fixes locais). Os crates do ecossistema ainda sem versão bevy-0.20 publicada vivem em `vendor/` (bevy_rerecast[_core], bevy_landmass, landmass_rerecast, rerecast — o fork `bevy_rapier3d` saiu a 2026-10-18: o upstream 0.37.0 é a versão oficial bevy-0.20. Proveniência e condições de des-vendor em [`vendor/FORKS_020.md`](vendor/FORKS_020.md)).
+* **bevy 0.20.1 do crates.io** (0.20.0 final a 2026-10-08; a tabela `[patch.crates-io]` de tags git foi removida e o único patch restante é o `rerecast` com fixes locais). Os crates do ecossistema ainda sem versão bevy-0.20 publicada vivem em `vendor/` (bevy_rerecast[_core], bevy_landmass, landmass_rerecast, rerecast — o fork `bevy_rapier3d` saiu a 2026-10-18: o upstream 0.37.0 é a versão oficial bevy-0.20. Proveniência e condições de des-vendor em [`vendor/FORKS_020.md`](vendor/FORKS_020.md)).
 * **OIT** (transparência order-independent, opt-in `VIBER_OIT=1`): o gate é o componente `OrderIndependentTransparencySettings` na câmara (postfx.rs `oit_requested`); materiais `AlphaMode::Blend/Add` participam por omissão (`enable_oit()` default true), a ÁGUA fica fora (`WaterExtension::enable_oit() = false`).
 * **Reads/writes por sistema no profiler** (tab Sistemas, `viber debug prof --tab sistemas`): `ScheduleData` do `bevy_dev_tools` — os mesmos dados do BRP `schedule.graph`.
 
@@ -246,10 +246,10 @@ project:                     # config.yaml — sem este bloco o mundo é de uma 
 | Player + câmara | `src/player.rs`, `src/camera.rs` | WASD/setas + Shift sprint + Space salto; third-person com drag/scroll |
 | Combate | `src/combat.rs`, `src/skills.rs`, `src/feedback.rs`, `src/vitals.rs` | melee [J], alvo [V], skills [C]/[R]/[B]/[L], dano flutuante/i-frames/respawn, HP/XP |
 | Colheita (destructibles) | `src/harvest.rs` | minerar/cortar nativos: `destructible="…"` no XML + `<ResourceNode>` no template; [J]/clique perto do prop toca clip `mine`/`chop` com picareta/machado na mão; `fall` = árvore cai e fica toco, `shatter` = pedra despedaça; loot → vault/XP/quests |
-| Quests & diálogo | `src/quests.rs`, `../Vael/quests/*.json` | 27 quests JSON (21 do jogo + 4 dos cenários + 2 caçadas a chefes), flow [E], QuestTracker. Schema: `id`/`npc`/`biome`/`title`/`lines_intro|progress|complete`/`objective{type: kill\|collect\|visit, target, count, radius}`/`rewards{gold,xp,items}`. Um `biome` em falta derruba o FICHEIRO inteiro (warn + skip), e um JSON que caia é silencioso — `test_fantasy_scenario_quests_are_loaded` e o audit cobrem a classe. Objetivo `visit` casa por NOME de entidade + `radius`; `kill` pelo nome do script da criatura (`enemies/wolf.lua` → `wolf`); `collect` pelo vault (`stone`, `wood`, `dark-wood`, `bog-moss`). O `analyze` cruza as defs com o mundo: dador sem `<DialogueNPC dialogue-id=…>`, marco de `visit` inexistente e alvo de `kill` que nenhum script de criatura produz saem como ⚠ (`audit::audit_quests`; salta em mundos sem nenhum NPC de diálogo) |
+| Quests & diálogo | `src/quests.rs`, `../Vael/quests/*.json` | 37 quests JSON, flow [E], QuestTracker. Schema: `id`/`npc`/`biome`/`title`/`lines_intro|progress|complete`/`objective{type: kill\|collect\|visit, target, count, radius}`/`rewards{gold,xp,items}`. Um `biome` em falta derruba o FICHEIRO inteiro (warn + skip), e um JSON que caia é silencioso — `test_fantasy_scenario_quests_are_loaded` e o audit cobrem a classe. Objetivo `visit` casa por NOME de entidade + `radius`; `kill` pelo nome do script da criatura (`enemies/wolf.lua` → `wolf`); `collect` pelo vault (`stone`, `wood`, `dark-wood`, `bog-moss`). O `analyze` cruza as defs com o mundo: dador sem `<DialogueNPC dialogue-id=…>`, marco de `visit` inexistente e alvo de `kill` que nenhum script de criatura produz saem como ⚠ (`audit::audit_quests`; salta em mundos sem nenhum NPC de diálogo) |
 | Cenários (peças de sítio) | `../Vael/world/scenes/*.xml` | Quatro sítios habitados, cada um com a sua quest: acampamento de peregrinos à boca do Ermo, posto dos escavadores na mesa do Alto de Vael, campo da última batalha à porta da Cidadela e covil dos contrabandistas na orla da floresta. Agrupados por `<Group name="scene.*">`, com `SpawnExclusion`, âncoras visitáveis (nomeadas para o objetivo `visit`) e um NPC dador `<DialogueNPC>` por peça |
 | Economia & menus | `src/economy.rs`, `src/menus.rs` | vault real + hotbar [1]/[2]; toasts, banner e loading screen. O modal [Q] e a loja passaram para a UI declarativa (`world/menu.xml`); `MenusOpen` é espelhado de `UiModalsOpen` |
-| Save/load | `src/save.rs` | JSON em `~/.local/share/viber/<mundo>.save.json` (`save.dir` do `config.yaml` sobrepõe; `<mundo>` = nome da pasta para `world.xml`, `<pasta>-<ficheiro>` para os outros XML — `qa-hud.xml` não pisa o save do `world.xml`); campos ausentes num save parcial mantêm o estado da sessão; [J]/[L] com um menu aberto, ou os botões Guardar/Carregar do separador Sistema (`viber.ui.action("save"\|"load")`) |
+| Save/load | `src/save.rs` | JSON em `~/.local/share/viber/<mundo>.save.json` (`save.dir` do `config.yaml` sobrepõe; `<mundo>` = nome da pasta para `world.xml`, `<pasta>-<ficheiro>` para os outros XML — `terrain.xml` não pisa o save do `world.xml`); campos ausentes num save parcial mantêm o estado da sessão; [J]/[L] com um menu aberto, ou os botões Guardar/Carregar do separador Sistema (`viber.ui.action("save"\|"load")`) |
 | RNG determinístico | `src/rng.rs` | SplitMix64 ÚNICO da engine ("mesma seed, mesmo mundo") — spawner/terreno/IA/clima; sequência congelada por golden test. `splitmix64` counter-style para o heightmap procedural |
 | Travel & wayfinding | `src/travel.rs` | A Nota [F], viagem rápida [G], registry de hostis (alimenta `viber.alive_in_region`) |
 | Mundo vivo | `src/worldsys.rs`, `src/ambient.rs`, `src/sky.rs`, `src/postfx.rs`, `src/animation.rs`, `src/music.rs` | DayCycle/Weather/WorldBorder/BiomeRegion como recursos; fog/tint/gestos de NPC/SFX; céu WGSL especializado por mundo; exposure/bloom/SSAO; clips glTF; BGM crossfade |
@@ -419,15 +419,18 @@ exposição física; `ambient.rs` usa a mesma escala para o fog se fundir com o
 horizonte, ver `sky.rs`). De noite o mundo físico fica ~6 stops abaixo do
 meio-cinza, o medidor satura no fundo do histograma e abre os +6 EV do MÁXIMO:
 a paleta noturna (azul-escuro ~0.04) ×64 = **frame branco** (medido
-2026-09-10: `qa-visual` às 23:00 → 235/237/242; o pântano do simple-rpg com
+2026-09-10: antigo mundo `qa-visual` (removido a 2026-11-12) às 23:00 →
+235/237/242; o pântano do simple-rpg com
 chuva idem). A `AutoExposureCompensationCurve` implementa
-`alvo(x) = −x` limitado a **`NIGHT_LIFT_CAP_EV` = 0.5 stops** abaixo de
-`NIGHT_LIFT_KNEE_EV` = 3 EV de luminância média, com rampa entre o joelho e o
-dobro (o shutter não dá degrau) — ou seja: o dia, o crepúsculo, a sombra funda
+`alvo(x) = −x` limitado a **`NIGHT_LIFT_CAP_EV` = 1.5 stops** (2026-10-21; era
+0.5 — 0.5 deixava a noite crua, sem as poças/tochas a POPAR) abaixo de
+`NIGHT_LIFT_KNEE_EV` = 3.0 EV de luminância média, com rampa curta até
+`NIGHT_LIFT_FULL_EV` = 3.25 (0,25 EV; o medidor persegue o alvo a ~1 EV/s, o
+degrau não se vê) — ou seja: o dia, o crepúsculo, a sombra funda
 e os interiores ficam EXACTAMENTE como eram (o alvo de sempre) e a noite fica
 presa no teto. Sem o joelho, o teto escurecia também a alvorada aprovada.
 Medido no simples-rpg (pântano, chuva 0.9): frame **127/255** com 2.0,
-**83/255** com 0.5 (noite seca) e 90/255 no `qa-raster` (chuva 0.9).
+**83/255** com 0.5 (noite seca) e 90/255 no antigo `qa-raster` (removido a 2026-11-12; chuva 0.9).
 `VIBER_NO_AECURVE=1` devolve a curva plana (A/B do branco da noite).
 O fog de distância e o volumétrico NÃO são a fonte do branco (removidos ao vivo,
 o frame muda ~1/255) — é a exposição.
@@ -443,9 +446,10 @@ god-rays** (`FogVolume`, `src/postfx.rs`) leva `FOG_VOLUME_NIGHT_ATTENUATION`
 (escala com o `day`) e fica **desligado à noite** — de noite nenhuma luz o
 acende (`light_attenuation = exp(−densidade × raio do AABB × (abs+scat))` ≈ 0,
 sol e lanternas incluídas) e ele só encobria a distância; no pântano levava
-`FOG_VOLUME_SWAMP_BONUS` extra, ou seja era o pior caso. Medido no `qa-raster`
-à chuva: o contraste da cena sobe de sd 3.2 para 4.7 (= a referência com
-`VIBER_NO_VOLUMETRICS=1`) e o frame de 89/95/103 para 93/103/117.
+`FOG_VOLUME_SWAMP_BONUS` extra, ou seja era o pior caso. Medido no antigo
+`qa-raster` (removido a 2026-11-12) à chuva: o contraste da cena sobe de sd
+3.2 para 4.7 (= a referência com `VIBER_NO_VOLUMETRICS=1`) e o frame de
+89/95/103 para 93/103/117.
 
 ### Probes regionais (`VIBER_PROBES`, `src/probes.rs`)
 
@@ -483,11 +487,11 @@ descoberto em :PORT (sessão: …)` no stderr, prefere a engine cujo mundo está
 debaixo do cwd e — como o `viber run --bridge` também registra o seu
 `engine.json` — encontra ATÉ engines lançadas fora de `session up`.
 
-**Várias engines vivas do mesmo checkout (agentes com `worlds/qa-*.xml`):** a
+**Várias engines vivas do mesmo checkout (agentes com mundos próprios):** a
 escolha implícita é um **ERRO** com a lista `:porta — mundo` — escolher a de
 porta mais baixa mandava comandos para a engine de outro agente, em silêncio.
 Aponta a TUA engine com `--world` (caminho do XML, nome de ficheiro ou stem —
-`viber debug --world qa-pontes lua '…'` resolve a porta pelo `engine.json` da
+`viber debug --world terrain lua '…'` resolve a porta pelo `engine.json` da
 sessão desse mundo e valida a identidade que a engine reporta no ping; registo
 stale → erro, não mutação do mundo errado), ou com `--port`, ou exporta
 `VIBER_BRIDGE_PORT`. `viber debug probe` é a exceção: com ambiguidade LISTA as
@@ -496,10 +500,10 @@ primeira porta LIVRE a partir de 15702 (a linha de arranque sugere o comando
 `--world` certo); `--bridge 15702` fixa a porta:
 
 ```bash
-viber run worlds/qa-pontes.xml --bridge &   # porta livre automática
+viber run worlds/terrain.xml --bridge &     # porta livre automática
 viber debug probe                           # bridge vivo? (lista engines se houver várias)
-viber debug --world qa-pontes probe         # aponta ESTA engine (stem do mundo)
-viber debug --world worlds/qa-pontes.xml screenshot -o shot.png
+viber debug --world terrain probe           # aponta ESTA engine (stem do mundo)
+viber debug --world worlds/terrain.xml screenshot -o shot.png
 viber debug screenshot -o shot.png          # captura da janela (1 engine viva = descobre sozinho)
 viber debug burst -o burst.png [--frames 4|9|16] [--skip N]   # N frames numa ÚNICA folha 4096²
 viber debug tree [--json]                   # entidades (como take_snapshot)
@@ -853,8 +857,7 @@ altura/profundidade ≤ 64 m, alturas em `[0, max-height]`; pedidos NaN/raio
 determinístico e o hash do mundo continuam a bater. O SPLAT continua o do
 autor (uma cratera na relva fica verde até um re-bake — follow-up), e o
 bridge chega às mesmas funções pela REPL (`viber debug lua
-'viber.terrain.crater(...)'`). QA em `worlds/qa-edicoes.xml` (+ script
-`worlds/scripts/qa-edicoes.lua`).
+'viber.terrain.crater(...)'`).
 
 ### Interações: alcance único e "o mais próximo ganha" (`src/interact.rs`)
 
@@ -1176,12 +1179,13 @@ fixos determinísticos (seed = posição do corpo; `src/terrain/shore_rocks.rs`)
 | `Bridge` | `path` (`"x z x z …"`, obrigatório — eixo do tabuleiro), `width` (6), `rise` (2 — camber acima da corda entre as duas margens), `thickness` (1.2 — espessura da laje; **< 2 m avisa**, uma laje mais fina que duas células do LOD0 desaparece nos níveis grosseiros), `style` (`stone` \| `natural`), `spans` (auto — número de arcos, só `stone`), `pier-width` (2.5), `parapet` (0.9 — 0 desliga), `clearance` (2 — folga exigida sob o tabuleiro; **reportada, nunca imposta**, e medida como o MAIOR vão que a travessia oferece, porque toda a ponte está enterrada nos encontros). Travessia volumétrica (`src/terrain/voxel/bridge.rs`): o tabuleiro é uma cadeia de caixas union no campo voxel, portanto o trimesh da coluna traz o collider e **o herói anda por cima**. `stone` acrescenta pilares assentes no chão, o intradorso do arco e o tímpano até ao tabuleiro; `natural` é uma cadeia de cones sem pilares nem guardas, grossa nas margens e fina no fecho. **Tudo aditivo, por regra**: nenhuma forma de ponte pode escavar o terreno que atravessa — encher-e-furar parecia mais simples e comia as paredes de um desfiladeiro em V. Um arco só abre onde há vão a abrir (o troço onde o tabuleiro está mesmo livre do chão), portanto uma ponte mais longa que a garganta não põe arcadas dentro da margem. **Não confundir com `<Road profile="bridge">`**: essa desenha um ribbon plano em `deck_y` e não tem collider nenhum. **Para travessias curtas de ESTRADA, prefere uma `<Composition>` de primitivas** (tabuleiro + rampas + parapeitos, `seat="none"` para fixar a cota, `texture-tile-size` igual ao da estrada): o sólido voxel fino degrada nos LODs grosseiros ("meia ponte") e as cabeças em degrau contra os pads de aproche criam quedas — caso real: a ponte norte do simple-rpg (ver `world/bridges/ponte-norte.xml`). O `<Bridge>` voxel fica para vãos de rocha/traçados orgânicos sem estrada em cima. Viber-only |
 | `RockFeatures` | `region` (`"minX minZ maxX maxZ"`, obrigatório), `seed` (0), `arches`/`caves`/`bridges` (0 — quantos semear de cada), `min-slope` (22) / `max-slope` (72) em graus, `min-drop` (5 — relevo mínimo na vizinhança do sítio), `spacing` (40 — passo da rede de candidatos E distância mínima entre features semeadas), `clear-of-roads` (10), `min-rise` (2.5 — gate de pé de montanha: o chão tem de SUBIR ≥ isto na direção do túnel). Semeia arcos/grutas/pontes numa região e **resolve em specs `<Arch>`/`<Cave>`/`<Bridge>` normais** no bootstrap (`src/terrain/voxel/scatter.rs`) — nada a jusante vê uma feature nova. Determinista por construção (rede jitterada com `hash01`, sem RNG): mesma seed + mesmo terreno ⇒ mesmas rochas (DENTRO de uma versão da engine — gates novos mudam colocações). **Guards ao SÍTIO e ao PATH inteiro** (todos os tipos): água (`is_near` com folga do raio), corredor de estradas, `CliffMask` (paredes), pads (`<TerrainPad>`) e discos das features JÁ no mundo — autorais (caves/arcos/pontes escritos à mão) e as semeadas por campos irmãos; as rejeições contam-se por motivo e saem UMA linha por campo no log de arranque (`viber debug logs`). As **caves** são o caso apertado (subtraem!): só nascem no pé de encostas (`min-rise`) e o path reamostrado a 4 m nunca pode mergulhar abaixo da boca −1 m nem subir menos que `max(min-rise, depth×0.5)` — as duas bocas abrem em subida, nunca uma vala em plano. Pontes dispensam a banda de declive (o sítio é o fundo do vão) mas os abutments têm de estar secos e o VÃO não pode cruzar parede/pad/feature (água e estrada pode — é para isso que existe). `analyze` conta o campo, não as features: o heightfield ainda não existe no parse. Viber-only |
 | `Road` | `path` (obrigatório, ≥2 pontos — sem ele, ou com `width` ≤ 0, é erro do mundo), `width` (2), `profile` (artery), `flatten` (true; `false` = trilho decal sem carve), `flatten-falloff` (8), `flatten-window` (56), `flatten-max-grade` (0.22), `flatten-shoulder` (0), `platform-sink` (0.12), `smoothing` (2), `closed` (false), `texture-url`, `texture-scale` (6), `edge-feather` (1.0); aceites sem efeito: `edge-noise`, `end-feather-start/end`, `normal-map-url` |
-| `GroundDecal` | `at` (`"x z"`), `radius` **ou** `size` (`"w d"`, extensão total) ou `half-size`, `feather` (2.5 — banda de alpha para fora da borda, em metros), `noise` (0.1 — ondulação da borda como fração do raio), `seed` (ausente = derivado da posição), `texture`/`texture-url`, `texture-scale` (9, metros por repetição — UV **world-space**, igual às ribbons), `base-color`, `roughness`, `lift` (0.04). Mancha de chão drapejada: anéis concêntricos amostrados no heightfield (não um quad plano), borda ondulada por harmónicos periódicos e alpha 1→0 em smootherstep. **Puramente visual** — nunca toca no heightfield. Substitui os `<Plane>` decal (quadrados duros a `y` fixo que cortam/flutuam no terreno) |
+| `GroundDecal` | `at` (`"x z"`), `radius` **ou** `size` (`"w d"`, extensão total) ou `half-size`, `feather` (2.5 — banda de alpha para fora da borda, em metros), `noise` (0.1 — ondulação da borda como fração do raio), `seed` (ausente = derivado da posição), `texture`/`texture-url`, `texture-scale` (9, metros por repetição — UV **world-space**, igual às ribbons), `base-color`, `roughness`, `lift` (0.04 — **ponto de partida**, ver empilhamento). Mancha de chão drapejada: anéis concêntricos amostrados no heightfield (não um quad plano), borda ondulada por harmónicos periódicos e alpha 1→0 em smootherstep. **Puramente visual** — nunca toca no heightfield. Substitui os `<Plane>` decal (quadrados duros a `y` fixo que cortam/flutuam no terreno). **Empilhamento determinístico** (`decal::stack_decal_lifts`): um decal sobreposto a outro de núcleo maior sobe `depth` degraus repartidos entre `DECAL_LIFT` e a ribbon, por isso o piso da praça fica em baixo e a cova da árvore / mancha de uso / apedro do mercado por cima — dois decals coplanares com triangulações diferentes deixam de brigar no depth |
 | `RoadNetwork` | `default-profile` (artery), `default-width` (4), `crossing-flare` (false — alarga ×1.45 perto de ways com grau ≥3), `flatten`, `flatten-falloff`, `flatten-window`, `flatten-max-grade`, `texture-url`, `texture-scale` (9) + filhos `Way id xz [width]` e `Segment a b [via] [width] [profile]` (1 estrada por segmento, width interpolada; `Way` com id repetido e `Segment` para uma way desconhecida avisam; `profile="bridge"` salta o carve e desenha deck plano; `bridge-url`/`bridge-lod*`/`bridge-native-span` aceites sem efeito até glTF) |
 
 **Ordem de carve (contrato original, `features.rs`):** Pads → Lakes → Rivers →
 Roads (arteriais primeiro, **pontes por último**) → decals (visuais, leem o
-heightfield final) → discos de junção. Cliffs NÃO carvam — são sólidos no
+heightfield final; `stack_decal_lifts` empilha os que se sobrepõem) → discos de
+junção. Cliffs NÃO carvam — são sólidos no
 campo voxel (`voxel/cliff.rs`), construídos depois do carve. Um disco de junção coberto por um
 `GroundDecal` é **suprimido**: empilhar os dois punha duas camadas de cobble
 com alpha a poucos centímetros uma da outra sobre os mesmos UVs world-space —

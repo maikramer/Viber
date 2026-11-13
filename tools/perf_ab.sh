@@ -2,7 +2,7 @@
 # A/B de performance por gate de env, com `session up`/`down` (protocolo de QA).
 #
 # Uso: tools/perf_ab.sh <mundo.xml> <VAR> <valorA> <valorB> [rounds]
-# Ex.: tools/perf_ab.sh worlds/qa-visual.xml VIBER_POINT_CONTACT_SHADOWS 1 0
+# Ex.: tools/perf_ab.sh worlds/terrain.xml VIBER_POINT_CONTACT_SHADOWS 1 0
 #
 # Cada braço sobe a engine partilhada com `VAR=valor`, espera o bridge e o
 # terreno, deixa assentar, lê `prof --samples`, grava 5 frames seguidos e desce.

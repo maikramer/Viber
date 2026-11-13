@@ -190,7 +190,7 @@ Destaque para o que não existia noutra engine de QA:
 ## Receitas novas (o fluxo do agente)
 
 ```bash
-viber session up && viber session claim --owner qa-bridge
+viber session up && viber session claim --owner demo
 # descobrir
 viber debug api --grep nav
 viber debug engines
@@ -221,7 +221,6 @@ viber debug screenshot -o gold.png --delay-ms 2000
 viber debug step 3 && viber debug burst -o b.png --frames 9 --stats
 viber debug screenshot -o gold.png && viber debug diff gold.png novo.png --threshold 0.5
 viber debug watch --lua 'viber.debug.player().x' --hz 20 --for 3 --csv
-viber debug test worlds/qa-bridge/qa/sanity.lua
 viber debug events --since 0
-viber session release --owner qa-bridge
+viber session release --owner demo
 ```

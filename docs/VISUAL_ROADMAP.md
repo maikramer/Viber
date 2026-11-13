@@ -138,7 +138,7 @@ Derivas de docs a corrigir no mesmo passe: AGENTS.md ainda diz `layers`
    ondas), água auto-selecionada por cota (`TerrainRuntime.water`), Fresnel
    Schlick, sem hit → mantém o espelho do IBL. Gate `VIBER_WATER_SSR=1`;
    harness naga em `tests/water_ssr_shader.rs` (layout 288/160 B é contrato).
-   Falta shot de aceitação num mundo com céu (qa-agua não tem `<Sky>`) + perf.
+   Falta shot de aceitação num mundo com céu + perf.
    Refração real do fundo (sample da cor no depth, não do corpo) fica em
    aberto. Não usar o SSR do Bevy (deferred × materiais custom).
    **7-RT (Fase A, 2026-09-09) — REMOVIDO a pedido do autor (2026-09-10).**

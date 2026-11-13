@@ -238,8 +238,12 @@ pub fn apply_features(grid: &mut BrushGrid, features: &TerrainFeatures) -> Featu
         }
     }
     // 4. Ground decals — visual only, so they run after every carve and read
-    //    the final heightfield.
+    //    the final heightfield. Overlapping patches (a tree pit on the plaza
+    //    floor, a wear trail on the market apron) would be coplanar at the
+    //    same lift and their meshes do not share a triangulation: stack them
+    //    so the smaller patch wins deterministically instead of z-fighting.
     result.decals = features.decals.clone();
+    super::decal::stack_decal_lifts(&mut result.decals);
 
     // 5. Fusion discs, minus the ones a decal already hides. Stacking a disc
     //    under a plaza floor put two alpha-blended cobble layers at almost
@@ -629,6 +633,49 @@ mod tests {
                 ..TerrainFeatures::default()
             }
             .is_empty()
+        );
+    }
+
+    /// Overlapping decals come out of `apply_features` already stacked: the
+    /// runtime spawns them as they are, so this is the only place the ordering
+    /// is decided (and the only one a headless test can check).
+    #[test]
+    fn test_overlapping_decals_are_stacked_by_area() {
+        let mut grid = test_grid();
+        let floor = GroundDecalSpec {
+            at: Vec2::ZERO,
+            half_extent: Vec2::splat(17.0),
+            feather: 3.5,
+            noise: 0.11,
+            ..GroundDecalSpec::default()
+        };
+        let pit = GroundDecalSpec {
+            at: Vec2::new(-13.0, 11.0),
+            half_extent: Vec2::splat(2.8),
+            feather: 1.2,
+            noise: 0.2,
+            ..GroundDecalSpec::default()
+        };
+        let result = apply_features(
+            &mut grid,
+            &TerrainFeatures {
+                decals: vec![floor.clone(), pit],
+                ..TerrainFeatures::default()
+            },
+        );
+        assert_eq!(result.decals[0].lift, floor.lift, "the floor keeps 0.04");
+        assert!(
+            result.decals[1].lift > result.decals[0].lift,
+            "the pit must sit above the floor: {:?}",
+            result
+                .decals
+                .iter()
+                .map(|d| d.lift)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result.decals[1].lift < crate::terrain::roads::RIBBON_LIFT,
+            "and still under the road ribbon"
         );
     }
 }

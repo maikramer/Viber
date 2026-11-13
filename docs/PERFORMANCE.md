@@ -1,5 +1,9 @@
 # Performance — o que domina o frame no Viber
 
+> Os mundos `worlds/qa-*.xml` foram removidos a 2026-11-12. As medições que os
+> referenciam ficam como histórico; para reproduzir, usa outro mundo com as
+> mesmas características.
+
 ## Profiling para agentes pelo CLI (2026-10-21)
 
 O painel **P** continua a ser a leitura humana, mas o CLI cobre o ciclo
