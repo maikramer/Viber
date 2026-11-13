@@ -1773,19 +1773,48 @@ fn session_up(world: Option<&Path>, port: Option<u16>) -> Result<()> {
             }
             let log_file = std::fs::File::create(&log)
                 .with_context(|| format!("a criar log {}", log.display()))?;
-            let exe = std::env::current_exe()?;
+            // Binário da sessão: o JOGO quando o projeto o declara
+            // (`VAEL_BIN`, o mesmo env do CLI `viber` novo, que o define a
+            // partir de `vael_binary()`). A QA tem de exercitar o jogo, não
+            // a engine nua: com a engine nua as APIs do jogo (`viber.vael.*`
+            // no Vael) nunca existem e os scripts falham ao arranque. O
+            // argv adapta-se — o binário do jogo recebe `<mundo> --bridge …`
+            // direto, sem o `run`/`--no-cargo` da engine.
+            let game_bin = match std::env::var_os("VAEL_BIN") {
+                Some(raw) => {
+                    let bin = PathBuf::from(raw);
+                    if !bin.is_file() {
+                        bail!(
+                            "VAEL_BIN={} não existe — constrói o jogo primeiro",
+                            bin.display()
+                        );
+                    }
+                    Some(bin)
+                }
+                None => None,
+            };
+            let exe = match &game_bin {
+                Some(bin) => bin.clone(),
+                None => std::env::current_exe()?,
+            };
+            let mut argv: Vec<std::ffi::OsString> = Vec::new();
+            if game_bin.is_none() {
+                argv.push("run".into());
+            }
+            argv.push(world_abs.clone().into_os_string());
+            if game_bin.is_none() {
+                argv.push("--no-cargo".into());
+            }
+            argv.push("--bridge".into());
+            argv.push(attempt_port.to_string().into());
             println!(
                 "viber session: a arrancar {} --bridge {} (log: {})",
                 world_abs.display(),
                 attempt_port,
                 log.display()
             );
-            let mut child = std::process::Command::new(exe)
-                .arg("run")
-                .arg(&world_abs)
-                .arg("--no-cargo")
-                .arg("--bridge")
-                .arg(attempt_port.to_string())
+            let mut child = std::process::Command::new(&exe)
+                .args(&argv)
                 .stdin(std::process::Stdio::null())
                 .stdout(log_file.try_clone()?)
                 .stderr(log_file)
