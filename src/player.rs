@@ -15,7 +15,10 @@ use crate::recipes::spawn::OrbitCamera;
 use crate::terrain::runtime::TerrainRuntime;
 
 // Contratos extraídos (o TypePath `viber::player` fica congelado no core).
-pub use bevy_engine_core::{BASE_SPEED, Player, TeleportSettle};
+pub use bevy_engine_core::{
+    BASE_SPEED, GROUND_PROBE, Player, STEP_MIN_SPEED, STEP_STRIDE_M, TeleportSettle, footstep_due,
+    step_interval,
+};
 
 /// Gravity magnitude (m/s²) — `DEFAULT_GRAVITY = -60` in the original
 /// physics utils; the jump velocity derives from it.
@@ -28,7 +31,6 @@ pub const SIDE_MOVE_FACTOR: f32 = 0.6;
 ///
 /// Tem de exceder a skin do character controller (0.02): um herói em repouso
 /// assenta a skin acima do collider, e a sonda tem de começar em AR.
-pub const GROUND_PROBE: f32 = 0.05;
 /// Camera yaw turn rate while steering with A/D (rad/s, `CAMERA_TURN_SPEED`). `OrbitCamera::yaw_deg` is in degrees — convert
 /// before integrating.
 pub const CAMERA_TURN_SPEED: f32 = 2.5;
@@ -239,41 +241,6 @@ pub const DECEL_TAU: f32 = 0.14;
 pub const AIR_TAU: f32 = 0.3;
 
 // ── passos (passe de juice r1) ──────────────────────────────────────────
-
-/// Comprimento de passada (m): o intervalo dos passos deriva da velocidade
-/// REAL (o low-pass que o movimento já calcula) — andar a 4 m/s soa a
-/// ~0.55 s, sprint a 6 m/s a ~0.37 s. Passada constante, cadência variável.
-pub const STEP_STRIDE_M: f32 = 2.2;
-/// Velocidade mínima (m/s) para haver passos — parado ou a roçar o chão
-/// não há som.
-pub const STEP_MIN_SPEED: f32 = 0.8;
-
-/// Intervalo entre passos a `speed` m/s (`None` = sem passos).
-pub fn step_interval(speed: f32) -> Option<f32> {
-    if !speed.is_finite() || speed < STEP_MIN_SPEED {
-        return None;
-    }
-    Some(STEP_STRIDE_M / speed)
-}
-
-/// Decisão de um passo (pura; o sistema só escreve o SFX): decrementa o
-/// timer e devolve `Some(intervalo)` no frame em que o passo DEVE soar.
-/// Parado/airborne reinicia o timer — o 1.º passo ao arrancar soa logo.
-pub fn footstep_due(step_timer: &mut f32, grounded: bool, speed: f32, dt: f32) -> Option<f32> {
-    *step_timer -= dt;
-    match step_interval(speed).filter(|_| grounded) {
-        Some(interval) if *step_timer <= 0.0 => {
-            *step_timer = interval;
-            Some(interval)
-        }
-        _ => {
-            if !grounded || speed < STEP_MIN_SPEED {
-                *step_timer = 0.0;
-            }
-            None
-        }
-    }
-}
 
 /// Smoothed-velocity time constant for the current motion state.
 pub fn movement_tau(grounded: bool, input_active: bool) -> f32 {
