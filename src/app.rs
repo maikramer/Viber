@@ -114,6 +114,10 @@ pub struct AppOptions {
     /// Scripts de comportamento: host Luau da engine ([`ScriptsMode::Compat`])
     /// ou nenhum ([`ScriptsMode::Off`]).
     pub scripts: ScriptsMode,
+    /// Save/load do jogo é externo: a engine não instala o `SavePlugin`
+    /// (o jogo trata dos slots e do envelope). `SaveRequest`, `SaveDir` e
+    /// `WorldSaveKey` continuam disponíveis como ponte Lua.
+    pub external_save: bool,
     /// UI declarativa (`ui::UiPlugin`) e o que depende dela (menus do HUD).
     pub ui: bool,
     /// Profiler (overlay F3, recursos e âncoras de render). O `timed(...)` dos
@@ -148,6 +152,7 @@ impl Default for AppOptions {
             ai: AiMode::Full,
             player_camera: true,
             scripts: ScriptsMode::Compat,
+            external_save: false,
             ui: true,
             profiler: true,
             ecs_mirror: true,
@@ -270,6 +275,7 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
         ai,
         player_camera,
         scripts,
+        external_save,
         ui,
         profiler,
         ecs_mirror,
@@ -782,7 +788,18 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     app.add_plugins(menus::MenusPlugin);
     // Save/load & opções: serviço de ENGINE (grava `world_kv`/posição/vitais
     // em qualquer preset; os campos RPG só entram quando os recursos existem).
-    app.add_plugins(save::SavePlugin);
+    // Um jogo com save próprio (`external_save`) fica só com os recursos e o
+    // importador de recortes de terreno; os pedidos são consumidos pelo jogo.
+    if external_save {
+        app.init_resource::<save::SaveRequest>()
+            .init_resource::<save::PendingSavePatches>()
+            .add_systems(
+                bevy::app::Last,
+                save::apply_pending_save_patches.after(crate::scene_loader::drive_scene_loader),
+            );
+    } else {
+        app.add_plugins(save::SavePlugin);
+    }
     // Props em ossos (`viber.attach`): primitiva genérica (espada, volante…).
     app.add_plugins(attachment::AttachmentPlugin);
     // FX puros para mundos SEM o preset RPG: o CombatPlugin registra o kick
