@@ -14,6 +14,9 @@ use crate::camera::low_pass_factor;
 use crate::recipes::spawn::OrbitCamera;
 use crate::terrain::runtime::TerrainRuntime;
 
+// Contratos extraídos (o TypePath `viber::player` fica congelado no core).
+pub use bevy_engine_core::{BASE_SPEED, Player, TeleportSettle};
+
 /// Gravity magnitude (m/s²) — `DEFAULT_GRAVITY = -60` in the original
 /// physics utils; the jump velocity derives from it.
 pub const GRAVITY: f32 = 60.0;
@@ -40,24 +43,6 @@ pub const CAMERA_TURN_SPEED: f32 = 2.5;
 /// teleport. 55 m/s is well past any reachable jump/fall speed in the game and
 /// still lands inside one 1 m voxel at 60 fps.
 pub const TERMINAL_VELOCITY: f32 = 55.0;
-
-/// Marca um herói acabado de teleportar: enquanto existe, o
-/// [`player_movement`] segura-o na superfície analítica mesmo que o
-/// `TerrainCollisionStatus` já diga "pronto" — o collider da coluna de
-/// destino pode demorar alguns frames a assar e uma queda de 40 m/s fura-o
-/// antes disso.
-#[derive(Debug, Component, Reflect)]
-#[reflect(Component, Default)]
-pub struct TeleportSettle {
-    /// Frames restantes de tutela.
-    pub frames: u8,
-}
-
-impl Default for TeleportSettle {
-    fn default() -> Self {
-        Self { frames: 30 }
-    }
-}
 
 /// Y de aterragem para um teleporte: a superfície SÓLIDA sob o destino
 /// (`surface_below`, que respeita grutas e overhangs), com o topo do mundo
@@ -335,71 +320,6 @@ pub fn gravity_applies(grounded: bool, vel_y: f32) -> bool {
     !grounded || vel_y > 0.0
 }
 
-/// The controllable hero (`PlayerController` subset).
-#[derive(Debug, Component, Reflect)]
-#[reflect(Component, Default)]
-pub struct Player {
-    /// Walk speed in m/s (default 4).
-    pub speed: f32,
-    /// Sprint multiplier when Shift is held (default 1.5).
-    pub sprint_multiplier: f32,
-    /// Jump apex height in meters (default 2.3).
-    pub jump_height: f32,
-    /// Facing turn rate in rad/s (default 10).
-    pub rotation_speed: f32,
-    /// Vertical velocity (jump / gravity integration).
-    pub vel_y: f32,
-    /// Smoothed horizontal velocity (m/s) — carries the inertia/drag feel;
-    /// the auto-camera reads it for the movement heading.
-    pub vel_x: f32,
-    pub vel_z: f32,
-    /// True while standing on the terrain surface.
-    pub grounded: bool,
-    /// Jump allowed again once the cooldown elapses (`canJump`).
-    pub can_jump: bool,
-    /// True between the jump impulse and the next landing (`isJumping`;
-    /// gates landing momentum reset).
-    pub is_jumping: bool,
-    /// Seconds left before [`Self::can_jump`] is restored.
-    pub jump_cooldown: f32,
-    /// Time of the last grounded frame — drives coyote time.
-    pub last_grounded_time: f32,
-    /// Time of the last jump press — drives the input buffer.
-    pub jump_buffer_time: f32,
-    /// Time of the last A/D steering frame — the auto-camera hands control
-    /// back to the player for a grace period after manual steering.
-    pub last_steer_time: f32,
-    /// Time of the last frame the hero was actually moving (speed above the
-    /// walk gate) — starts at +∞ so the camera's idle settle only engages
-    /// after the character has moved and then stopped.
-    pub last_moving_time: f32,
-    /// Timer dos passos (s até ao próximo SFX; ver [`footstep_due`]).
-    pub step_timer: f32,
-}
-
-impl Default for Player {
-    fn default() -> Self {
-        Self {
-            speed: BASE_SPEED,
-            sprint_multiplier: 1.5,
-            jump_height: 2.3,
-            rotation_speed: 10.0,
-            vel_y: 0.0,
-            vel_x: 0.0,
-            vel_z: 0.0,
-            grounded: true,
-            can_jump: true,
-            is_jumping: false,
-            jump_cooldown: 0.0,
-            last_grounded_time: f32::NEG_INFINITY,
-            jump_buffer_time: f32::NEG_INFINITY,
-            last_steer_time: f32::NEG_INFINITY,
-            last_moving_time: f32::INFINITY,
-            step_timer: 0.0,
-        }
-    }
-}
-
 /// Jump velocity that reaches `jump_height` under [`GRAVITY`]:
 /// `sqrt(2 · g · h)` (`calculateJumpVelocity`).
 pub fn jump_velocity(jump_height: f32) -> f32 {
@@ -439,7 +359,6 @@ pub fn process_input(forward: f32, strafe: f32, yaw_deg: f32) -> Vec3 {
 }
 
 /// Base walking speed of the hero (m/s).
-pub const BASE_SPEED: f32 = 4.0;
 
 /// Input magnitude — the reference re-applies `min(1, hypot(forward, strafe))`
 /// after normalizing, so A/D alone (strafe 0.6) nudges at 60 % speed.
