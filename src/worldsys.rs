@@ -8,6 +8,10 @@ use bevy::math::Affine3A;
 use bevy::math::Quat;
 use bevy::math::Vec3;
 use bevy::prelude::*;
+pub use bevy_engine_core::{
+    INTERIOR_CAMERA_DISTANCE, INTERIOR_CAMERA_PITCH_DEG, INTERIOR_FLOOR_Y, InteriorLighting,
+    InteriorSceneConfig, WorldBorderConfig,
+};
 
 /// Como o `<DayCycle>` conduz o VISUAL (sol, céu, névoa, grade).
 ///
@@ -467,15 +471,6 @@ pub struct BiomeRegions {
     pub list: Vec<BiomeRegionData>,
 }
 
-/// `<WorldBorder>` config.
-#[derive(Debug, Clone, Resource, Reflect)]
-#[reflect(Resource)]
-pub struct WorldBorderConfig {
-    pub radius: f32,
-    pub warn_seconds: f32,
-    pub margin: f32,
-}
-
 /// Generic engine config element kept as raw data.
 #[derive(Debug, Clone, Resource, Reflect)]
 #[reflect(Resource)]
@@ -534,59 +529,6 @@ pub struct PendingWorldSystems {
     pub interior_scene: Option<InteriorSceneConfig>,
     pub biomes: Vec<BiomeRegionData>,
     pub configs: Vec<EngineConfigData>,
-}
-
-/// `<InteriorScene at="x z" size="w d">` — uma cena de interior declarada
-/// como BOLSA, fora da área do mapa.
-///
-/// PORQUÊ: os ambientes internos não vivem no mundo, vivem noutro sítio. Se
-/// esse sítio for dentro do campo do heightmap, o mundo inteiro continua a
-/// mexer lá dentro — a cota do terreno atravessa o soalho, a névoa e a tinta
-/// do bioma entram na sala, chove dentro de casa e a `WorldBorder` devolve o
-/// herói ao vale a meio da visita. A bolsa é a declaração que diz à engine
-/// "aqui não há mundo": o retângulo é isento do clamp de fronteira, trata-se
-/// como bioma nenhum (névoa/tinta/exposição neutras) e não chove.
-///
-/// O sítio escolhido é FORA da pegada do heightmap (`|x|` ou `|z|` >
-/// `world_size/2`), onde o terreno já não gera colunas nem colliders — ver
-/// `TerrainRuntime::in_field`. A distância faz o resto: conteúdo a >2 km não
-/// entra em render-distance, em cull-distance nem em raio de ativação.
-#[derive(Debug, Clone, Copy, PartialEq, bevy::prelude::Resource, bevy::prelude::Reflect)]
-#[reflect(Resource)]
-pub struct InteriorSceneConfig {
-    /// Canto mínimo do retângulo (XZ, metros).
-    pub min: [f32; 2],
-    /// Canto máximo do retângulo (XZ, metros).
-    pub max: [f32; 2],
-    /// Tamanho de uma SALA dentro da bolsa (XZ, metros) — a grelha que a
-    /// câmara de interior usa para enquadrar uma sala de cada vez, à maneira
-    /// dos JRPG de 16 bits (a câmara salta de sala em sala, não segue o
-    /// herói). `[0, 0]` = a bolsa inteira é uma sala só.
-    pub room_size: [f32; 2],
-    /// Distância da câmara de interior (m).
-    pub camera_distance: f32,
-    /// Inclinação da câmara de interior (graus, 90 = a pique).
-    pub camera_pitch_deg: f32,
-    /// Azimute FIXO da câmara de interior (graus).
-    pub camera_yaw_deg: f32,
-    /// Origem da grelha de salas (XZ, m) — o CENTRO da sala (0,0). As salas
-    /// ficam nos NÓS da grelha (`origem + k × room_size`), não no meio das
-    /// células; sem isto o enquadramento saía deslocado meia sala.
-    pub room_origin: [f32; 2],
-}
-
-/// Luz de INTERIOR: dentro da bolsa o ciclo dia/noite não manda.
-///
-/// As salas não têm telhado (é assim que a câmara de sala as lê), portanto de
-/// noite ficavam à luz da lua — uma divisão fechada a escurecer com o relógio
-/// do mundo lá fora não faz sentido nenhum e tirava a leitura toda (pedido do
-/// utilizador 2026-09-13: "desligar o escurecimento da noite, deixar só luz do
-/// ambiente"). Enquanto o herói está na bolsa: ambiente FIXO e tint de dia.
-#[derive(Debug, Resource, Default, Clone, Copy, Reflect)]
-#[reflect(Resource)]
-pub struct InteriorLighting {
-    /// O herói está dentro de uma bolsa de interior.
-    pub active: bool,
 }
 
 /// Intensidade do env map (IBL) dentro de um interior.
@@ -649,7 +591,6 @@ pub const INTERIOR_SUN_ELEVATION_DEG: f32 = 45.0;
 /// As salas são ilhas sem terreno por baixo: sem este piso, sair do soalho
 /// (pela porta, por um vão) era cair para sempre. A laje do gerador está a
 /// 0,12 e o herói assenta a 0,6.
-pub const INTERIOR_FLOOR_Y: f32 = 0.6;
 
 /// Brilho do ambiente de interior (lux) — a sala inteira legível sem sol.
 ///
@@ -688,65 +629,6 @@ pub fn interior_lighting_drive(
         _ => false,
     };
     state.active = inside;
-}
-
-/// Distância por omissão da câmara de interior (m) — a sala inteira no ecrã.
-pub const INTERIOR_CAMERA_DISTANCE: f32 = 22.0;
-/// Inclinação por omissão (graus): alto o suficiente para ler a planta da
-/// sala, baixo o suficiente para as paredes e os NPCs terem volume.
-pub const INTERIOR_CAMERA_PITCH_DEG: f32 = 58.0;
-
-impl Default for InteriorSceneConfig {
-    fn default() -> Self {
-        Self {
-            min: [0.0, 0.0],
-            max: [0.0, 0.0],
-            room_size: [0.0, 0.0],
-            camera_distance: INTERIOR_CAMERA_DISTANCE,
-            camera_pitch_deg: INTERIOR_CAMERA_PITCH_DEG,
-            camera_yaw_deg: 0.0,
-            room_origin: [0.0, 0.0],
-        }
-    }
-}
-
-impl InteriorSceneConfig {
-    pub fn contains(&self, x: f32, z: f32) -> bool {
-        x >= self.min[0] && x <= self.max[0] && z >= self.min[1] && z <= self.max[1]
-    }
-
-    /// Centro da SALA que contém `(x, z)` — o ponto que a câmara de interior
-    /// enquadra. Sem `room_size` autorado, é o centro da bolsa.
-    ///
-    /// A quantização é o que dá o "ecrã por sala": o alvo só muda quando o
-    /// herói atravessa a fronteira da célula, e aí a câmara SALTA para a sala
-    /// nova em vez de o seguir passo a passo.
-    pub fn room_center(&self, x: f32, z: f32) -> [f32; 2] {
-        let center_of = |min: f32, max: f32, origin: f32, p: f32, step: f32| {
-            if step <= 0.0 {
-                return 0.5 * (min + max);
-            }
-            // Nó MAIS PRÓXIMO da grelha: as salas estão em `origem + k·step`.
-            let k = ((p - origin) / step).round();
-            (origin + k * step).clamp(min, max)
-        };
-        [
-            center_of(
-                self.min[0],
-                self.max[0],
-                self.room_origin[0],
-                x,
-                self.room_size[0],
-            ),
-            center_of(
-                self.min[1],
-                self.max[1],
-                self.room_origin[1],
-                z,
-                self.room_size[1],
-            ),
-        ]
-    }
 }
 
 impl PendingWorldSystems {
