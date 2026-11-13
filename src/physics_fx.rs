@@ -15,105 +15,13 @@
 
 use bevy::prelude::*;
 
+pub use bevy_engine_core::{
+    FALL_ANGLE_DEG, FALL_DURATION, Falling, KNOCKBACK_DECAY, KNOCKBACK_EPSILON, Knockback,
+    fall_angle, fall_rotation, knockback_after, knockback_decay_factor, knockback_travel_factor,
+    push_velocity, radial_strength,
+};
 use crate::profiler::{Group, timed};
 use crate::terrain::runtime::TerrainRuntime;
-
-/// Decaimento exponencial do knockback (por segundo).
-pub const KNOCKBACK_DECAY: f32 = 6.0;
-/// Velocidade mínima abaixo da qual o knockback termina.
-pub const KNOCKBACK_EPSILON: f32 = 0.05;
-/// Duração da queda de um destrutível (s).
-pub const FALL_DURATION: f32 = 0.9;
-/// Ângulo total da queda (graus).
-pub const FALL_ANGLE_DEG: f32 = 88.0;
-
-// ── componentes ─────────────────────────────────────────────────────────
-
-/// Velocidade horizontal residual de um impacto (m/s).
-#[derive(Debug, Clone, Component, Reflect)]
-#[reflect(Component)]
-pub struct Knockback {
-    pub velocity: Vec3,
-}
-
-/// Destrutível a tombar (`break-style: fall`).
-#[derive(Debug, Clone, Component, Reflect)]
-#[reflect(Component)]
-pub struct Falling {
-    pub axis: Vec3,
-    pub timer: f32,
-    /// Orientação no momento da queda — composta com o tombamento para o
-    /// prop não "popear" para identidade (perdia o yaw autoral/random-yaw).
-    pub initial: Quat,
-}
-
-// ── lógica pura (testada) ───────────────────────────────────────────────
-
-/// Velocidade de knockback a partir da direção (normalizada internamente).
-pub fn knockback_after(direction: Vec3, strength: f32) -> Knockback {
-    let mut dir = direction;
-    dir.y = 0.0;
-    let flat = dir.normalize_or_zero();
-    Knockback {
-        velocity: flat * strength,
-    }
-}
-
-/// Fração da velocidade que sobrevive a um passo `dt` do decaimento
-/// exponencial: `e^(−k·dt)`.
-pub fn knockback_decay_factor(dt: f32) -> f32 {
-    if KNOCKBACK_DECAY > 0.0 {
-        (-KNOCKBACK_DECAY * dt).exp()
-    } else {
-        1.0
-    }
-}
-
-/// Fator de deslocamento (s) da integral EXATA do decaimento num passo `dt`:
-/// `(1 − e^(−k·dt)) / k`. Multiplicado pela velocidade, dá os metros andados
-/// nesse passo — independente da divisão do tempo.
-pub fn knockback_travel_factor(dt: f32) -> f32 {
-    if KNOCKBACK_DECAY > 0.0 {
-        (1.0 - knockback_decay_factor(dt)) / KNOCKBACK_DECAY
-    } else {
-        dt
-    }
-}
-
-/// Velocidade inicial de knockback que percorre `displacement` (XZ) até
-/// parar: com o decaimento linear `v *= 1 − k·dt`, a distância total é
-/// ≈ v₀/k — o dash pede metros, não m/s.
-pub fn push_velocity(displacement: Vec3) -> Vec3 {
-    displacement.with_y(0.0) * KNOCKBACK_DECAY
-}
-
-/// Tombamento de `angle_deg` em torno de `axis`. Eixo nulo (herói em cima do
-/// tronco) cai para +X: `from_axis_angle(ZERO, a)` dá um quaternião NÃO
-/// unitário, que no `Transform` encolhia o prop (a meio a 90°) em vez de o
-/// rodar.
-pub fn fall_rotation(axis: Vec3, angle_deg: f32) -> Quat {
-    let axis = axis.try_normalize().unwrap_or(Vec3::X);
-    Quat::from_axis_angle(axis, angle_deg.to_radians())
-}
-
-/// Ângulo de queda (graus) no instante `t` de uma queda de `duration`.
-pub fn fall_angle(t: f32, duration: f32) -> f32 {
-    let phase = (t / duration).clamp(0.0, 1.0);
-    // ease-in (acelera ao cair)
-    FALL_ANGLE_DEG * phase * phase
-}
-
-/// Força radial com falloff linear (igual às bombas).
-///
-/// `radius <= 0` (ou `distance` não finito) não tem disco: devolve `None`.
-/// Sem o guarda a divisão dava `NaN` (ou um raio NEGATIVO espelhava a força
-/// para fora do centro) — e o `NaN` seguia para o knockback.
-pub fn radial_strength(distance: f32, radius: f32, strength: f32) -> Option<f32> {
-    if radius.is_nan() || radius <= 0.0 || !distance.is_finite() || distance > radius {
-        return None;
-    }
-    Some(strength * (1.0 - 0.6 * (distance / radius)))
-}
 
 // ── sistemas ────────────────────────────────────────────────────────────
 
