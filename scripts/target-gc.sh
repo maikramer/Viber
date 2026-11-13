@@ -37,6 +37,10 @@ units="viber"
 for f in "$checkout"/tests/*.rs; do
   [[ -e "$f" ]] && units="$units|$(basename "$f" .rs)"
 done
+# O target é partilhado com o jogo (o `CARGO_TARGET_DIR` do Vael aponta
+# cá): as unidades do workspace do Vael também acumulam gerações e entram
+# na varredura (o traço do nome de crate vira `_` no ficheiro).
+units="$units|vael|vael_editor|vael_content"
 
 freed=0
 count=0
