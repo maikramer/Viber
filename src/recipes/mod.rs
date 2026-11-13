@@ -47,6 +47,16 @@ pub const KNOWN_TAGS: &[&str] = &[
     "cylinder",
     "plane",
     "capsule",
+    // Procedural primitives (bevy_gradmesh): rounded boxes, cones/pyramids,
+    // lathes, sweeps, extruded polygons and tori.
+    "cone",
+    "pyramid",
+    "torus",
+    "lathe",
+    "sweep",
+    "extruded",
+    "extrudedpolygon",
+    "extruded-polygon",
     // Composed objects (`<Composition>`) + prototypes (`<Prototype>`/`<Use>`).
     "composition",
     "prototype",
@@ -176,52 +186,19 @@ impl Default for TransformSpec {
     }
 }
 
-/// Mesh primitive shapes, mirroring the `bevy::math::primitives` constructors.
-#[derive(Debug, Clone)]
-pub enum Shape {
-    /// `Cuboid` — half extents per axis.
-    Cuboid { half_size: [f32; 3] },
-    /// `Sphere` — radius.
-    Sphere { radius: f32 },
-    /// `Cylinder` — half height + radius.
-    Cylinder { half_height: f32, radius: f32 },
-    /// `Plane3d` — half size on the XZ plane.
-    Plane { half_size: [f32; 2] },
-    /// `Capsule` — radius + half height (vertical).
-    Capsule { radius: f32, half_height: f32 },
-}
-
-/// `StandardMaterial` overrides; unset fields use Bevy defaults.
+/// Mesh primitive shapes, re-exported from the shared scene contract
+/// (`bevy_ext_scene::primitives`).
 ///
-/// A chave do cache de materiais do spawn é uma forma canonizada em bits
-/// (`spawn::MaterialKey`) — f32 não é `Eq`/`Hash`, mas duas specs com os
-/// mesmos bits são o mesmo material.
-#[derive(Debug, Clone, Default)]
-pub struct MaterialSpec {
-    pub base_color: Option<[f32; 3]>,
-    pub metallic: Option<f32>,
-    pub roughness: Option<f32>,
-    /// `opacity` (0..1) — abaixo de 1 a parte fica translúcida
-    /// (`AlphaMode::Blend`, `depthWrite` off no renderer); 0 = invisível,
-    /// útil para paredes de colisor puro (o truque `opacity="0"`).
-    pub opacity: Option<f32>,
-    /// `emissive` (#hex) — brilho próprio da parte (vidro de lanterna,
-    /// brasa); independente da luz da cena.
-    pub emissive: Option<[f32; 3]>,
-    /// `texture="/assets/…"`` (ou `texture-url`) — base color map. Os
-    /// fragmentos migrados tinham `texture-url` nas decal
-    /// planes (praça de cobblestone) e o migrador deixou cair o atributo;
-    /// suportar aqui devolve o visual sem tocar no conteúdo.
-    pub texture: Option<String>,
-    /// `texture-tile-size` — metros por repetição da textura (UVs da
-    /// primitiva são 0..1; sem isso a textura estica pela malha toda).
-    pub texture_tile: Option<f32>,
-    /// `normal-map` (ou `normal-map-url`) — mapa de normais em espaço
-    /// tangente do pool, para a primitiva deixar de ser uma superfície lisa.
-    /// Sem isto um soalho/parede texturado lê-se plano: o albedo dá o padrão,
-    /// mas a luz continua a bater numa face perfeitamente lisa.
-    pub normal_map: Option<String>,
-}
+/// The engine parser, the Vael runtime and the Jackdaw preview share ONE
+/// `Shape`/`MaterialSpec`, so a tag cannot mean two different meshes. The
+/// engine spawns a `StandardMaterial` fallback and leaves a
+/// [`bevy_ext_scene::primitives::PrimitivePart`] marker; the game's
+/// `VaelPrimitivesPlugin` replaces the mesh/material (and exact collider)
+/// with the procedural render. `Plane` stays standard (textured decals).
+///
+/// The material cache key in `spawn` is a bit-canonical form of these fields
+/// (f32 is not `Eq`/`Hash`).
+pub use bevy_ext_scene::primitives::{MaterialSpec, PrimitivePart, Shape};
 
 /// `place="at: x z; …"` de uma `<Composition>` — colocação explícita no
 /// terreno, resolvida no arranque por [`crate::worldsys::resolve_pending_place`].
@@ -1395,7 +1372,8 @@ fn parse_entity_kind(node: &XmlNode, ctx: &mut ParseCtx) -> Result<Option<Entity
     let lower = node.tag.to_ascii_lowercase();
     match lower.as_str() {
         "entity" | "group" => finish_group(node, ctx).map(Some),
-        "cuboid" | "box" | "sphere" | "cylinder" | "plane" | "capsule" => {
+        "cuboid" | "box" | "sphere" | "cylinder" | "plane" | "capsule" | "cone" | "pyramid"
+        | "torus" | "lathe" | "sweep" | "extruded" | "extrudedpolygon" | "extruded-polygon" => {
             finish_primitive(node, ctx).map(Some)
         }
         "composition" => finish_composition(node, ctx).map(Some),
@@ -1853,14 +1831,48 @@ fn finish_primitive(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             radius: 0.5,
             half_height: 0.5,
         },
+        "cone" => Shape::Cone {
+            half_height: 0.5,
+            radius: 0.5,
+            roundness: 0.0,
+        },
+        "pyramid" => Shape::Pyramid {
+            sides: 4,
+            radius: 0.5,
+            half_height: 0.5,
+            roundness: 0.0,
+        },
+        "torus" => Shape::Torus {
+            radius: 0.5,
+            thickness: 0.15,
+            start_deg: 0.0,
+            span_deg: 360.0,
+        },
+        "lathe" => Shape::Lathe {
+            profile: Vec::new(),
+            segments: 24,
+        },
+        "sweep" => Shape::Sweep {
+            profile: Vec::new(),
+            path: Vec::new(),
+            closed: false,
+            caps: true,
+        },
+        "extruded" | "extrudedpolygon" | "extruded-polygon" => Shape::Extruded {
+            outer: Vec::new(),
+            holes: Vec::new(),
+            depth: 0.5,
+            roundness: 0.0,
+        },
         _ => unreachable!("finish_primitive called for non-primitive"),
     };
     let mut material = MaterialSpec::default();
+    let mut roundness = 0.0_f32;
     for (key, value) in rest {
         let kctx = format!("{ctx_tag} {key}");
         match key.as_str() {
             "half-size" => match &mut shape {
-                Shape::Cuboid { half_size } => {
+                Shape::Cuboid { half_size } | Shape::RoundedCuboid { half_size, .. } => {
                     *half_size = values::parse_vec3(&value, &kctx)?;
                 }
                 Shape::Plane { half_size } => {
@@ -1873,14 +1885,118 @@ fn finish_primitive(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "radius" => match &mut shape {
                 Shape::Sphere { radius }
                 | Shape::Cylinder { radius, .. }
-                | Shape::Capsule { radius, .. } => *radius = values::parse_f32(&value, &kctx)?,
+                | Shape::Capsule { radius, .. }
+                | Shape::Cone { radius, .. }
+                | Shape::Pyramid { radius, .. }
+                | Shape::Torus { radius, .. } => *radius = values::parse_f32(&value, &kctx)?,
                 _ => ctx
                     .warnings
                     .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
             },
             "half-height" => match &mut shape {
-                Shape::Cylinder { half_height, .. } | Shape::Capsule { half_height, .. } => {
+                Shape::Cylinder { half_height, .. }
+                | Shape::Capsule { half_height, .. }
+                | Shape::Cone { half_height, .. }
+                | Shape::Pyramid { half_height, .. } => {
                     *half_height = values::parse_f32(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            // Subtle bevel on boxes; rounded apex/rim on cones and pyramids;
+            // corner rounding on extruded outlines.
+            "round" => roundness = values::parse_f32(&value, &kctx)?.clamp(0.0, 1.0),
+            "sides" => match &mut shape {
+                Shape::Pyramid { sides, .. } => {
+                    *sides = values::parse_u32(&value, &kctx)?.max(3);
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "thickness" => match &mut shape {
+                Shape::Torus { thickness, .. } => {
+                    *thickness = values::parse_f32(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "start" => match &mut shape {
+                Shape::Torus { start_deg, .. } => {
+                    *start_deg = values::parse_f32(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "span" => match &mut shape {
+                Shape::Torus { span_deg, .. } => {
+                    *span_deg = values::parse_f32(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "segments" => match &mut shape {
+                Shape::Lathe { segments, .. } => {
+                    *segments = values::parse_u32(&value, &kctx)?.max(3);
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            // `(radius, height)` pairs of a lathe; `(x, y)` pairs of a sweep.
+            "profile" => match &mut shape {
+                Shape::Lathe { profile, .. } | Shape::Sweep { profile, .. } => {
+                    *profile = values::parse_vec2_list(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "path" => match &mut shape {
+                Shape::Sweep { path, .. } => {
+                    *path = values::parse_vec3_list(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "closed" => match &mut shape {
+                Shape::Sweep { closed, .. } => *closed = values::parse_bool(&value, &kctx)?,
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "caps" => match &mut shape {
+                Shape::Sweep { caps, .. } => *caps = values::parse_bool(&value, &kctx)?,
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            // Outer contour (XY, flat list of pairs).
+            "points" | "outer" => match &mut shape {
+                Shape::Extruded { outer, .. } => {
+                    *outer = values::parse_vec2_list(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            // `|`-separated contours, each a flat list of pairs.
+            "holes" => match &mut shape {
+                Shape::Extruded { holes, .. } => {
+                    *holes = values::parse_vec2_groups(&value, &kctx)?;
+                }
+                _ => ctx
+                    .warnings
+                    .push(format!("{ctx_tag}: `{key}` does not apply to this shape")),
+            },
+            "depth" => match &mut shape {
+                Shape::Extruded { depth, .. } => {
+                    *depth = values::parse_f32(&value, &kctx)?;
                 }
                 _ => ctx
                     .warnings
@@ -1899,10 +2015,75 @@ fn finish_primitive(node: &XmlNode, ctx: &mut ParseCtx) -> Result<EntitySpec> {
             "texture" | "texture-url" => material.texture = Some(value),
             "texture-tile-size" => material.texture_tile = Some(values::parse_f32(&value, &kctx)?),
             "normal-map" | "normal-map-url" => material.normal_map = Some(value),
+            // Procedural surface preset (wood/stone/cobble/metal/cloth/flat).
+            "preset" | "style" => {
+                material.preset = Some(
+                    bevy_ext_scene::primitives::Preset::from_name(&value).unwrap_or_else(|| {
+                        ctx.warnings.push(format!(
+                            "{ctx_tag}: unknown preset `{value}` (wood|stone|cobblestone|metal|cloth|flat)"
+                        ));
+                        bevy_ext_scene::primitives::Preset::Auto
+                    }),
+                );
+            }
             other => ctx
                 .warnings
                 .push(format!("{ctx_tag}: ignored attribute `{other}`")),
         }
+    }
+    // `round` applies to the shapes that have a rounding parameter.
+    shape = match shape {
+        Shape::Cuboid { half_size } if roundness > 0.0 => Shape::RoundedCuboid {
+            half_size,
+            roundness,
+        },
+        Shape::Cone {
+            half_height,
+            radius,
+            ..
+        } => Shape::Cone {
+            half_height,
+            radius,
+            roundness,
+        },
+        Shape::Pyramid {
+            sides,
+            radius,
+            half_height,
+            ..
+        } => Shape::Pyramid {
+            sides,
+            radius,
+            half_height,
+            roundness,
+        },
+        Shape::Extruded {
+            outer,
+            holes,
+            depth,
+            ..
+        } => Shape::Extruded {
+            outer,
+            holes,
+            depth,
+            roundness,
+        },
+        other => other,
+    };
+    // Procedural shapes need their geometry; a missing profile/path is a
+    // content error, not something to silently drop (the object would vanish
+    // from both the game and the editor preview).
+    match &shape {
+        Shape::Lathe { profile, .. } if profile.len() < 2 => {
+            bail!("{ctx_tag}: a Lathe needs `profile` with at least 2 (radius, height) pairs");
+        }
+        Shape::Sweep { profile, path, .. } if profile.len() < 3 || path.len() < 2 => {
+            bail!("{ctx_tag}: a Sweep needs `profile` (>=3 points) and `path` (>=2 x y z points)");
+        }
+        Shape::Extruded { outer, .. } if outer.len() < 3 => {
+            bail!("{ctx_tag}: an ExtrudedPolygon needs `points` with at least 3 (x y) pairs");
+        }
+        _ => {}
     }
     // Parte de uma `<Composition>` (depth > 0) sem física autoral ganha
     // `ColliderShape::Auto` — colisor EXATO derivado da própria forma no
@@ -6963,6 +7144,162 @@ mod composition_tests {
             panic!("expected primitive");
         };
         assert!(matches!(shape, Shape::Cuboid { half_size } if half_size == [2.0, 1.0, 0.5]));
+    }
+
+    #[test]
+    fn test_rounded_box_tag_uses_the_roundness() {
+        let (spec, w) =
+            parse_one(&node("Box", &[("half-size", "2 1 0.5"), ("round", "0.08")])).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        assert!(matches!(
+            shape,
+            Shape::RoundedCuboid { half_size, roundness }
+                if half_size == [2.0, 1.0, 0.5] && (roundness - 0.08).abs() < 1e-6
+        ));
+    }
+
+    #[test]
+    fn test_cone_pyramid_and_torus_parse() {
+        let (spec, w) = parse_one(&node(
+            "Cone",
+            &[("radius", "1.2"), ("half-height", "2"), ("round", "0.3")],
+        ))
+        .unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        assert!(matches!(
+            shape,
+            Shape::Cone {
+                radius: 1.2,
+                half_height: 2.0,
+                roundness: 0.3
+            }
+        ));
+
+        let (spec, _) = parse_one(&node(
+            "Pyramid",
+            &[("sides", "4"), ("radius", "3"), ("half-height", "1.5")],
+        ))
+        .unwrap();
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        assert!(matches!(shape, Shape::Pyramid { sides: 4, .. }));
+
+        let (spec, _) = parse_one(&node(
+            "Torus",
+            &[("radius", "0.6"), ("thickness", "0.12"), ("span", "180")],
+        ))
+        .unwrap();
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        assert!(matches!(
+            shape,
+            Shape::Torus {
+                span_deg: 180.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_lathe_parses_profile_and_segments() {
+        let (spec, w) = parse_one(&node(
+            "Lathe",
+            &[
+                ("profile", "0.5 0 0.4 1 0.3 2"),
+                ("segments", "16"),
+                ("preset", "stone"),
+            ],
+        ))
+        .unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let EntityKind::Primitive { shape, material } = spec.kind else {
+            panic!("expected primitive");
+        };
+        let Shape::Lathe { profile, segments } = shape else {
+            panic!("expected lathe");
+        };
+        assert_eq!(profile, vec![[0.5, 0.0], [0.4, 1.0], [0.3, 2.0]]);
+        assert_eq!(segments, 16);
+        assert_eq!(
+            material.preset,
+            Some(bevy_ext_scene::primitives::Preset::Stone)
+        );
+    }
+
+    #[test]
+    fn test_sweep_parses_profile_and_path() {
+        let (spec, w) = parse_one(&node(
+            "Sweep",
+            &[
+                ("profile", "-1 0 1 0 1 0.2 -1 0.2 -1 0"),
+                ("path", "0 0 0 0 0 5 0 1 10"),
+            ],
+        ))
+        .unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        let Shape::Sweep {
+            profile,
+            path,
+            closed,
+            caps,
+        } = shape
+        else {
+            panic!("expected sweep");
+        };
+        assert_eq!(profile.len(), 5);
+        assert_eq!(
+            path,
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [0.0, 1.0, 10.0]]
+        );
+        assert!(!closed && caps);
+    }
+
+    #[test]
+    fn test_extruded_polygon_parses_holes() {
+        let (spec, w) = parse_one(&node(
+            "ExtrudedPolygon",
+            &[
+                ("points", "-2 -1 2 -1 2 1 -2 1"),
+                ("holes", "-0.5 -0.5 0.5 -0.5 0.5 0.5 -0.5 0.5"),
+                ("depth", "0.4"),
+            ],
+        ))
+        .unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let EntityKind::Primitive { shape, .. } = spec.kind else {
+            panic!("expected primitive");
+        };
+        let Shape::Extruded {
+            outer,
+            holes,
+            depth,
+            ..
+        } = shape
+        else {
+            panic!("expected extruded polygon");
+        };
+        assert_eq!(outer.len(), 4);
+        assert_eq!(holes.len(), 1);
+        assert!((depth - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_procedural_shape_without_geometry_is_an_error() {
+        let err = parse_one(&node("Lathe", &[("segments", "16")])).unwrap_err();
+        assert!(err.to_string().contains("profile"), "{err}");
+        let err = parse_one(&node("Sweep", &[("profile", "0 0 1 0 1 1")])).unwrap_err();
+        assert!(err.to_string().contains("path"), "{err}");
     }
 
     #[test]

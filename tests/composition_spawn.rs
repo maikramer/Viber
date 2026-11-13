@@ -24,15 +24,6 @@ fn spawn_app() -> App {
     app
 }
 
-/// A mesma app, mas com o store do material gradiente: é o que liga o
-/// caminho `bevy_gradmesh` no spawn (em produção o `GradMeshPlugin` da
-/// engine registra-o).
-fn spawn_app_gradmesh() -> App {
-    let mut app = spawn_app();
-    app.init_asset::<bevy_gradmesh::GradMeshMaterial>();
-    app
-}
-
 fn node(tag: &str, attrs: &[(&str, &str)]) -> XmlNode {
     XmlNode {
         tag: tag.to_string(),
@@ -308,8 +299,8 @@ fn test_world_load_with_include_and_prototype_end_to_end() {
 }
 
 #[test]
-fn test_composition_parts_spawn_as_gradmesh_with_exact_colliders() {
-    let mut app = spawn_app_gradmesh();
+fn test_composition_parts_keep_the_authored_marker_and_standard_fallback() {
+    let mut app = spawn_app();
     let mut comp = node("Composition", &[]);
     comp.children = vec![
         node(
@@ -321,7 +312,7 @@ fn test_composition_parts_spawn_as_gradmesh_with_exact_colliders() {
             &[("half-size", "2 0.1 0.2"), ("base-color", "#8a5a30")],
         ),
         node("Cylinder", &[("radius", "0.3"), ("half-height", "1")]),
-        // `Plane` fica no StandardMaterial (decals/soalhos texturados).
+        // `Plane` stays on the standard material.
         node("Plane", &[("half-size", "2 2")]),
     ];
     spawn_world(&mut app, &[comp]);
@@ -334,54 +325,138 @@ fn test_composition_parts_spawn_as_gradmesh_with_exact_colliders() {
     let kids = children_of(&app, root);
     assert_eq!(kids.len(), 4);
 
-    let grad_material = |app: &App, entity: Entity| {
+    for kid in &kids {
+        assert!(
+            app.world()
+                .get::<viber::recipes::PrimitivePart>(*kid)
+                .is_some(),
+            "primitive carries the authored shape/material marker"
+        );
+        assert!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(*kid)
+                .is_some(),
+            "the engine keeps the standard-material fallback"
+        );
+        assert!(app.world().get::<Mesh3d>(*kid).is_some());
+    }
+    let shape = |entity: Entity| {
         app.world()
-            .get::<MeshMaterial3d<bevy_gradmesh::GradMeshMaterial>>(entity)
-            .map(|material| material.0.id())
+            .get::<viber::recipes::PrimitivePart>(entity)
+            .map(|part| part.shape.clone())
     };
-    assert!(grad_material(&app, kids[0]).is_some(), "Box → gradmesh");
-    assert!(grad_material(&app, kids[1]).is_some(), "Box → gradmesh");
-    assert_eq!(
-        grad_material(&app, kids[0]),
-        grad_material(&app, kids[1]),
-        "mesma cor + mesma forma → material partilhado"
-    );
-    assert_ne!(
-        grad_material(&app, kids[2]),
-        grad_material(&app, kids[0]),
-        "cilindro sem cor → material próprio"
-    );
-    assert!(
-        app.world()
-            .get::<MeshMaterial3d<StandardMaterial>>(kids[3])
-            .is_some(),
-        "Plane continua no StandardMaterial"
-    );
+    assert!(matches!(
+        shape(kids[0]),
+        Some(viber::recipes::Shape::Cuboid { .. })
+    ));
+    assert!(matches!(
+        shape(kids[2]),
+        Some(viber::recipes::Shape::Cylinder { .. })
+    ));
+    assert!(matches!(
+        shape(kids[3]),
+        Some(viber::recipes::Shape::Plane { .. })
+    ));
 
-    // Os colisores são os mesmos: a migração é só de render.
+    // Exact primitive colliders stay in the engine.
     assert!(
         app.world()
             .get::<Collider>(kids[2])
             .and_then(Collider::as_cylinder)
             .is_some(),
-        "cilindro → colisor cilíndrico"
+        "cylinder → cylinder collider"
     );
     for kid in &kids {
-        assert!(
-            app.world().get::<Collider>(*kid).is_some(),
-            "cada parte mantém colisor exato"
-        );
+        assert!(app.world().get::<Collider>(*kid).is_some());
     }
 
-    // Duas boxes de forma igual partilham mesh; o cilindro tem a sua.
+    // Same shape still shares the fallback mesh; same material still shares.
     let mesh_id = |app: &App, entity: Entity| app.world().get::<Mesh3d>(entity).unwrap().0.id();
     assert_eq!(mesh_id(&app, kids[0]), mesh_id(&app, kids[1]));
     assert_ne!(mesh_id(&app, kids[1]), mesh_id(&app, kids[2]));
-    // 2 materiais gradiente (marrom e branco); o Plane não entra na conta.
-    assert_eq!(
-        app.world()
-            .resource::<Assets<bevy_gradmesh::GradMeshMaterial>>()
-            .len(),
-        2
-    );
+}
+#[test]
+fn test_procedural_primitives_keep_the_marker_and_bounds_fallback_colliders() {
+    let mut app = spawn_app();
+    let mut comp = node("Composition", &[]);
+    comp.children = vec![
+        node(
+            "Cone",
+            &[
+                ("radius", "0.6"),
+                ("half-height", "1"),
+                ("base-color", "#8a5a30"),
+                ("preset", "wood"),
+            ],
+        ),
+        node(
+            "Lathe",
+            &[
+                ("profile", "0.6 0 0.5 1 0.4 2"),
+                ("segments", "16"),
+                ("base-color", "#9a948a"),
+            ],
+        ),
+        node(
+            "Sweep",
+            &[
+                ("profile", "-0.5 0 0.5 0 0.5 0.2 -0.5 0.2 -0.5 0"),
+                ("path", "0 0 0 0 0 4 0 1 8"),
+                ("base-color", "#8a8a84"),
+            ],
+        ),
+        node(
+            "ExtrudedPolygon",
+            &[
+                ("points", "-1 -1 1 -1 1 1 -1 1"),
+                ("depth", "0.3"),
+                ("base-color", "#c08040"),
+            ],
+        ),
+        node("Box", &[("half-size", "0.5 0.5 0.5"), ("round", "0.1")]),
+    ];
+    spawn_world(&mut app, &[comp]);
+
+    let root = app
+        .world_mut()
+        .query_filtered::<Entity, With<RigidBody>>()
+        .single(app.world())
+        .expect("composition root");
+    let kids = children_of(&app, root);
+    assert_eq!(kids.len(), 5);
+
+    for kid in &kids {
+        let part = app
+            .world()
+            .get::<viber::recipes::PrimitivePart>(*kid)
+            .expect("procedural part carries the marker");
+        assert!(matches!(
+            part.shape,
+            viber::recipes::Shape::Cone { .. }
+                | viber::recipes::Shape::Lathe { .. }
+                | viber::recipes::Shape::Sweep { .. }
+                | viber::recipes::Shape::Extruded { .. }
+                | viber::recipes::Shape::RoundedCuboid { .. }
+        ));
+        assert!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(*kid)
+                .is_some(),
+            "engine fallback stays standard"
+        );
+        assert!(app.world().get::<Mesh3d>(*kid).is_some());
+        assert!(app.world().get::<Collider>(*kid).is_some());
+    }
+
+    // The engine uses conservative colliders for the procedural shapes; the
+    // game's VaelPrimitivesPlugin replaces them with the exact trimesh.
+    for kid in [kids[1], kids[2], kids[3], kids[4]] {
+        assert!(
+            app.world()
+                .get::<Collider>(kid)
+                .and_then(Collider::as_cuboid)
+                .is_some(),
+            "engine fallback is a bounds cuboid"
+        );
+    }
 }

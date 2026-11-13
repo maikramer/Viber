@@ -599,6 +599,35 @@ pub fn collider_for_shape(shape: &crate::recipes::Shape, scale: Vec3) -> Collide
             (half_height * scale.y).max(1e-3),
             (radius * scale.x.max(scale.z)).max(1e-3),
         ),
+        // Um cubo arredondado colide como o cubo que o contém.
+        crate::recipes::Shape::RoundedCuboid { half_size, .. } => Collider::cuboid(
+            (half_size[0] * scale.x).max(1e-3),
+            (half_size[1] * scale.y).max(1e-3),
+            (half_size[2] * scale.z).max(1e-3),
+        ),
+        crate::recipes::Shape::Cone {
+            half_height,
+            radius,
+            ..
+        } => Collider::cone(
+            (half_height * scale.y).max(1e-3),
+            (radius * scale.x.max(scale.z)).max(1e-3),
+        ),
+        // Formas procedurais sem primitiva Rapier equivalente: um cubo das
+        // bounds como fallback do engine. O jogo (`VaelPrimitivesPlugin`)
+        // substitui-o pelo trimesh exato do `bevy_ext_gradmesh`.
+        crate::recipes::Shape::Pyramid { .. }
+        | crate::recipes::Shape::Lathe { .. }
+        | crate::recipes::Shape::Sweep { .. }
+        | crate::recipes::Shape::Extruded { .. }
+        | crate::recipes::Shape::Torus { .. } => {
+            let bounds = bevy_ext_scene::primitives::bounds(shape);
+            Collider::cuboid(
+                (bounds.half.x * scale.x.abs()).max(1e-3),
+                (bounds.half.y * scale.y.abs()).max(1e-3),
+                (bounds.half.z * scale.z.abs()).max(1e-3),
+            )
+        }
         // Planos XZ: lâmina fina (a mesma convenção do Pad/Plane).
         crate::recipes::Shape::Plane { half_size } => Collider::cuboid(
             (half_size[0] * scale.x).max(1e-3),
@@ -608,6 +637,8 @@ pub fn collider_for_shape(shape: &crate::recipes::Shape, scale: Vec3) -> Collide
     }
 }
 
+/// Multiplies the mesh positions by `scale` in place (used before baking a
+/// procedural shape's collider; the production spawn passes `Vec3::ONE`).
 /// Finishes [`PendingCollider`]s whose glTF has finished loading.
 ///
 /// `Auto` resolves from the rendered bounds of the entity and its whole

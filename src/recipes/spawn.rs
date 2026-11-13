@@ -375,10 +375,6 @@ fn shift_lake(lake: &LakeSpec, offset: Vec2) -> LakeSpec {
 pub struct SpawnStats {
     pub entities: usize,
     pub has_camera: bool,
-    /// Primitivas que nasceram no caminho `bevy_gradmesh`.
-    pub gradmesh_primitives: usize,
-    /// Primitivas que ficaram no `StandardMaterial` (Plane, ou sem plugin).
-    pub standard_primitives: usize,
 }
 
 /// Exclusive startup system: consumes [`PendingWorld`] and builds the scene.
@@ -562,10 +558,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     let mut tiled = world
         .remove_resource::<crate::textures::WorldTiledTextures>()
         .expect("WorldTiledTextures exists before startup systems run");
-    // Opcional: apps mínimas de teste não montam o `GradMeshPlugin`; nesse
-    // caso as primitivas ficam no StandardMaterial (o mesmo comportamento de
-    // antes). Em produção o plugin está no `build_app`.
-    let mut gradmesh_materials = world.remove_resource::<Assets<bevy_gradmesh::GradMeshMaterial>>();
     // `<StaticSpawner>` groups: collect specs and start their template loads;
     // `spawner::instantiate_spawn_groups` places instances once the terrain
     // runtime and the assets are ready.
@@ -628,7 +620,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     }
     let mut stats = SpawnStats::default();
     let mut ambient: Option<GlobalAmbientLight> = None;
-    let gradmesh_detail = gradmesh_detail();
     let (
         hud_elements,
         ui_styles,
@@ -637,9 +628,7 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
         mixer_settings,
         pending_worldsys,
         _sky_request,
-        gradmesh_dropped,
     ) = {
-        let gradmesh_enabled = gradmesh_materials.is_some() && primitives_use_gradmesh();
         let mut ctx = SpawnCtx {
             meshes: &mut meshes,
             materials: &mut materials,
@@ -649,12 +638,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
             tiled: &mut tiled,
             mesh_cache: std::collections::HashMap::new(),
             material_cache: std::collections::HashMap::new(),
-            gradmesh: gradmesh_materials.as_mut(),
-            gradmesh_enabled,
-            gradmesh_detail,
-            gradmesh_meshes: std::collections::HashMap::new(),
-            gradmesh_materials: std::collections::HashMap::new(),
-            gradmesh_dropped_maps: std::collections::BTreeSet::new(),
             mixer: std::cell::RefCell::new(None),
             hud: std::cell::RefCell::new(Vec::new()),
             ui_styles: std::cell::RefCell::new(Vec::new()),
@@ -691,7 +674,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
         let mixer = ctx.mixer.into_inner();
         let pending_worldsys = ctx.worldsys.consume();
         let sky_request = ctx.sky_request.into_inner();
-        let gradmesh_dropped = std::mem::take(&mut ctx.gradmesh_dropped_maps);
         (
             hud_elements,
             ui_styles,
@@ -700,34 +682,8 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
             mixer,
             pending_worldsys,
             sky_request,
-            gradmesh_dropped,
         )
     };
-    if stats.gradmesh_primitives > 0 || stats.standard_primitives > 0 {
-        info!(
-            gradmesh = stats.gradmesh_primitives,
-            standard = stats.standard_primitives,
-            detalhe = ?gradmesh_detail,
-            mapas_ignorados = gradmesh_dropped.len(),
-            "primitivas do mundo"
-        );
-    }
-    if !gradmesh_dropped.is_empty() {
-        let sample: Vec<&str> = gradmesh_dropped
-            .iter()
-            .take(6)
-            .map(String::as_str)
-            .collect();
-        warn!(
-            "gradmesh: material sem amostragem de textura — albedo/normal ignorados: {}{}",
-            sample.join(", "),
-            if gradmesh_dropped.len() > sample.len() {
-                ", …"
-            } else {
-                ""
-            }
-        );
-    }
     if let Some(light) = ambient {
         world.insert_resource(light);
     }
@@ -765,9 +721,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
         world.insert_resource(sky_mats);
         world.insert_resource(asset_server);
         world.insert_resource(tiled);
-        if let Some(gradmesh_materials) = gradmesh_materials {
-            world.insert_resource(gradmesh_materials);
-        }
         return;
     }
     // O relógio do dia e o tempo são do JOGO: só a primeira cena os declara.
@@ -807,9 +760,6 @@ fn spawn_parsed(world: &mut World, pending: PendingWorld, persistent: bool) {
     world.insert_resource(sky_mats);
     world.insert_resource(asset_server);
     world.insert_resource(tiled);
-    if let Some(gradmesh_materials) = gradmesh_materials {
-        world.insert_resource(gradmesh_materials);
-    }
     // Câmara de recurso só quando NÃO há nenhuma (os autoloads trazem a de jogo).
     let any_camera = world
         .query_filtered::<(), With<Camera3d>>()
@@ -876,14 +826,9 @@ pub fn spawn_specs(
     else {
         return Err("spawn_specs: a App não tem os stores de assets do arranque".into());
     };
-    // Opcional (ver `spawn_parsed`): sem o `GradMeshPlugin` as primitivas
-    // continuam no StandardMaterial.
-    let mut gradmesh_materials = world.remove_resource::<Assets<bevy_gradmesh::GradMeshMaterial>>();
     let mut stats = SpawnStats::default();
     let mut ambient = None;
     let roots = {
-        let gradmesh_enabled = gradmesh_materials.is_some() && primitives_use_gradmesh();
-        let gradmesh_detail = gradmesh_detail();
         let mut ctx = SpawnCtx {
             meshes: &mut meshes,
             materials: &mut materials,
@@ -893,12 +838,6 @@ pub fn spawn_specs(
             tiled: &mut tiled,
             mesh_cache: std::collections::HashMap::new(),
             material_cache: std::collections::HashMap::new(),
-            gradmesh: gradmesh_materials.as_mut(),
-            gradmesh_enabled,
-            gradmesh_detail,
-            gradmesh_meshes: std::collections::HashMap::new(),
-            gradmesh_materials: std::collections::HashMap::new(),
-            gradmesh_dropped_maps: std::collections::BTreeSet::new(),
             mixer: std::cell::RefCell::new(None),
             hud: std::cell::RefCell::new(Vec::new()),
             ui_styles: std::cell::RefCell::new(Vec::new()),
@@ -923,9 +862,6 @@ pub fn spawn_specs(
     world.insert_resource(sky_mats);
     world.insert_resource(asset_server);
     world.insert_resource(tiled);
-    if let Some(gradmesh_materials) = gradmesh_materials {
-        world.insert_resource(gradmesh_materials);
-    }
     Ok(roots)
 }
 
@@ -945,9 +881,12 @@ enum MeshKey {
     Capsule(u32, u32),
 }
 
-fn mesh_key(shape: &Shape) -> MeshKey {
+/// Cache key for the engine's standard-material primitive meshes. Procedural
+/// shapes return `None`: the engine draws a bounds-box fallback and the game's
+/// plugin replaces it with the real `bevy_ext_gradmesh` mesh.
+fn mesh_key(shape: &Shape) -> Option<MeshKey> {
     let bits = |v: f32| v.to_bits();
-    match shape {
+    Some(match shape {
         Shape::Cuboid { half_size } => MeshKey::Cuboid(half_size.map(bits)),
         Shape::Sphere { radius } => MeshKey::Sphere(bits(*radius)),
         Shape::Cylinder {
@@ -959,7 +898,15 @@ fn mesh_key(shape: &Shape) -> MeshKey {
             radius,
             half_height,
         } => MeshKey::Capsule(bits(*radius), bits(*half_height)),
-    }
+        // Procedural shapes (and rounded boxes) have no Bevy primitive mesh.
+        Shape::RoundedCuboid { .. }
+        | Shape::Cone { .. }
+        | Shape::Pyramid { .. }
+        | Shape::Torus { .. }
+        | Shape::Lathe { .. }
+        | Shape::Sweep { .. }
+        | Shape::Extruded { .. } => return None,
+    })
 }
 
 /// Chave de cache de materiais: a spec canonizada em bits (f32 não é
@@ -992,35 +939,6 @@ fn material_key(spec: &MaterialSpec, world_tiled: bool) -> MaterialKey {
     }
 }
 
-/// Chave do cache de `GradMeshMaterial`. Ao contrário do [`MaterialKey`], NÃO
-/// inclui o URL das texturas (o material gradiente não as amostra) e inclui o
-/// ruído derivado do `texture-tile-size` — duas primitivas que só diferem no
-/// mapa que o gradiente ignora partilham o mesmo material.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct GradMaterialKey {
-    base_color: Option<[u32; 3]>,
-    metallic: Option<u32>,
-    roughness: Option<u32>,
-    opacity: Option<u32>,
-    emissive: Option<[u32; 3]>,
-    /// Frequência do ruído (`1 / tile`); `None` quando não há textura.
-    noise_scale: Option<u32>,
-}
-
-fn grad_material_key(spec: &MaterialSpec) -> GradMaterialKey {
-    let bits = |v: f32| v.to_bits();
-    GradMaterialKey {
-        base_color: spec.base_color.map(|c| c.map(bits)),
-        metallic: spec.metallic.map(bits),
-        roughness: spec.roughness.map(bits),
-        // `opacity="1"` é opaco, como no StandardMaterial (só < 1 muda o
-        // passe de render); a chave normaliza para não duplicar material.
-        opacity: spec.opacity.filter(|alpha| *alpha < 1.0).map(bits),
-        emissive: spec.emissive.map(|c| c.map(bits)),
-        noise_scale: gradmesh_noise_scale(spec).map(bits),
-    }
-}
-
 /// Borrowed asset handles used while spawning one world.
 struct SpawnCtx<'a> {
     meshes: &'a mut Assets<Mesh>,
@@ -1047,26 +965,6 @@ struct SpawnCtx<'a> {
     mesh_cache: std::collections::HashMap<MeshKey, Handle<Mesh>>,
     /// Cache de materiais por spec exata — mesmo contrato do mesh_cache.
     material_cache: std::collections::HashMap<MaterialKey, Handle<StandardMaterial>>,
-    /// `Assets<GradMeshMaterial>` quando o `GradMeshPlugin` está montado.
-    /// `None` em apps mínimas (testes headless e spawns sem render): as
-    /// primitivas caem no caminho `StandardMaterial` de sempre.
-    gradmesh: Option<&'a mut Assets<bevy_gradmesh::GradMeshMaterial>>,
-    /// `VIBER_PRIMITIVES=standard` devolve as primitivas ao StandardMaterial
-    /// (A/B visual e escape hatch); também falso quando não há assets.
-    gradmesh_enabled: bool,
-    /// Nível de detalhe dos meshes procedurais (`VIBER_PRIMITIVES_DETAIL`).
-    gradmesh_detail: bevy_gradmesh::ShapeDetail,
-    /// Cache de malhas procedurais — `Shape` é `Eq + Hash` por forma+detalhe,
-    /// por isso paredes iguais de uma composition partilham o asset.
-    gradmesh_meshes: std::collections::HashMap<bevy_gradmesh::Shape, Handle<Mesh>>,
-    /// Cache de `GradMeshMaterial` — o estilo não inclui as texturas (que o
-    /// material gradiente não amostra), por isso o key é mais largo que o
-    /// `MaterialKey` do StandardMaterial.
-    gradmesh_materials:
-        std::collections::HashMap<GradMaterialKey, Handle<bevy_gradmesh::GradMeshMaterial>>,
-    /// Mapas albedo/normal que o caminho gradiente ignorou (avisados uma vez
-    /// no fecho do spawn, não por primitiva).
-    gradmesh_dropped_maps: std::collections::BTreeSet<String>,
     mixer: std::cell::RefCell<Option<crate::music::AudioMixerSettings>>,
     /// Deferred HUD screen elements (tag + raw attrs).
     hud: std::cell::RefCell<HudList>,
@@ -1087,39 +985,6 @@ struct SpawnCtx<'a> {
     static_world: bool,
 }
 
-impl SpawnCtx<'_> {
-    /// Malha procedural com dedup por [`bevy_gradmesh::Shape`] (forma +
-    /// detalhe): paredes/pilares iguais de uma composition partilham o asset.
-    fn gradmesh_mesh(&mut self, shape: bevy_gradmesh::Shape) -> Handle<Mesh> {
-        if let Some(handle) = self.gradmesh_meshes.get(&shape) {
-            return handle.clone();
-        }
-        let handle = self.meshes.add(shape.build());
-        self.gradmesh_meshes.insert(shape, handle.clone());
-        handle
-    }
-
-    /// Material gradiente com dedup. Só chamar com `gradmesh_enabled` — a
-    /// invariante é a mesma que liga o campo `gradmesh`.
-    fn gradmesh_material(
-        &mut self,
-        spec: &MaterialSpec,
-    ) -> Handle<bevy_gradmesh::GradMeshMaterial> {
-        let key = grad_material_key(spec);
-        if let Some(handle) = self.gradmesh_materials.get(&key) {
-            return handle.clone();
-        }
-        let style = gradmesh_style(spec, &mut self.gradmesh_dropped_maps);
-        let handle = self
-            .gradmesh
-            .as_deref_mut()
-            .expect("gradmesh_enabled exige Assets<GradMeshMaterial>")
-            .add(style.build());
-        self.gradmesh_materials.insert(key, handle.clone());
-        handle
-    }
-}
-
 /// O mundo carregado é estático (`<world static="true">`) — lido pelo spawn incremental.
 #[derive(Resource, Debug, Clone, Copy, Default, Reflect)]
 #[reflect(Resource)]
@@ -1131,7 +996,12 @@ pub struct StaticWorld(pub bool);
 /// Plane/Cuboid) NÃO entram na cache — `scale_primitive_uvs` assa a
 /// translation do mundo nas UVs.
 fn primitive_mesh_handle(ctx: &mut SpawnCtx, shape: &Shape) -> Handle<Mesh> {
-    let key = mesh_key(shape);
+    let Some(key) = mesh_key(shape) else {
+        // Procedural shape: a conservative bounds box. The game's
+        // `VaelPrimitivesPlugin` swaps in the real gradmesh mesh on the first
+        // update; engine-only runs (QA worlds) keep this fallback.
+        return ctx.meshes.add(fallback_mesh(shape));
+    };
     if let Some(handle) = ctx.mesh_cache.get(&key) {
         return handle.clone();
     }
@@ -1808,63 +1678,52 @@ fn spawn_entity(
             }
         }
         EntityKind::Primitive { shape, material } => {
-            // Caminho novo (default): a primitiva vira um mesh procedural do
-            // `bevy_gradmesh` com material de gradiente. `Plane` fica no
-            // StandardMaterial (decals/soalhos texturados) e as apps mínimas
-            // sem `Assets<GradMeshMaterial>` também — o fallback é silencioso.
-            if ctx.gradmesh_enabled
-                && let Some(grad_shape) = gradmesh_shape(shape, ctx.gradmesh_detail)
-            {
-                let mesh = ctx.gradmesh_mesh(grad_shape);
-                let mat = ctx.gradmesh_material(material);
+            // UV world-space (`texture-tile-size` > 0 em Plane/Cuboid, a
+            // mesma fórmula das ribbons) ⇒ a textura precisa de REPEAT:
+            // registada no `load` para o escritor único de samplers.
+            let world_tiled_uv = material.texture.is_some()
+                && material.texture_tile.is_some_and(|tile| tile > 0.0)
+                && matches!(shape, Shape::Plane { .. } | Shape::Cuboid { .. });
+            if let Some(tile) = material.texture_tile.filter(|_| world_tiled_uv) {
+                // UV world-space: mesh DEDICADO — `scale_primitive_uvs` assa
+                // a translation do mundo nas UVs, por isso decals em sítios
+                // diferentes não podem partilhar o asset (decals no MESMO
+                // sítio partilham material, que é o que alinha o padrão com
+                // as ribbons das estradas).
+                let mut primitive = primitive_mesh(shape);
+                // UVs em coordenadas de MUNDO: o `translation` da spec é
+                // LOCAL. Debaixo de um grupo transladado (ou de um
+                // `<Include translation>`) o padrão começava na origem do
+                // pai e deixava de casar com as ribbons/decals vizinhos.
+                let ancestor = ancestor_xz(entity.world(), parent);
+                scale_primitive_uvs(
+                    &mut primitive,
+                    shape,
+                    tile,
+                    [
+                        spec.transform.translation[0] + ancestor.x,
+                        spec.transform.translation[1],
+                        spec.transform.translation[2] + ancestor.y,
+                    ],
+                );
+                let mesh = ctx.meshes.add(primitive);
+                let mat = material_handle(ctx, material, world_tiled_uv);
                 entity.insert((Mesh3d(mesh), MeshMaterial3d(mat), Visibility::Inherited));
-                // Translúcido continua a desenhar no passe de sombra (só o
-                // alpha-test corta); o contrato do crate é `NotShadowCaster`.
-                if material.opacity.is_some_and(|alpha| alpha < 1.0) {
-                    entity.insert(bevy::light::NotShadowCaster);
-                }
-                stats.gradmesh_primitives += 1;
             } else {
-                stats.standard_primitives += 1;
-                // UV world-space (`texture-tile-size` > 0 em Plane/Cuboid, a
-                // mesma fórmula das ribbons) ⇒ a textura precisa de REPEAT:
-                // registada no `load` para o escritor único de samplers.
-                let world_tiled_uv = material.texture.is_some()
-                    && material.texture_tile.is_some_and(|tile| tile > 0.0)
-                    && matches!(shape, Shape::Plane { .. } | Shape::Cuboid { .. });
-                if let Some(tile) = material.texture_tile.filter(|_| world_tiled_uv) {
-                    // UV world-space: mesh DEDICADO — `scale_primitive_uvs` assa
-                    // a translation do mundo nas UVs, por isso decals em sítios
-                    // diferentes não podem partilhar o asset (decals no MESMO
-                    // sítio partilham material, que é o que alinha o padrão com
-                    // as ribbons das estradas).
-                    let mut primitive = primitive_mesh(shape);
-                    // UVs em coordenadas de MUNDO: o `translation` da spec é
-                    // LOCAL. Debaixo de um grupo transladado (ou de um
-                    // `<Include translation>`) o padrão começava na origem do
-                    // pai e deixava de casar com as ribbons/decals vizinhos.
-                    let ancestor = ancestor_xz(entity.world(), parent);
-                    scale_primitive_uvs(
-                        &mut primitive,
-                        shape,
-                        tile,
-                        [
-                            spec.transform.translation[0] + ancestor.x,
-                            spec.transform.translation[1],
-                            spec.transform.translation[2] + ancestor.y,
-                        ],
-                    );
-                    let mesh = ctx.meshes.add(primitive);
-                    let mat = material_handle(ctx, material, world_tiled_uv);
-                    entity.insert((Mesh3d(mesh), MeshMaterial3d(mat), Visibility::Inherited));
-                } else {
-                    // Cache por forma+dimensões/spec: paredes iguais de uma
-                    // composition, instâncias de um protótipo — um asset só.
-                    let mesh = primitive_mesh_handle(ctx, shape);
-                    let mat = material_handle(ctx, material, false);
-                    entity.insert((Mesh3d(mesh), MeshMaterial3d(mat), Visibility::Inherited));
-                }
+                // Cache por forma+dimensões/spec: paredes iguais de uma
+                // composition, instâncias de um protótipo — um asset só.
+                let mesh = primitive_mesh_handle(ctx, shape);
+                let mat = material_handle(ctx, material, false);
+                entity.insert((Mesh3d(mesh), MeshMaterial3d(mat), Visibility::Inherited));
             }
+            // Bridge until the Vael owns the world spawner: the engine leaves
+            // the StandardMaterial fallback + the authored shape; the
+            // `VaelPrimitivesPlugin` swaps in the procedural mesh/material and
+            // the exact collider (bevy_ext_gradmesh). `Plane` stays standard.
+            entity.insert(bevy_ext_scene::primitives::PrimitivePart {
+                shape: shape.clone(),
+                material: material.clone(),
+            });
         }
         EntityKind::PointLight {
             color,
@@ -2397,114 +2256,23 @@ fn build_transform(spec: &TransformSpec) -> Transform {
     t
 }
 
-/// `VIBER_PRIMITIVES=standard|std|0|false|off` devolve as primitivas ao
-/// `StandardMaterial` antigo (A/B visual e escape hatch). O default usa o
-/// gradmesh quando o plugin está montado.
-fn primitives_use_gradmesh() -> bool {
-    !matches!(
-        std::env::var("VIBER_PRIMITIVES").ok().as_deref(),
-        Some("standard" | "std" | "0" | "false" | "off")
-    )
-}
-
-/// Detalhe dos meshes procedurais. `High` (24 segmentos) fica próximo do
-/// `Sphere`/`Cylinder` default do Bevy (32) com menos triângulos; o gate
-/// `VIBER_PRIMITIVES_DETAIL` permite o A/B sem recompilar.
-fn gradmesh_detail() -> bevy_gradmesh::ShapeDetail {
-    use bevy_gradmesh::ShapeDetail;
-    match std::env::var("VIBER_PRIMITIVES_DETAIL").ok().as_deref() {
-        Some("minimal") => ShapeDetail::Minimal,
-        Some("low") => ShapeDetail::Low,
-        Some("medium") => ShapeDetail::Medium,
-        Some("extreme") => ShapeDetail::Extreme,
-        _ => ShapeDetail::High,
-    }
-}
-
-/// Converte a primitiva autoral no [`bevy_gradmesh::Shape`] correspondente.
-///
-/// `Plane` fica de fora (devolve `None`): o crate não tem plano infinito e a
-/// aproximação por cubo fino mudaria o z-fighting e o tiling dos decals —
-/// esses continuam no `StandardMaterial`, texturas incluídas.
-fn gradmesh_shape(
-    shape: &Shape,
-    detail: bevy_gradmesh::ShapeDetail,
-) -> Option<bevy_gradmesh::Shape> {
-    use bevy_gradmesh::Shape as GradShape;
-    Some(match *shape {
-        Shape::Cuboid { half_size } => GradShape::cuboid(
-            Vec3::new(half_size[0], half_size[1], half_size[2]) * 2.0,
-            0.0,
-            detail,
-        ),
-        Shape::Sphere { radius } => GradShape::sphere(radius, detail),
-        Shape::Cylinder {
-            half_height,
-            radius,
-        } => GradShape::cylinder(radius, half_height * 2.0, detail),
-        Shape::Capsule {
-            radius,
-            half_height,
-        } => GradShape::capsule(
-            radius,
-            // O gradmesh conta a ALTURA total (tampas incluídas); o
-            // `half_height` do XML/Rapier é a meia-altura do troço
-            // cilíndrico, como no `Capsule3d::new(radius, length)`.
-            half_height * 2.0 + radius * 2.0,
-            detail,
-        ),
-        Shape::Plane { .. } => return None,
-    })
-}
-
-/// Frequência do ruído que substitui o grão do albedo perdido: uma célula por
-/// tile de textura. `None` sem textura (superfície lisa de propósito).
-fn gradmesh_noise_scale(spec: &MaterialSpec) -> Option<f32> {
-    let has_map = spec.texture.is_some() || spec.normal_map.is_some();
-    has_map.then(|| {
-        let tile = spec.texture_tile.filter(|tile| *tile > 0.0).unwrap_or(1.0);
-        1.0 / tile
-    })
-}
-
-/// Traduz o [`MaterialSpec`] autoral num [`bevy_gradmesh::Style`].
-///
-/// O material gradiente não amostra texturas: `texture`/`normal-map` entram
-/// no aviso de mapas ignorados (uma vez por URL no fecho do spawn) e o
-/// `texture-tile-size` vira um ruído ligeiro para a superfície não ficar
-/// morta. Cor, roughness, metallic, emissive e opacidade são preservados.
-fn gradmesh_style(
-    spec: &MaterialSpec,
-    dropped_maps: &mut std::collections::BTreeSet<String>,
-) -> bevy_gradmesh::Style {
-    let [red, green, blue] = spec.base_color.unwrap_or([1.0, 1.0, 1.0]);
-    let color = Color::srgb(red, green, blue);
-    let mut style = match spec.opacity {
-        // Só `opacity < 1` muda o passe (Blend); `1` é opaco.
-        Some(alpha) if alpha < 1.0 => {
-            bevy_gradmesh::Style::transparent(color).with_alpha(alpha.clamp(0.0, 1.0))
-        }
-        _ => bevy_gradmesh::Style::opaque(color),
-    };
-    if let Some(v) = spec.roughness {
-        style = style.with_perceptual_roughness(v.clamp(0.0, 1.0));
-    }
-    if let Some(v) = spec.metallic {
-        style = style.with_metallic(v.clamp(0.0, 1.0));
-    }
-    if let Some([red, green, blue]) = spec.emissive {
-        style = style.with_emissive(LinearRgba::rgb(red, green, blue));
-    }
-    if let Some(scale) = gradmesh_noise_scale(spec) {
-        style = style.with_noise(scale, 0.10);
-    }
-    for url in [spec.texture.as_ref(), spec.normal_map.as_ref()]
-        .into_iter()
-        .flatten()
+fn fallback_mesh(shape: &Shape) -> Mesh {
+    let bounds = bevy_ext_scene::primitives::bounds(shape);
+    let half = bounds.half.max(Vec3::splat(1e-3));
+    let mut mesh = Mesh::from(Cuboid::new(half.x * 2.0, half.y * 2.0, half.z * 2.0));
+    // The bounds may be off-centre (lathe profile, sweep path): bake the
+    // centre into the positions so the fallback sits where the real mesh will.
+    if bounds.center != Vec3::ZERO
+        && let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
     {
-        dropped_maps.insert(url.clone());
+        for position in positions {
+            position[0] += bounds.center.x;
+            position[1] += bounds.center.y;
+            position[2] += bounds.center.z;
+        }
     }
-    style
+    mesh
 }
 
 fn primitive_mesh(shape: &Shape) -> Mesh {
@@ -2527,6 +2295,9 @@ fn primitive_mesh(shape: &Shape) -> Mesh {
             radius,
             half_height,
         } => Mesh::from(Capsule3d::new(*radius, *half_height * 2.0)),
+        // Procedural shapes: a conservative bounds box until the game's
+        // plugin swaps in the real mesh.
+        other => fallback_mesh(other),
     }
 }
 
@@ -2908,11 +2679,6 @@ pub fn apply_script_spawns(world: &mut World) {
         .remove_resource::<crate::textures::WorldTiledTextures>()
         .expect("WorldTiledTextures");
     let game_config = world.get_resource::<crate::config::GameConfig>().cloned();
-    // Opcional (ver `spawn_parsed`): sem o `GradMeshPlugin` as primitivas
-    // continuam no StandardMaterial.
-    let mut gradmesh_materials = world.remove_resource::<Assets<bevy_gradmesh::GradMeshMaterial>>();
-    let gradmesh_enabled = gradmesh_materials.is_some() && primitives_use_gradmesh();
-    let gradmesh_detail = gradmesh_detail();
     let mut ctx = SpawnCtx {
         meshes: &mut meshes,
         materials: &mut materials,
@@ -2922,12 +2688,6 @@ pub fn apply_script_spawns(world: &mut World) {
         tiled: &mut tiled,
         mesh_cache: std::collections::HashMap::new(),
         material_cache: std::collections::HashMap::new(),
-        gradmesh: gradmesh_materials.as_mut(),
-        gradmesh_enabled,
-        gradmesh_detail,
-        gradmesh_meshes: std::collections::HashMap::new(),
-        gradmesh_materials: std::collections::HashMap::new(),
-        gradmesh_dropped_maps: std::collections::BTreeSet::new(),
         mixer: std::cell::RefCell::new(None),
         hud: std::cell::RefCell::new(Vec::new()),
         ui_styles: std::cell::RefCell::new(Vec::new()),
@@ -2993,9 +2753,6 @@ pub fn apply_script_spawns(world: &mut World) {
     world.insert_resource(sky_mats);
     world.insert_resource(asset_server);
     world.insert_resource(tiled);
-    if let Some(gradmesh_materials) = gradmesh_materials {
-        world.insert_resource(gradmesh_materials);
-    }
     world.insert_resource(pending);
     // Callbacks Lua: ctx seedado à entidade nova, argumento = bits.
     if !spawned.is_empty() {
@@ -3020,134 +2777,6 @@ pub fn apply_script_spawns(world: &mut World) {
                 warn!(target: "viber::luau", "viber.spawn_prototype callback: {e}");
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod gradmesh_tests {
-    use super::*;
-
-    fn spec_with_maps() -> MaterialSpec {
-        MaterialSpec {
-            base_color: Some([0.5, 0.25, 0.1]),
-            metallic: Some(0.6),
-            roughness: Some(0.35),
-            opacity: Some(0.25),
-            emissive: Some([1.0, 0.5, 0.0]),
-            texture: Some("/assets/stone/albedo.ktx2".into()),
-            texture_tile: Some(2.0),
-            normal_map: Some("/assets/stone/normal.ktx2".into()),
-        }
-    }
-
-    #[test]
-    fn shape_conversion_keeps_the_authored_dimensions() {
-        use bevy_gradmesh::ShapeDetail;
-        let detail = ShapeDetail::Low;
-
-        let cuboid = gradmesh_shape(
-            &Shape::Cuboid {
-                half_size: [2.0, 0.1, 0.2],
-            },
-            detail,
-        )
-        .expect("cuboid has a gradmesh equivalent");
-        assert_eq!(cuboid.bounds().size(), Vec3::new(4.0, 0.2, 0.4));
-
-        let cylinder = gradmesh_shape(
-            &Shape::Cylinder {
-                half_height: 1.5,
-                radius: 0.4,
-            },
-            detail,
-        )
-        .expect("cylinder has a gradmesh equivalent");
-        let size = cylinder.bounds().size();
-        assert!((size.x - 0.8).abs() < 1e-3, "diâmetro veio {}", size.x);
-        assert!((size.y - 3.0).abs() < 1e-3, "altura veio {}", size.y);
-
-        // `half_height` é o troço cilíndrico (como no `Capsule3d::new`); o
-        // gradmesh conta a altura TOTAL, tampas incluídas: 2*1 + 2*0.5 = 3.
-        let capsule = gradmesh_shape(
-            &Shape::Capsule {
-                radius: 0.5,
-                half_height: 1.0,
-            },
-            detail,
-        )
-        .expect("capsule has a gradmesh equivalent");
-        let size = capsule.bounds().size();
-        assert!((size.y - 3.0).abs() < 1e-3, "altura veio {}", size.y);
-
-        // `Plane` fica no StandardMaterial (decals/soalhos texturados).
-        assert!(
-            gradmesh_shape(
-                &Shape::Plane {
-                    half_size: [1.0, 1.0],
-                },
-                detail
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn style_keeps_the_material_fields_and_drops_the_maps() {
-        let mut dropped = std::collections::BTreeSet::new();
-        let style = gradmesh_style(&spec_with_maps(), &mut dropped);
-
-        let color = style.color.to_srgba();
-        assert!((color.red - 0.5).abs() < 1e-6);
-        assert!((color.green - 0.25).abs() < 1e-6);
-        assert!((color.blue - 0.1).abs() < 1e-6);
-        assert!((color.alpha - 0.25).abs() < 1e-6, "opacity → alpha");
-        assert_eq!(style.blend_mode, bevy_gradmesh::BlendMode::Transparent);
-        assert_eq!(style.perceptual_roughness, Some(0.35));
-        assert!((style.metallic - 0.6).abs() < 1e-6);
-        assert_eq!(
-            style.emissive,
-            Some(LinearRgba::rgb(1.0, 0.5, 0.0)),
-            "emissive preservado"
-        );
-        assert_eq!(
-            style.noise.map(|noise| noise.scale),
-            Some(0.5),
-            "1 / texture-tile-size"
-        );
-        assert_eq!(dropped.len(), 2, "albedo + normal entram no aviso");
-    }
-
-    #[test]
-    fn material_key_ignores_the_maps_the_gradient_cannot_sample() {
-        let a = MaterialSpec {
-            texture: Some("/assets/a.ktx2".into()),
-            texture_tile: Some(2.0),
-            ..Default::default()
-        };
-        let b = MaterialSpec {
-            texture: Some("/assets/b.ktx2".into()),
-            texture_tile: Some(2.0),
-            ..Default::default()
-        };
-        assert_eq!(grad_material_key(&a), grad_material_key(&b));
-        let c = MaterialSpec {
-            texture_tile: Some(4.0),
-            ..Default::default()
-        };
-        assert_ne!(
-            grad_material_key(&a),
-            grad_material_key(&c),
-            "tile diferente → ruído diferente"
-        );
-    }
-
-    #[test]
-    fn opaque_material_needs_no_not_shadow_caster() {
-        let mut dropped = std::collections::BTreeSet::new();
-        let style = gradmesh_style(&MaterialSpec::default(), &mut dropped);
-        assert_eq!(style.blend_mode, bevy_gradmesh::BlendMode::Opaque);
-        assert!(!style.is_translucent());
-        assert!(style.casts_shadows());
     }
 }
 

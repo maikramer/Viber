@@ -51,6 +51,27 @@ re-exporta as paths antigas. `bevy_audio_buses` fica para a onda seguinte:
 `luau::sfx`; mover os ficheiros arrastaria o runtime. O próximo passo é
 inverter essas dependências, não mover o código como está.
 
+## 2026-11-13 — feature `terrain` do `bevy_ext_world`
+
+O dep `bevy_world_xml` liga a feature `terrain` do `bevy_ext_world`
+(`Cargo.toml:42`): o loader de `.bsn` devolve os componentes
+`bevy_ext_terrain::voxel::*` à vista DSL — o `VoxelTerrain` funde
+`heightmap`/`world-size`/`max-height` no `<Terrain>` (o componente ganha aos
+homónimos) e as entidades com `VoxelCave`/`VoxelArch`/`VoxelBridge`/
+`VoxelCliff` tornam-se nós `<Cave>`/`<Arch>`/`<Bridge>`/`<Cliff>` (caves com
+`<Chamber>`/`<Shaft>` dentro). As features criadas pelo editor como filhas da
+âncora sobem a **irmãs** na vista: o parser trata as features de solo como
+folhas e ignora os filhos do `<Terrain>`. O parser/recipes do Viber **não
+mudam**; é o mesmo padrão do `specs::apply_specs` para os componentes do
+`bevy_ext_scene`.
+
+A migração dos mundos é `bsn_migrate --terrain` no `bevy_ext_world`
+(âncora + `<Cave>`/`<Arch>`/`<Cliff>` → componente, só quando a ida-e-volta é
+exacta por valor) e o gate é o `bsn_equiv` com a feature ligada — as features
+comparam ausente ⇔ default do spec, bools por valor (`talus="1"` ==
+`"true"`), `"2.0"` == `"2"` e o `width`/`span` do arco são o mesmo attr. O
+Vael está todo migrado (âncora + 5 caves + 3 arcos + 14 cliffs).
+
 ## Adotados nesta ronda
 
 | Crate | Versão | Substitui | Notas |
@@ -61,28 +82,22 @@ inverter essas dependências, não mover o código como está.
 | `notify` | 8.2 | — (feature nova) | Hot-reload de scripts Luau: `src/hot_reload.rs`, watcher recursivo sobre `<mundo>/scripts/`, debounce 250 ms, erro de compilação mantém o chunk antigo. `VIBER_HOT_RELOAD=0` desliga. |
 | `bevy_kira_audio` | 0.27.1 (kira 0.12; era 0.26, depois rc.1) | `bevy_audio`/rodio como backend de playback | Buses tipados `MusicBus`/`SfxBus` (`crate::music`); `mixer_sync` empurra o `AudioMixerSettings` (save/menu/XML) para os canais — volumes respondem AO VIVO, mesmo em one-shots a meio. Crossfade `fade_step` preservado em linear (testes intactos); conversão `linear_to_db` só na fronteira. Jitter de pitch via `with_playback_rate`. Cachoeiras/água/chuva/BGM todos no bus SFX/Music. |
 | `serde_yaml` | 0.9 | parsing do `config.yaml` do jogo (`src/config.rs`) | Contrato de paths lido em runtime (roots/bgm/sfx/texturas/scripts/ui/save). Arquivada (dtolnay) mas congelada-estável e é o parser de referência; ~1 dep transitiva (`unsafe-libyaml`). Chaves desconhecidas avisam e não partem o parse. |
-| `bevy_gradmesh` | **=0.3.7** (pin exato) | `Mesh::from(Cuboid/Sphere/Cylinder/Capsule)` + `StandardMaterial` nas primitivas de `<Composition>` | Meshes watertight com `ShapeDetail` e `GradMeshMaterial` (ExtendedMaterial PBR). `recipes::spawn` converte `Box`/`Sphere`/`Cylinder`/`Capsule`; `Plane` fica no StandardMaterial (decals/soalhos texturados). Os colisores Rapier não mudam. **O material gradiente não amostra texturas**: albedo/normal são ignorados e `texture-tile-size` vira ruído (`gradmesh_style`); o fecho do spawn avisa os URLs ignorados. `VIBER_PRIMITIVES=standard` volta ao caminho antigo; `VIBER_PRIMITIVES_DETAIL=minimal|low|medium|high|extreme` escolhe o detalhe (default `high`, 24 segmentos). Pin exato porque o crate teve 25 releases em 13 dias (0.3.x) — subir é decisão explícita. |
+| `bevy_ext_scene` | path `../bevy_extensions/crates/bevy_ext_scene` | — (contrato partilhado) | Componentes de cena tipados e o contrato de **primitivas** (`Shape`, `MaterialSpec`, `Preset`, parser de atributos e `PrimitivePart`). O parser do Viber usa estes tipos e deixa um fallback `StandardMaterial` + o marcador; o render procedural (`bevy_gradmesh`: lathe/sweep/extruded, presets, gradiente por vértices, trimesh) vive no crate **Vael** (`VaelPrimitivesPlugin`) e no preview do Jackdaw. A engine já **não** depende de `bevy_gradmesh`; o pin `=0.3.9` está no `bevy_ext_gradmesh`. |
 | `dlss_wgpu` | 6.0.0 (via `bevy/dlss`, feature `dlss` do Viber) | — (feature nova) | DLSS Super Resolution nativo do Bevy 0.20 (Linux/Vulkan). **NÃO-default**: o build com `--features dlss` exige o SDK da NVIDIA (`DLSS_SDK` → clone de github.com/NVIDIA/DLSS tag v310.9.1; `VULKAN_SDK` com headers + libclang para o bindgen) e em runtime a `libnvidia-ngx-dlss.so.310.9.1` junto ao binário (rpath `$ORIGIN` no `.cargo/config.toml`). Gate em `src/dlss.rs` (`VIBER_DLSS` > config.yaml `dlss:` > auto). Pin `prettyplease` 0.2.37 RETIRADO (2026-10-18): o lock resolve `bindgen 0.73.2` + `prettyplease 0.3` sem âncora. |
 
 O `bevy_audio`/rodio do Bevy fica compilado (tirar a feature do `bevy` exige
 re-listar ~20 features default — frágil); NENHUM som nasce por ele —
 `AudioPlayer`/`PlaybackSettings` deixaram de ser usados em runtime.
 
-### `bevy_gradmesh`: limites da v1
+### Primitivas: o render saiu da engine
 
-O material gradiente calcula o progresso do gradiente relativo a
-`world_center` (uniforme do material, default a origem do mundo). Num objeto
-longe da origem — o caso do Vael, a ~40–140 m de cota — um `Style::shaded`
-ficaria todo no extremo claro/escuro. Por isso a v1 usa **cor única**
-(`opaque`/`transparent`) com os campos PBR preservados; o ruído/stripes do
-crate (que usam o espaço local da entidade) continuam disponíveis e são o que
-substitui o grão do albedo perdido. Para ligar gradientes por objeto seria
-preciso um `GradMeshMaterial` por entidade com `with_gradient_bounds` — fica
-como follow-up (custa o dedup de materiais e o batching).
-
-`GradMeshMaterial` translúcido continua a desenhar no passe de sombra (só o
-alpha-test corta), por isso as primitivas com `opacity < 1` levam
-`NotShadowCaster`, como manda o contrato do crate.
+O Viber só faz o parse da DSL; `Shape`/`MaterialSpec` vêm do
+`bevy_ext_scene::primitives` e cada primitiva nasce com um fallback
+`StandardMaterial` + `PrimitivePart`. O `VaelPrimitivesPlugin`
+(`../Vael/src/primitives.rs`) troca a malha, o material e o colisor pelo
+`bevy_ext_gradmesh` (feature `physics` para o trimesh exato); o preview do
+Jackdaw usa o mesmo crate. Gates de render: `VAEL_PRIMITIVES=standard` e
+`VAEL_PRIMITIVES_DETAIL`. Detalhe em `../Vael/docs/PRIMITIVES.md`.
 
 ## Forks vendored para o Bevy 0.20 (2026-09-25; bevy oficial 2026-10-09)
 

@@ -709,12 +709,6 @@ pub fn build_app_with_world(path: &Path, world: ParsedWorld, opts: AppOptions) -
     app.add_plugins(bevy::pbr::MaterialPlugin::<
         terrain::layer_material::TerrainChunkMaterial,
     >::default());
-    // Primitivas procedurais das `<Composition>` (`recipes::spawn`): o plugin
-    // registra `GradMeshMaterial` (ExtendedMaterial sobre o StandardMaterial)
-    // e embute o shader. Sem ele `Assets<GradMeshMaterial>` não existe e o
-    // spawn cai no caminho StandardMaterial antigo — é também o que mantém os
-    // testes headless (apps mínimas, sem render) a funcionar.
-    app.add_plugins(bevy_gradmesh::GradMeshPlugin);
     app.add_plugins(animation::AnimationPlugin);
     app.add_plugins(crate::decal_fx::DecalFxPlugin);
     app.add_plugins(ik::IkPlugin);

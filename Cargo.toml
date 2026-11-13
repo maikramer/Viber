@@ -39,11 +39,15 @@ anyhow = "1.0"
 # mantêm os nomes históricos (`bevy_engine_core`, `bevy_world_xml`,
 # `bevy_save_slots`) nos imports do root durante a transição.
 bevy_engine_core = { package = "bevy_ext_core", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_core" }
-bevy_world_xml = { package = "bevy_ext_world", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_world" }
+bevy_world_xml = { package = "bevy_ext_world", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_world", features = ["terrain"] }
 bevy_save_slots = { package = "bevy_ext_save", version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_save" }
 # Decoder GLB (meshopt/quantização/basisu) e núcleo voxel/transvoxel.
 bevy_ext_gltf = { version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_gltf" }
 bevy_voxel_terrain = { version = "0.1.0", path = "../bevy_extensions/crates/bevy_voxel_terrain" }
+# Contrato de primitivas (Shape/MaterialSpec/PrimitivePart). O render
+# procedural (bevy_gradmesh) vive no crate `vael` e no preview do Jackdaw;
+# o Viber só faz o parse e deixa um fallback StandardMaterial.
+bevy_ext_scene = { version = "0.1.0", path = "../bevy_extensions/crates/bevy_ext_scene" }
 base64 = "0.23"
 # `basis-universal` transcodes the KTX2/UASTC textures the asset pipeline
 # bakes into its GLBs (`KHR_texture_basisu`); without it those textures are
@@ -99,13 +103,6 @@ bevy_rapier3d = { version = "0.37", default-features = false, features = [
     "async-collider",
     "debug-render-3d",
 ] }
-# Primitivas/composições procedurais (`<Box>`/`<Cylinder>`/`<Sphere>`/…):
-# meshes watertight com nível de detalhe e material PBR de gradiente. O crate
-# fixa `bevy ^0.20`, a mesma versão da engine, por isso as features unificam.
-# Pin EXACTO: foram 25 releases em 13 dias (0.3.x) — a API ainda muda de
-# semana para semana; subir é uma decisão explícita (docs/CRATES.md).
-bevy_gradmesh = "=0.3.7"
-
 # Luau scripting runtime (`src/luau.rs`). `luau` = sandboxed Luau VM;
 # `vendored` builds the VM from source (needs a C++ toolchain);
 # `send` makes `Lua: Send + Sync` so `LuaScriptHost` can live in a Bevy
